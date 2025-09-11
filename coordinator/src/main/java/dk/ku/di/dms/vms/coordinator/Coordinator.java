@@ -220,10 +220,10 @@ public final class Coordinator extends ModbHttpServer {
                 this.group = AsynchronousChannelGroup.withThreadPool(Executors.newWorkStealingPool(options.getNetworkThreadPoolSize()));
                 this.serverSocket = AsynchronousServerSocketChannel.open(this.group);
             } else {
-            /* may lead to better performance than default group
-            this.group = AsynchronousChannelGroup.withThreadPool(ForkJoinPool.commonPool());
-            this.serverSocket = AsynchronousServerSocketChannel.open(this.group);
-             */
+                /* may lead to better performance than default group
+                this.group = AsynchronousChannelGroup.withThreadPool(ForkJoinPool.commonPool());
+                this.serverSocket = AsynchronousServerSocketChannel.open(this.group);
+                 */
                 this.group = null;
                 this.serverSocket = AsynchronousServerSocketChannel.open();
             }

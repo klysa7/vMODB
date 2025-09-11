@@ -24,7 +24,7 @@ public final class InventoryHttpHandler extends DefaultHttpHandler {
     @Override
     public Object getAsJson(String uri) throws RuntimeException {
         String[] uriSplit = uri.split("/");
-        String table = uriSplit[uriSplit.length - 1];
+        String table = uriSplit.length > 1 ? uriSplit[1] : "";
         switch (table){
             case "item" -> {
                 int itemId = Integer.parseInt(uriSplit[uriSplit.length - 1]);

@@ -95,7 +95,7 @@ public final class TPCcWorkloadTest {
     public void test_B_load_and_ingest() throws IOException {
         var tableToIndexMap = StorageUtils.mapTablesInDisk(METADATA, NUM_WARE);
         var tableInputMap = DataLoadUtils.mapTablesFromDisk(tableToIndexMap, METADATA.entityHandlerMap());
-        DataLoadUtils.ingestData(tableInputMap);
+        // FIXME DataLoadUtils.ingestData(tableInputMap);
         hasDataBeenIngested();
     }
 

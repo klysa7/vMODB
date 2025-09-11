@@ -34,21 +34,18 @@
             <groupId>dk.ku.di.dms.vms.tpcc</groupId>
             <artifactId>warehouse-tpcc</artifactId>
             <version>1.0-SNAPSHOT</version>
-            <scope>test</scope>
         </dependency>
 
         <dependency>
             <groupId>dk.ku.di.dms.vms.tpcc</groupId>
             <artifactId>inventory-tpcc</artifactId>
             <version>1.0-SNAPSHOT</version>
-            <scope>test</scope>
         </dependency>
 
         <dependency>
             <groupId>dk.ku.di.dms.vms.tpcc</groupId>
             <artifactId>order-tpcc</artifactId>
-            <version>${project.version}</version>
-            <scope>test</scope>
+            <version>1.0-SNAPSHOT</version>
         </dependency>
 
     </dependencies>

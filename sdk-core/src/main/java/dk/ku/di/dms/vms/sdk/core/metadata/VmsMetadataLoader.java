@@ -44,7 +44,7 @@ public final class VmsMetadataLoader {
 
     private VmsMetadataLoader(){}
 
-    private static final System.Logger logger = System.getLogger(VmsMetadataLoader.class.getName());
+    private static final System.Logger LOGGER = System.getLogger(VmsMetadataLoader.class.getName());
 
     /**
      * For tests that do not involve repositories (i.e., application code execution)
@@ -192,7 +192,7 @@ public final class VmsMetadataLoader {
             // get queue name
             String queue = eventToQueueMap.get( eventClazz );
             if(queue == null){
-                logger.log(WARNING, "Cannot find the queue of an event type found in this project: "+eventClazz);
+                LOGGER.log(WARNING, "Cannot find the queue of an event type found in this project: "+eventClazz);
                 continue;
             }
 
@@ -607,7 +607,7 @@ public final class VmsMetadataLoader {
             return DataType.STRING_ARRAY;
         }
         else {
-            logger.log(DEBUG, attributeCanonicalName + " will be recognized as a complex data type");
+            LOGGER.log(DEBUG, attributeCanonicalName + " will be recognized as a complex data type");
             return DataType.COMPLEX;
         }
     }

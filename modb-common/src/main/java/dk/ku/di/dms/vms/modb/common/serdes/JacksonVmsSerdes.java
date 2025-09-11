@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.MapperFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.databind.json.JsonMapper;
 import dk.ku.di.dms.vms.modb.common.schema.VmsDataModel;
 import dk.ku.di.dms.vms.modb.common.schema.VmsEventSchema;
 import dk.ku.di.dms.vms.modb.common.schema.network.node.IdentifiableNode;
@@ -15,9 +16,10 @@ import java.util.Set;
 
 final class JacksonVmsSerdes implements IVmsSerdesProxy {
 
-    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper().
-            configure(MapperFeature.AUTO_DETECT_GETTERS, false)
+    private static final ObjectMapper OBJECT_MAPPER = JsonMapper.builder()
+            .configure(MapperFeature.AUTO_DETECT_GETTERS, false)
             .configure(DeserializationFeature.ACCEPT_FLOAT_AS_INT, true)
+            .build()
             .configure(SerializationFeature.FAIL_ON_EMPTY_BEANS, false)
         ;
 

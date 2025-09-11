@@ -19,12 +19,16 @@ import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 import static java.lang.System.Logger.Level.INFO;
 
 public final class StorageUtils {
 
     private static final System.Logger LOGGER = System.getLogger(StorageUtils.class.getName());
+
+    private static final String PACKAGE = "dk.ku.di.dms.vms.tpcc.proxy";
 
     private static final Map<Class<?>, String> ENTITY_TO_VMS_MAP;
     static {
@@ -43,14 +47,18 @@ public final class StorageUtils {
 
     @SuppressWarnings({"unchecked", "rawtypes"})
     public static EntityMetadata loadEntityMetadata() throws NoSuchFieldException, IllegalAccessException {
-        Reflections reflections = VmsMetadataLoader.configureReflections(new String[]{
-                "dk.ku.di.dms.vms.tpcc.proxy",
-        });
+        Reflections reflections = VmsMetadataLoader.configureReflections(new String[]{ PACKAGE });
         Map<Class<?>, String> entityToTableNameMap = VmsMetadataLoader.loadVmsTableNames(reflections);
-        Map<String, VmsDataModel> vmsDataModelMap = VmsMetadataLoader.buildVmsDataModel(ENTITY_TO_VMS_MAP, entityToTableNameMap );
+
+        // for cases of multiple VMSes deployed in the same process
+        Map<Class<?>, String> filteredProxyEntities = entityToTableNameMap.entrySet().stream()
+                .filter(clazz -> clazz.getKey().getPackage().getName().contains(PACKAGE))
+                .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+
+        Map<String, VmsDataModel> vmsDataModelMap = VmsMetadataLoader.buildVmsDataModel(ENTITY_TO_VMS_MAP, filteredProxyEntities);
         Map<String, EntityHandler> entityHandlerMap = new HashMap<>();
         Map<String, Schema> entityToSchemaMap = new HashMap<>();
-        for (var entry : entityToTableNameMap.entrySet()) {
+        for (var entry : filteredProxyEntities.entrySet()) {
             VmsDataModel vmsDataModel = vmsDataModelMap.get(entry.getValue());
             Class<?> entityClazz = entry.getKey();
             Type[] types = ((ParameterizedType) entityClazz.getGenericInterfaces()[0]).getActualTypeArguments();
@@ -60,7 +68,7 @@ public final class StorageUtils {
             EntityHandler entityHandler = new EntityHandler(pkClazz, entityClazz, schema);
             entityHandlerMap.put(entry.getValue(), entityHandler);
         }
-        return new EntityMetadata(entityToTableNameMap, vmsDataModelMap, entityHandlerMap, entityToSchemaMap);
+        return new EntityMetadata(filteredProxyEntities, vmsDataModelMap, entityHandlerMap, entityToSchemaMap);
     }
 
     @SuppressWarnings({"rawtypes"})

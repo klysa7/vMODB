@@ -1,6 +1,7 @@
 package dk.ku.di.dms.vms.modb.common.utils;
 
 import java.io.InputStream;
+import java.net.URL;
 import java.util.Properties;
 import java.util.logging.LogManager;
 
@@ -10,7 +11,7 @@ public final class ConfigUtils {
 
     private static final String LOGGING_FILE = "logging.properties";
 
-    private static final Properties PROPERTIES;
+    private static final Properties PROPERTIES = new Properties();
 
     static {
         // Java does not automatically load logging.properties from the classpath by default.
@@ -23,7 +24,6 @@ public final class ConfigUtils {
         } catch (Exception e) {
             System.out.println("Error loading logging configuration. Resorting to default configuration. Error details:\n" + e.getMessage());
         }
-        PROPERTIES = new Properties();
         try {
             PROPERTIES.load(ConfigUtils.class.getClassLoader().getResourceAsStream(CONFIG_FILE));
         } catch (Exception e) {
@@ -52,6 +52,35 @@ public final class ConfigUtils {
     public static boolean isWindows()
     {
         return getOsName().startsWith("Windows");
+    }
+
+    public static String getCallerPackage(){
+        for (StackTraceElement element : Thread.currentThread().getStackTrace()) {
+            if ("main".equals(element.getMethodName())) {
+                try {
+                    Class<?> mainClass = Class.forName(element.getClassName());
+                    Package pkg = mainClass.getPackage();
+                    return pkg != null ? pkg.getName() : "(default package)";
+                } catch (ClassNotFoundException e) {
+                    return null;
+                }
+            }
+        }
+
+        // then it is probably a static call at the init of the program
+        // find the last "<clinit>".equals(methodName)
+        int lastIdx = Thread.currentThread().getStackTrace().length;
+        if(Thread.currentThread().getStackTrace()[lastIdx-1].getMethodName().equals("<clinit>")){
+            try {
+                Class<?> mainClass = Class.forName(Thread.currentThread().getStackTrace()[lastIdx-1].getClassName());
+                Package pkg = mainClass.getPackage();
+                return pkg != null ? pkg.getName() : "(default package)";
+            } catch (ClassNotFoundException e) {
+                return null;
+            }
+        }
+
+        return null;
     }
 
 }

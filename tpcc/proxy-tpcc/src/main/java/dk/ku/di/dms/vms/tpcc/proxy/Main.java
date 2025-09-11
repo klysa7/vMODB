@@ -13,17 +13,38 @@ import dk.ku.di.dms.vms.tpcc.proxy.storage.StorageUtils;
 import dk.ku.di.dms.vms.tpcc.proxy.workload.WorkloadUtils;
 
 import java.io.IOException;
+import java.io.InputStream;
+import java.net.URL;
 import java.util.*;
 
 public final class Main {
 
     private static final Properties PROPERTIES = ConfigUtils.loadProperties();
 
-    public static void main(String[] ignoredArgs) throws NoSuchFieldException, IllegalAccessException {
-        menu();
+    public static void main(String[] args) throws Exception {
+        if(args.length == 0) {
+            loadMenu("Main Menu");
+        } else {
+           loadMicroBenchMenu();
+        }
     }
 
-    private static void menu() throws NoSuchFieldException, IllegalAccessException {
+    private static void loadMicroBenchMenu() throws Exception {
+        dk.ku.di.dms.vms.tpcc.warehouse.Main.main(null);
+        dk.ku.di.dms.vms.tpcc.inventory.Main.main(null);
+        dk.ku.di.dms.vms.tpcc.order.Main.main(null);
+        // clear wrong and duplicated properties loaded by default
+        PROPERTIES.clear();
+        var listUrl = ConfigUtils.class.getClassLoader().resources("app.properties").toList();
+        for(var url : listUrl) {
+            try (InputStream input = url.openStream()) {
+                PROPERTIES.load(input);
+            }
+        }
+        loadMenu("Microbench Menu");
+    }
+
+    private static void loadMenu(String menuType) throws NoSuchFieldException, IllegalAccessException {
         Coordinator coordinator = null;
         int numWare = 0;
         Map<String, UniqueHashBufferIndex> tables = null;
@@ -32,7 +53,7 @@ public final class Main {
         Scanner scanner = new Scanner(System.in);
         boolean running = true;
         while (running) {
-            printMenu();
+            printMenu(menuType);
             System.out.print("Enter your choice: ");
             String choice = scanner.nextLine();
             System.out.println("You chose option: " + choice);
@@ -54,7 +75,13 @@ public final class Main {
                         tables = StorageUtils.mapTablesInDisk(metadata, numWare);
                     }
                     Map<String, QueueTableIterator> tablesInMem = DataLoadUtils.mapTablesFromDisk(tables, metadata.entityHandlerMap());
-                    DataLoadUtils.ingestData(tablesInMem);
+
+                    Map<String, String> vmsToHostMap = new HashMap<>();
+                    vmsToHostMap.put("warehouse_host","localhost");
+                    vmsToHostMap.put("inventory_host","localhost");
+                    vmsToHostMap.put("order_host","localhost");
+
+                    DataLoadUtils.ingestData(tablesInMem, vmsToHostMap);
                     break;
                 case "3":
                     System.out.println("Option 3: \"Create workload\" selected.");
@@ -70,6 +97,23 @@ public final class Main {
                     System.out.println("Option 4: \"Submit workload\" selected.");
                     int batchWindow = Integer.parseInt( PROPERTIES.getProperty("batch_window_ms") );
                     int runTime;
+
+                    if(numWare == 0){
+                        // get number of input files
+                        numWare = WorkloadUtils.getNumWorkloadInputFiles();
+                        if(numWare == 0){
+                            // some unknown bug....
+                            System.out.println("Zero warehouses identified. Falling back to warehouse table information...");
+                            // fallback to table information
+                            numWare = StorageUtils.getNumRecordsFromInDiskTable(metadata.entityToSchemaMap().get("warehouse"), "warehouse");
+                        }
+                        if(numWare == 0){
+                            System.out.println("No warehouses identified! Maybe you forgot to generate?");
+                            break;
+                        }
+                        System.out.println(numWare+" warehouses identified");
+                    }
+
                     while(true) {
                         System.out.print("Enter duration (ms): [press 0 for 10s] ");
                         runTime = Integer.parseInt(scanner.nextLine());
@@ -92,21 +136,6 @@ public final class Main {
                         break;
                     }
 
-                    if(numWare == 0){
-                        // get number of input files
-                        numWare = WorkloadUtils.getNumWorkloadInputFiles();
-                        if(numWare == 0){
-                            // some unknown bug....
-                            System.out.println("Zero warehouses identified. Falling back to warehouse table information...");
-                            // fallback to table information
-                            numWare = StorageUtils.getNumRecordsFromInDiskTable(metadata.entityToSchemaMap().get("warehouse"), "warehouse");
-                        }
-                        if(numWare == 0){
-                            System.out.println("No warehouses identified! Maybe you forgot to generate?");
-                            break;
-                        }
-                        System.out.println(numWare+" warehouses identified");
-                    }
                     // reload iterators
                     input = WorkloadUtils.mapWorkloadInputFiles(numWare);
 
@@ -159,8 +188,8 @@ public final class Main {
         System.exit(0);
     }
 
-    private static void printMenu() {
-        System.out.println("\n=== Main Menu ===");
+    private static void printMenu(String menuType) {
+        System.out.println("\n=== "+menuType+" ===");
         System.out.println("1. Create tables in disk");
         System.out.println("2. Load services with data from tables in disk");
         System.out.println("3. Create workload");

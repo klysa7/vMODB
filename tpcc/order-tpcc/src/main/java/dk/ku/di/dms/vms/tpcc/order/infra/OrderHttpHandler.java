@@ -18,7 +18,7 @@ public final class OrderHttpHandler extends DefaultHttpHandler {
     @Override
     public Object getAsJson(String uri) throws RuntimeException {
         String[] uriSplit = uri.split("/");
-        String table = uriSplit[uriSplit.length - 1];
+        String table = uriSplit.length > 1 ? uriSplit[1] : "";
         switch (table){
             case "order" -> {
                 int orderId = Integer.parseInt(uriSplit[uriSplit.length - 3]);

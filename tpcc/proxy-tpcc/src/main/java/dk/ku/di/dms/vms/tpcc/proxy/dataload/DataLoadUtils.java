@@ -1,6 +1,5 @@
 package dk.ku.di.dms.vms.tpcc.proxy.dataload;
 
-import dk.ku.di.dms.vms.modb.common.utils.ConfigUtils;
 import dk.ku.di.dms.vms.modb.index.unique.UniqueHashBufferIndex;
 import dk.ku.di.dms.vms.sdk.embed.entity.EntityHandler;
 import dk.ku.di.dms.vms.tpcc.proxy.infra.MinimalHttpClient;
@@ -8,7 +7,7 @@ import dk.ku.di.dms.vms.tpcc.proxy.infra.TPCcConstants;
 
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.function.Function;
+import java.util.function.BiFunction;
 
 import static java.lang.System.Logger.Level.*;
 
@@ -54,7 +53,7 @@ public final class DataLoadUtils {
         IngestionWorker.CONNECTION_POOL.clear();
     }
 
-    public static void ingestData(Map<String, QueueTableIterator> tableInputMap) {
+    public static void ingestData(Map<String, QueueTableIterator> tableInputMap, Map<String, String> vmsToHostMap) {
         releaseAllConnections();
         int numCpus = Runtime.getRuntime().availableProcessors();
         ExecutorService threadPool = Executors.newFixedThreadPool(numCpus);
@@ -63,7 +62,7 @@ public final class DataLoadUtils {
         LOGGER.log(INFO, "Table ingestion starting...");
         long init = System.currentTimeMillis();
         for (int i = 1; i <= numCpus; i++) {
-            service.submit(new IngestionWorker(tableInputMap), null);
+            service.submit(new IngestionWorker(tableInputMap, vmsToHostMap), null);
         }
         try {
             for (int i = 1; i <= numCpus; i++) {
@@ -80,11 +79,9 @@ public final class DataLoadUtils {
 
     private static class IngestionWorker implements Runnable {
 
-        private static final Properties PROPERTIES = ConfigUtils.loadProperties();
-
         private static final Map<String, ConcurrentLinkedDeque<MinimalHttpClient>> CONNECTION_POOL = new ConcurrentHashMap<>();
 
-        private static final Function<String, MinimalHttpClient> HTTP_CLIENT_SUPPLIER = (table) -> {
+        private static final BiFunction<String, String, MinimalHttpClient> HTTP_CLIENT_SUPPLIER = (table, host) -> {
             String vms = TPCcConstants.TABLE_TO_VMS_MAP.get(table);
 
             if(vms != null){
@@ -98,7 +95,8 @@ public final class DataLoadUtils {
             }
 
             try {
-                String host = PROPERTIES.getProperty(vms + "_host");
+                // TODO pass mapping of vms to host so dont need to rely on properties
+                // String host = PROPER_TIES.getProperty(vms + "_host");
                 int port = TPCcConstants.VMS_TO_PORT_MAP.get(vms);
                 return new MinimalHttpClient(host, port);
             } catch (Exception e) {
@@ -113,9 +111,11 @@ public final class DataLoadUtils {
         }
 
         private final Map<String, QueueTableIterator> tableInputMap;
+        private final Map<String, String> vmsToHostMap;
 
-        private IngestionWorker(Map<String, QueueTableIterator> tableInputMap) {
+        private IngestionWorker(Map<String, QueueTableIterator> tableInputMap, Map<String, String> vmsToHostMap) {
             this.tableInputMap = tableInputMap;
+            this.vmsToHostMap = vmsToHostMap;
         }
 
         @Override
@@ -124,11 +124,13 @@ public final class DataLoadUtils {
                 for(var table : this.tableInputMap.entrySet()) {
                     String actualTable = table.getKey().contains("stock") ? "stock" : table.getKey();
                     actualTable = table.getKey().contains("customer") ? "customer" : actualTable;
-                    MinimalHttpClient client = HTTP_CLIENT_SUPPLIER.apply(actualTable);
+                    MinimalHttpClient client = HTTP_CLIENT_SUPPLIER.apply(
+                            actualTable,
+                            vmsToHostMap.get(TPCcConstants.TABLE_TO_VMS_MAP.get(actualTable) + "_host" ));
                     QueueTableIterator queue = table.getValue();
                     String entity;
                     int count = 0;
-                    LOGGER.log(INFO, "Thread "+Thread.currentThread().threadId()+" starting with table "+table.getKey());
+                    LOGGER.log(INFO, "Thread "+Thread.currentThread().threadId()+" starting with table "+actualTable);
                     List<String> errors = new ArrayList<>();
                     while ((entity = queue.poll()) != null) {
                         if(client.sendRequest("POST", entity, actualTable) != 200){

@@ -35,21 +35,28 @@ import java.util.stream.Stream;
 
 public final class EmbedMetadataLoader {
 
+    private record VmsToRepositoryMap(String clazzName, Class<?> cls, Constructor<?> constructor, Class<?>[] repositoryTypes){}
+
+    private static VmsToRepositoryMap mapVmsToRepositoryClasses(Class<?> clazz) throws ClassNotFoundException {
+        String clazzName = clazz.getCanonicalName();
+        Class<?> cls = Class.forName(clazzName);
+        Constructor<?>[] constructors = cls.getDeclaredConstructors();
+        Constructor<?> constructor = constructors[0];
+        // the IRepository interfaces required for this VMS
+        Class<?>[] repositoryTypes = constructor.getParameterTypes();
+        return new VmsToRepositoryMap(clazzName, cls, constructor, repositoryTypes);
+    }
+
     public static Map<String, Object> loadRepositoryClasses(Set<Class<?>> vmsClasses,
                                                           Map<Class<?>, String> entityToTableNameMap,
                                                           Map<String, Table> catalog,
                                                           OperationalAPI operationalAPI) throws InvocationTargetException, InstantiationException, IllegalAccessException, ClassNotFoundException {
         Map<String, Object> tableToRepositoryMap = new HashMap<>();
         for(Class<?> clazz : vmsClasses) {
-            String clazzName = clazz.getCanonicalName();
-            Class<?> cls = Class.forName(clazzName);
-            Constructor<?>[] constructors = cls.getDeclaredConstructors();
-            Constructor<?> constructor = constructors[0];
 
-            // the IRepository required for this vms class
-            Class<?>[] repositoryTypes = constructor.getParameterTypes();
+            var vmsToRepositoryMap = mapVmsToRepositoryClasses(clazz);
 
-            for (Class<?> repositoryType : repositoryTypes) {
+            for (Class<?> repositoryType : vmsToRepositoryMap.repositoryTypes) {
 
                 Type[] types = getPkAndEntityTypesFromRepositoryClazz(repositoryType);
 
@@ -76,6 +83,11 @@ public final class EmbedMetadataLoader {
                     type = dynamicType
                             .load(ClassLoader.getSystemClassLoader(), ClassLoadingStrategy.Default.INJECTION)
                             .getLoaded();
+                } catch (IllegalStateException e) {
+                    System.out.println("ERROR: Check if your module is loading other modules. \nVMS: "+clazz.getCanonicalName()+"\nLOADED: "+repositoryType.getCanonicalName());
+                    throw new RuntimeException(e);
+                } catch (Exception e){
+                    throw new RuntimeException(e);
                 }
 
                 Method[] queryMethods = repositoryType.getDeclaredMethods();
@@ -105,14 +117,9 @@ public final class EmbedMetadataLoader {
             throws ClassNotFoundException {
         Map<String, List<Object>> repositoryClassMap = new HashMap<>();
         for(Class<?> clazz : vmsClasses) {
-            String clazzName = clazz.getCanonicalName();
-            Class<?> cls = Class.forName(clazzName);
-            Constructor<?>[] constructors = cls.getDeclaredConstructors();
-            Constructor<?> constructor = constructors[0];
-            // the IRepository required for this vms class
-            Class<?>[] repositoryTypes = constructor.getParameterTypes();
-            List<Object> proxies = new ArrayList<>(repositoryTypes.length);
-            for (Class<?> repositoryType : repositoryTypes) {
+            var vmsToRepositoryMap = mapVmsToRepositoryClasses(clazz);
+            List<Object> proxies = new ArrayList<>(vmsToRepositoryMap.repositoryTypes.length);
+            for (Class<?> repositoryType : vmsToRepositoryMap.repositoryTypes) {
                 Type[] types = getPkAndEntityTypesFromRepositoryClazz(repositoryType);
                 Class<?> entityClazz = (Class<?>) types[1];
                 String tableName = entityToTableNameMap.get(entityClazz);
@@ -120,7 +127,7 @@ public final class EmbedMetadataLoader {
                 proxies.add(instance);
             }
             // add to repository class map
-            repositoryClassMap.put( clazzName, proxies );
+            repositoryClassMap.put( vmsToRepositoryMap.clazzName, proxies );
         }
         return repositoryClassMap;
     }

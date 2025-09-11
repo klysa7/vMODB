@@ -7,6 +7,7 @@ import dk.ku.di.dms.vms.modb.common.schema.network.node.VmsNode;
 import dk.ku.di.dms.vms.modb.common.serdes.IVmsSerdesProxy;
 import dk.ku.di.dms.vms.modb.common.serdes.VmsSerdesProxyBuilder;
 import dk.ku.di.dms.vms.modb.common.transaction.ITransactionManager;
+import dk.ku.di.dms.vms.modb.common.utils.ConfigUtils;
 import dk.ku.di.dms.vms.modb.definition.Schema;
 import dk.ku.di.dms.vms.modb.definition.Table;
 import dk.ku.di.dms.vms.modb.transaction.TransactionManager;
@@ -21,6 +22,7 @@ import dk.ku.di.dms.vms.web_common.IHttpHandler;
 import org.reflections.Reflections;
 
 import java.util.*;
+import java.util.stream.Collectors;
 
 /**
  * Starting point for initializing the VMS application runtime
@@ -62,27 +64,22 @@ public final class VmsApplication {
     }
 
     public static VmsApplication build(VmsApplicationOptions options, HttpHandlerBuilder builder) throws Exception {
-        // check first whether we are in decoupled or embed mode
-        Optional<Package> optional = Arrays.stream(Package.getPackages()).filter(p ->
-                         !p.getName().contains("dk.ku.di.dms.vms.sdk.embed")
-                      && !p.getName().contains("dk.ku.di.dms.vms.sdk.core")
-                      && !p.getName().contains("dk.ku.di.dms.vms.modb")
-                      && !p.getName().contains("java")
-                      && !p.getName().contains("sun")
-                      && !p.getName().contains("jdk")
-                      && !p.getName().contains("com")
-                      && !p.getName().contains("org")).findFirst();
+        // find out which module is this build called from
+        String packageName = ConfigUtils.getCallerPackage();
 
-        String packageName = optional.map(Package::getName).orElse("Nothing");
-
-        if(packageName.equalsIgnoreCase("Nothing")) throw new IllegalStateException("Cannot identify package.");
+        if(packageName == null) throw new IllegalStateException("Cannot identify package.");
 
         Reflections reflections = VmsMetadataLoader.configureReflections(options.packages());
 
         Set<Class<?>> vmsClasses = reflections.getTypesAnnotatedWith(Microservice.class);
         if(vmsClasses.isEmpty()) throw new IllegalStateException("No classes annotated with @Microservice in this application.");
+
+        Set<Class<?>> filteredVmsClazz = vmsClasses.stream()
+                .filter(clazz -> clazz.getPackageName().equals(packageName))
+                .collect(Collectors.toSet());
+
         Map<Class<?>, String> entityToTableNameMap = VmsMetadataLoader.loadVmsTableNames(reflections);
-        Map<Class<?>, String> entityToVirtualMicroservice = VmsMetadataLoader.mapEntitiesToVirtualMicroservice(vmsClasses, entityToTableNameMap);
+        Map<Class<?>, String> entityToVirtualMicroservice = VmsMetadataLoader.mapEntitiesToVirtualMicroservice(filteredVmsClazz, entityToTableNameMap);
         Map<String, VmsDataModel> vmsDataModelMap = VmsMetadataLoader.buildVmsDataModel( entityToVirtualMicroservice, entityToTableNameMap );
 
         boolean isCheckpointing = options.isCheckpointing();
@@ -100,12 +97,12 @@ public final class VmsApplication {
         // operational API and checkpoint API
         TransactionManager transactionManager = new TransactionManager(catalog, isCheckpointing);
 
-        Map<String, Object> tableToRepositoryMap = EmbedMetadataLoader.loadRepositoryClasses( vmsClasses, entityToTableNameMap, catalog,  transactionManager );
-        Map<String, List<Object>> vmsToRepositoriesMap = EmbedMetadataLoader.mapRepositoriesToVms(vmsClasses, entityToTableNameMap, tableToRepositoryMap);
+        Map<String, Object> tableToRepositoryMap = EmbedMetadataLoader.loadRepositoryClasses( filteredVmsClazz, entityToTableNameMap, catalog,  transactionManager );
+        Map<String, List<Object>> vmsToRepositoriesMap = EmbedMetadataLoader.mapRepositoriesToVms(filteredVmsClazz, entityToTableNameMap, tableToRepositoryMap);
 
         VmsRuntimeMetadata vmsMetadata = VmsMetadataLoader.load(
                 reflections,
-                vmsClasses,
+                filteredVmsClazz,
                 vmsDataModelMap,
                 vmsToRepositoriesMap,
                 tableToRepositoryMap
