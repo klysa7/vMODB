@@ -808,7 +808,7 @@ public final class Coordinator extends ModbHttpServer {
     private void processVmsIdentifier(VmsNode vmsIdentifier_) {
         LOGGER.log(INFO,"Leader: Received a VMS_IDENTIFIER from: "+ vmsIdentifier_.identifier);
         // update metadata of this node so coordinator can reason about data dependencies
-        this.vmsMetadataMap.put( vmsIdentifier_.identifier, vmsIdentifier_);
+        this.vmsMetadataMap.put(vmsIdentifier_.identifier, vmsIdentifier_);
 
         if(this.vmsMetadataMap.size() < this.starterVMSs.size()) {
             LOGGER.log(INFO,"Leader: "+(this.starterVMSs.size() - this.vmsMetadataMap.size())+" starter(s) VMSs remain to be processed.");

@@ -21,7 +21,10 @@ import dk.ku.di.dms.vms.sdk.embed.metadata.EmbedMetadataLoader;
 import dk.ku.di.dms.vms.web_common.IHttpHandler;
 import org.reflections.Reflections;
 
-import java.util.*;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
@@ -68,6 +71,7 @@ public final class VmsApplication {
         String packageName = ConfigUtils.getCallerPackage();
 
         if(packageName == null) throw new IllegalStateException("Cannot identify package.");
+        // else System.out.println( "PACKAGE: "+ packageName );
 
         Reflections reflections = VmsMetadataLoader.configureReflections(options.packages());
 
@@ -80,7 +84,7 @@ public final class VmsApplication {
 
         Map<Class<?>, String> entityToTableNameMap = VmsMetadataLoader.loadVmsTableNames(reflections);
         Map<Class<?>, String> entityToVirtualMicroservice = VmsMetadataLoader.mapEntitiesToVirtualMicroservice(filteredVmsClazz, entityToTableNameMap);
-        Map<String, VmsDataModel> vmsDataModelMap = VmsMetadataLoader.buildVmsDataModel( entityToVirtualMicroservice, entityToTableNameMap );
+        Map<String, VmsDataModel> vmsDataModelMap = VmsMetadataLoader.buildVmsDataModel(entityToVirtualMicroservice, entityToTableNameMap);
 
         boolean isCheckpointing = options.isCheckpointing();
         boolean isTruncating = options.isTruncating();
@@ -102,6 +106,7 @@ public final class VmsApplication {
 
         VmsRuntimeMetadata vmsMetadata = VmsMetadataLoader.load(
                 reflections,
+                packageName,
                 filteredVmsClazz,
                 vmsDataModelMap,
                 vmsToRepositoriesMap,

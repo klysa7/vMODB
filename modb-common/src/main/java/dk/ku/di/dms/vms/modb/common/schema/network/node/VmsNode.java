@@ -73,6 +73,8 @@ public final class VmsNode extends IdentifiableNode {
                 ", lastTidOfBatch=" + lastTid +
                 ", previousBatch=" + previousBatch +
                 ", numberOfTIDsCurrentBatch=" + numberOfTIDsCurrentBatch +
+                ", inputEvents= "+inputEventSchema.keySet() +
+                ", outputEvents= "+outputEventSchema.keySet() +
                 '}';
     }
 

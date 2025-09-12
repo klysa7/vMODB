@@ -15,6 +15,7 @@ import dk.ku.di.dms.vms.modb.common.schema.VmsDataModel;
 import dk.ku.di.dms.vms.modb.common.schema.VmsEventSchema;
 import dk.ku.di.dms.vms.modb.common.type.DataType;
 import dk.ku.di.dms.vms.modb.common.type.DataTypeUtils;
+import dk.ku.di.dms.vms.modb.common.utils.ConfigUtils;
 import dk.ku.di.dms.vms.sdk.core.metadata.exception.NoPrimaryKeyFoundException;
 import dk.ku.di.dms.vms.sdk.core.metadata.exception.QueueMappingException;
 import dk.ku.di.dms.vms.sdk.core.metadata.exception.UnsupportedConstraint;
@@ -35,6 +36,7 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.net.URL;
 import java.util.*;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static java.lang.System.Logger.Level.DEBUG;
@@ -57,10 +59,12 @@ public final class VmsMetadataLoader {
         Map<Class<?>, String> entityToTableNameMap = loadVmsTableNames(reflections);
         Map<Class<?>, String> entityToVirtualMicroservice = mapEntitiesToVirtualMicroservice(vmsClasses, entityToTableNameMap);
         Map<String, VmsDataModel> vmsDataModelMap = buildVmsDataModel( entityToVirtualMicroservice, entityToTableNameMap );
-        return load(reflections, vmsClasses, vmsDataModelMap, Map.of(), Map.of());
+        String packageName = ConfigUtils.getCallerPackage();
+        return load(reflections, packageName, vmsClasses, vmsDataModelMap, Map.of(), Map.of());
     }
 
     public static VmsRuntimeMetadata load(Reflections reflections,
+                                          String packageName,
                                           Set<Class<?>> vmsClasses,
                                           Map<String, VmsDataModel> vmsDataModelMap,
                                           Map<String, List<Object>> vmsToRepositoriesMap,
@@ -68,9 +72,7 @@ public final class VmsMetadataLoader {
             throws ClassNotFoundException, InvocationTargetException, InstantiationException, IllegalAccessException {
 
         // also load the corresponding repository facade
-        Map<String, Object> loadedVmsInstances = loadMicroserviceClasses(
-                vmsClasses,
-                vmsToRepositoriesMap);
+        Map<String, Object> loadedVmsInstances = loadMicroserviceClasses(vmsClasses, vmsToRepositoriesMap);
 
         // necessary remaining data structures to store a vms metadata
         Map<String, VmsTransactionMetadata> queueToVmsTransactionMap = new HashMap<>();
@@ -85,7 +87,12 @@ public final class VmsMetadataLoader {
         // key: queue name; value: (input),(output)
         Map<String, String> inputOutputEventDistinction = new HashMap<>();
 
-        Set<Method> transactionalMethods = reflections.getMethodsAnnotatedWith(Transactional.class);
+        Set<Method> transactionalMethods = reflections
+                .getMethodsAnnotatedWith(Transactional.class)
+                .stream()
+                .filter(p->p.getDeclaringClass().getPackageName().equals(packageName))
+                .collect(Collectors.toSet());
+
         mapVmsMethodInputOutput(transactionalMethods,
                 loadedVmsInstances, queueToEventMap, eventToQueueMap,
                 inputOutputEventDistinction, queueToVmsTransactionMap);
@@ -172,7 +179,7 @@ public final class VmsMetadataLoader {
             Map<String, VmsEventSchema> inputEventSchemaMap,
             Map<String, VmsEventSchema> outputEventSchemaMap) {
 
-        for( Class<?> eventClazz : eventsClazz ){
+        for(Class<?> eventClazz : eventsClazz){
 
             if(eventToQueueMap.get(eventClazz) == null) continue; // ignored the ones not mapped
 
@@ -182,7 +189,7 @@ public final class VmsMetadataLoader {
             DataType[] columnDataTypes = new DataType[fields.length];
             int i = 0;
 
-            for( Field field : fields ){
+            for(Field field : fields){
                 Class<?> attributeType = field.getType();
                 columnDataTypes[i] = getEventDataTypeFromAttributeType(attributeType);
                 columnNames[i] = field.getName();

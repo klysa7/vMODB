@@ -1,7 +1,6 @@
 package dk.ku.di.dms.vms.modb.common.utils;
 
 import java.io.InputStream;
-import java.net.URL;
 import java.util.Properties;
 import java.util.logging.LogManager;
 
