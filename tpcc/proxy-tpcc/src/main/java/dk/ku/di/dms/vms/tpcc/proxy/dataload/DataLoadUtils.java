@@ -126,11 +126,11 @@ public final class DataLoadUtils {
                     actualTable = table.getKey().contains("customer") ? "customer" : actualTable;
                     MinimalHttpClient client = HTTP_CLIENT_SUPPLIER.apply(
                             actualTable,
-                            vmsToHostMap.get(TPCcConstants.TABLE_TO_VMS_MAP.get(actualTable) + "_host" ));
+                            this.vmsToHostMap.get(TPCcConstants.TABLE_TO_VMS_MAP.get(actualTable) + "_host" ));
                     QueueTableIterator queue = table.getValue();
                     String entity;
                     int count = 0;
-                    LOGGER.log(INFO, "Thread "+Thread.currentThread().threadId()+" starting with table "+actualTable);
+                    LOGGER.log(INFO, "Thread "+Thread.currentThread().threadId()+" start loading data to table "+actualTable);
                     List<String> errors = new ArrayList<>();
                     while ((entity = queue.poll()) != null) {
                         if(client.sendRequest("POST", entity, actualTable) != 200){

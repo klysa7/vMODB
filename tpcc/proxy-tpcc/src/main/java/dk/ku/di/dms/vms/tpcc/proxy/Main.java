@@ -30,17 +30,14 @@ public final class Main {
     }
 
     private static void loadMicroBenchMenu() throws Exception {
+        // set default values to override for all in-process VMSes
+        PROPERTIES.setProperty("vms_thread_pool_size", "0");
+        PROPERTIES.setProperty("network_thread_pool_size", "0");
+
         dk.ku.di.dms.vms.tpcc.warehouse.Main.main(null);
         dk.ku.di.dms.vms.tpcc.inventory.Main.main(null);
         dk.ku.di.dms.vms.tpcc.order.Main.main(null);
-        // clear wrong and duplicated properties loaded by default
-        PROPERTIES.clear();
-        var listUrl = ConfigUtils.class.getClassLoader().resources("app.properties").toList();
-        for(var url : listUrl) {
-            try (InputStream input = url.openStream()) {
-                PROPERTIES.load(input);
-            }
-        }
+
         loadMenu("Microbench Menu");
     }
 
@@ -50,6 +47,15 @@ public final class Main {
         Map<String, UniqueHashBufferIndex> tables = null;
         List<Iterator<NewOrderWareIn>> input;
         StorageUtils.EntityMetadata metadata = StorageUtils.loadEntityMetadata();
+
+        Map<String, String> vmsToHostMap = new HashMap<>();
+        vmsToHostMap.put("warehouse_host", PROPERTIES.getProperty("warehouse_host"));
+        vmsToHostMap.put("inventory_host", PROPERTIES.getProperty("inventory_host"));
+        vmsToHostMap.put("order_host", PROPERTIES.getProperty("order_host"));
+
+        System.out.println(vmsToHostMap);
+        System.out.println(PROPERTIES);
+
         Scanner scanner = new Scanner(System.in);
         boolean running = true;
         while (running) {
@@ -75,12 +81,6 @@ public final class Main {
                         tables = StorageUtils.mapTablesInDisk(metadata, numWare);
                     }
                     Map<String, QueueTableIterator> tablesInMem = DataLoadUtils.mapTablesFromDisk(tables, metadata.entityHandlerMap());
-
-                    Map<String, String> vmsToHostMap = new HashMap<>();
-                    vmsToHostMap.put("warehouse_host","localhost");
-                    vmsToHostMap.put("inventory_host","localhost");
-                    vmsToHostMap.put("order_host","localhost");
-
                     DataLoadUtils.ingestData(tablesInMem, vmsToHostMap);
                     break;
                 case "3":

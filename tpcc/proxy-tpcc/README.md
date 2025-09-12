@@ -19,6 +19,46 @@ If you are inside the vms-runtime-java folder, run:
 java --enable-preview --add-exports java.base/jdk.internal.misc=ALL-UNNAMED --add-opens java.base/jdk.internal.util=ALL-UNNAMED -jar tpcc/proxy-tpcc/target/proxy-tpcc-1.0-SNAPSHOT-jar-with-dependencies.jar
 ```
 
+## Querying VMSes after data load and experiments
+
+The 'curl' commands below are example requests that one can submit to the TPC-C VMSes to query their stored data. Modify the parameters to obtain different records other than the first ones.
+
+### Warehouse VMS
+
+#### Warehouse table
+```
+curl -X GET http://localhost:8001/warehouse/1
+```
+
+#### District table
+```
+curl -X GET http://localhost:8001/district/1/1
+```
+
+#### Customer table
+```
+curl -X GET http://localhost:8001/customer/1/1/1
+```
+
+### Inventory VMS
+
+#### Item table
+```
+curl -X GET http://localhost:8001/customer/1
+```
+
+#### Stock table
+```
+curl -X GET http://localhost:8001/stock/1/1
+```
+
+### Order VMS
+
+#### Order table
+```
+curl -X GET http://localhost:8001/order/1/1/1
+```
+
 ## Running experiments
 
 When executing the project, a menu will show up on screen. The menu offers different functionalities to manage the parameters of a TPC-C experiment.
