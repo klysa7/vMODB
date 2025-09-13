@@ -49,6 +49,8 @@ public final class VmsTransactionScheduler extends StoppableRunnable {
     // used to track progress in the presence of parallel and partitioned tasks
     private final AtomicLong lastTidFinished;
 
+    private final AtomicLong lastTidSafeToDelete;
+
     private final Set<Object> partitionKeyTrackingMap = ConcurrentHashMap.newKeySet();
 
     private final BlockingQueue<InboundEvent> transactionInputQueue;
@@ -102,11 +104,12 @@ public final class VmsTransactionScheduler extends StoppableRunnable {
         this.lastTidToTidMap = new HashMap<>(1000000);
 
         this.lastTidFinished = new AtomicLong(0);
+        this.lastTidSafeToDelete = new AtomicLong(-1);
     }
 
     /**
      * Inspired by <a href="https://stackoverflow.com/questions/826212/java-executors-how-to-be-notified-without-blocking-when-a-task-completes">link</a>,
-     * this method can block on checkForNewEvents, leaving the task threads itself, via callback, modify
+     * This method can block on checkForNewEvents, leaving the task threads itself, via callback, modify
      * the class state appropriately. Care must be taken with some variables.
      */
     @Override
@@ -148,7 +151,7 @@ public final class VmsTransactionScheduler extends StoppableRunnable {
             // in this case, the error must be informed to the event handler, so the event handler
             // can forward the error to downstream VMSs. if input VMS, easier to handle, just send a noop to them
             LOGGER.log(WARNING, "Error captured during application execution: \n"+e.getCause().getMessage());
-            // remove from map to avoid reescheduling? no, it will lead to null pointer in scheduler loop
+            // remove from map to avoid rescheduling? no, it will lead to null pointer in scheduler loop
             VmsTransactionTask task = transactionTaskMap.get(tid);
             task.signalFailed();
             this.updateSchedulerTaskStats(executionMode, task);
@@ -181,12 +184,14 @@ public final class VmsTransactionScheduler extends StoppableRunnable {
     }
 
     /**
-     * This method makes sure that TIDs always increase
-     * so the next single thread tasks can be executed
+     * This method makes sure that TIDs always increase so the next single thread tasks can be executed
      */
     private void updateLastFinishedTid(final long tid){
-        if(this.lastTidFinished.get() > tid) return;
-        this.lastTidFinished.updateAndGet(currTid -> Math.max(currTid, tid));
+        if(this.lastTidFinished.updateAndGet(currTid -> Math.max(currTid, tid)) == tid) {
+            return;
+        }
+        // it is not the highest tid, so it can update
+        this.lastTidSafeToDelete.updateAndGet(currTid -> Math.max(currTid, tid));
     }
 
     /**
@@ -217,7 +222,7 @@ public final class VmsTransactionScheduler extends StoppableRunnable {
                     if (!this.canSingleThreadTaskRun()) {
                         return;
                     }
-                    LOGGER.log(DEBUG, this.vmsIdentifier+": Scheduling single-thread task for execution:\n"+task);
+                    LOGGER.log(DEBUG, this.vmsIdentifier+": Scheduling single-threaded task for execution:\n"+task);
                     this.submitSingleThreadTaskForExecution(task);
                 }
                 case PARALLEL -> {
@@ -281,9 +286,13 @@ public final class VmsTransactionScheduler extends StoppableRunnable {
 
     private final List<InboundEvent> drained = new ArrayList<>(1024*10);
 
+    private final List<VmsTransactionTask> pendingDeletion = new ArrayList<>();
+
     private void checkForNewEvents() throws InterruptedException {
         InboundEvent inboundEvent;
         if(this.mustWaitForInputEvent) {
+            // before blocking, cleanup tasks from internal maps
+            this.cleanupTidMappings();
             inboundEvent = this.transactionInputQueue.take();
             // disable block
             this.mustWaitForInputEvent = false;
@@ -298,6 +307,30 @@ public final class VmsTransactionScheduler extends StoppableRunnable {
             this.processNewEvent(inboundEvent_);
         }
         this.drained.clear();
+    }
+
+    private void cleanupTidMappings() {
+        // LOGGER.log(INFO, "Deleting deprecated tasks");
+        long tidToDelete = this.lastTidSafeToDelete.get();
+        while(this.transactionTaskMap.containsKey(tidToDelete)){
+            VmsTransactionTask task = this.transactionTaskMap.get(tidToDelete);
+            if(!task.isFinished()) {
+                this.pendingDeletion.add(task);
+                break; // to avoid null pointer when it finishes
+            }
+            this.lastTidToTidMap.remove(task.lastTid());
+            this.transactionTaskMap.remove(tidToDelete);
+            tidToDelete = task.lastTid();
+        }
+        for (Iterator<VmsTransactionTask> it = this.pendingDeletion.iterator(); it.hasNext();) {
+            VmsTransactionTask task = it.next();
+            if(!task.isFinished()) {
+                break;
+            }
+            this.lastTidToTidMap.remove(task.lastTid());
+            this.transactionTaskMap.remove(task.tid());
+            it.remove();
+        }
     }
 
     private void processNewEvent(InboundEvent inboundEvent) {

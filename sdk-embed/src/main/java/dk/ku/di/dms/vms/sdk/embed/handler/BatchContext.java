@@ -15,7 +15,7 @@ public final class BatchContext {
 
     // if an external thread (i.e., scheduler) modifies
     // this attribute, it needs to change to volatile
-    private AtomicInteger status = new AtomicInteger(OPEN);
+    private final AtomicInteger status = new AtomicInteger(OPEN);
 
     // whether this vms is a terminal for this batch
     public final boolean terminal;
@@ -25,10 +25,6 @@ public final class BatchContext {
                 batchCommitInfo.previousBatch(),
                 batchCommitInfo.numberOfTIDsBatch(),
                 true);
-    }
-
-    public static BatchContext buildAsStarter(long batch, long previousBatch, int numberOfTIDsBatch){
-        return new BatchContext(batch, previousBatch, numberOfTIDsBatch,false);
     }
 
     public static BatchContext build(BatchCommitCommand.Payload batchCommitRequest) {
@@ -59,14 +55,6 @@ public final class BatchContext {
     public static final int CHECKPOINTING = 2;
     // this status is set when the state is logged
     public static final int BATCH_COMMITTED = 3;
-
-    public boolean isOpen(){
-        return this.status.get() == OPEN;
-    }
-
-    public boolean isCompleted(){
-        return this.status.get() > OPEN;
-    }
 
     public void setStatus(int status){
         this.status.set(status);

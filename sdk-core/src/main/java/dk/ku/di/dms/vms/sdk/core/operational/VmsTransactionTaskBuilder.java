@@ -84,7 +84,7 @@ public final class VmsTransactionTaskBuilder {
         }
 
         private void readOnlyRun(){
-            try{
+            try {
                 transactionManager.beginTransaction(this.tid, -1, this.lastTid, true);
                 Object output = this.signature.method().invoke(this.signature.vmsInstance(), this.inputEvent);
                 OutboundEventResult eventOutput = new OutboundEventResult(this.tid, this.batch, this.signature.outputQueue(), output);
@@ -132,6 +132,10 @@ public final class VmsTransactionTaskBuilder {
 
         public long tid() {
             return this.tid;
+        }
+
+        public long lastTid() {
+            return this.lastTid;
         }
 
         public VmsTransactionSignature signature(){
