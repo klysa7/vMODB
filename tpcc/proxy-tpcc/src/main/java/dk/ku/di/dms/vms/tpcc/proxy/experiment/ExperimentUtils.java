@@ -49,7 +49,13 @@ public final class ExperimentUtils {
         }
 
         int newRuntime = runTime + warmUp;
-        WorkloadUtils.WorkloadStats workloadStats = WorkloadUtils.submitWorkload(input, newRuntime, func);
+        WorkloadUtils.WorkloadStats workloadStats = WorkloadUtils.submitWorkload(input, func);
+
+        try {
+            Thread.sleep(newRuntime);
+        } catch (InterruptedException e) {
+            throw new RuntimeException(e);
+        }
 
         // avoid submitting after experiment termination
         coordinator.clearTransactionInputs();

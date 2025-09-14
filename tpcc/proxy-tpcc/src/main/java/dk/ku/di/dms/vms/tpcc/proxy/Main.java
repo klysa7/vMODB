@@ -77,7 +77,6 @@ public final class Main {
                     if(coordinator != null){
                         long submitted = coordinator.getNumTIDsSubmitted();
                         long committed = coordinator.getNumTIDsCommitted();
-                        System.out.println("Submitted: "+submitted+" Committed: "+committed);
                         if(submitted > committed) {
                             System.out.println("Transactions are still executing: "+submitted+" > "+committed);
                             System.out.println("Do you want to proceed? [y/n]");

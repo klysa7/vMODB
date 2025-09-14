@@ -14,14 +14,12 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.*;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 
 import static dk.ku.di.dms.vms.tpcc.proxy.datagen.DataGenUtils.nuRand;
 import static dk.ku.di.dms.vms.tpcc.proxy.datagen.DataGenUtils.randomNumber;
 import static dk.ku.di.dms.vms.tpcc.proxy.infra.TPCcConstants.*;
 import static java.lang.System.Logger.Level.*;
-import static java.lang.Thread.sleep;
 
 public final class WorkloadUtils {
 
@@ -67,7 +65,7 @@ public final class WorkloadUtils {
     public record WorkloadStats(long initTs, Map<Long, List<Long>>[] submitted){}
 
     @SuppressWarnings("unchecked")
-    public static WorkloadStats submitWorkload(List<Iterator<NewOrderWareIn>> input, int runTime, Function<NewOrderWareIn, Long> func) {
+    public static WorkloadStats submitWorkload(List<Iterator<NewOrderWareIn>> input, Function<NewOrderWareIn, Long> func) {
         int numWorkers = input.size();
         LOGGER.log(INFO, "Submitting transactions through "+numWorkers+" worker(s)");
         CountDownLatch allThreadsStart = new CountDownLatch(numWorkers+1);
@@ -78,32 +76,27 @@ public final class WorkloadUtils {
             final Iterator<NewOrderWareIn> workerInput = input.get(i);
             int finalI = i;
             Thread thread = new Thread(()-> submittedArray[finalI] =
-                            Worker.run(allThreadsStart, allThreadsAreDone, workerInput, runTime, func));
+                            Worker.run(allThreadsStart, allThreadsAreDone, workerInput, func));
             thread.start();
         }
 
         allThreadsStart.countDown();
-        long initTs;
         try {
             allThreadsStart.await();
-            initTs = System.currentTimeMillis();
             LOGGER.log(INFO,"Experiment main going to wait for the workers to finish.");
-            if (!allThreadsAreDone.await(runTime * 2L, TimeUnit.MILLISECONDS)) {
-                LOGGER.log(ERROR,"Latch has not reached zero. Something wrong with the worker(s)");
-            } else {
-                LOGGER.log(INFO,"Experiment main woke up!");
-            }
+            allThreadsAreDone.await();
+            LOGGER.log(INFO,"Experiment main woke up!");
         } catch (InterruptedException e){
             throw new RuntimeException(e);
         }
 
-        return new WorkloadStats(initTs, submittedArray);
+        return new WorkloadStats(System.currentTimeMillis(), submittedArray);
     }
 
     private static final class Worker {
 
         public static Map<Long, List<Long>> run(CountDownLatch allThreadsStart, CountDownLatch allThreadsAreDone,
-                                                Iterator<NewOrderWareIn> input, int runTime, Function<NewOrderWareIn, Long> func) {
+                                                Iterator<NewOrderWareIn> input, Function<NewOrderWareIn, Long> func) {
             Map<Long,List<Long>> startTsMap = new HashMap<>();
             long threadId = Thread.currentThread().threadId();
             LOGGER.log(INFO,"Thread ID " + threadId + " started");
@@ -114,16 +107,11 @@ public final class WorkloadUtils {
                 LOGGER.log(ERROR, "Thread ID "+threadId+" failed to await start");
                 throw new RuntimeException(e);
             }
-            long currentTs = System.currentTimeMillis();
-            long endTs = System.currentTimeMillis() + runTime;
-            do {
+            long currentTs;
+            while (input.hasNext()){
                 try {
-                    if(!input.hasNext()){
-                        LOGGER.log(WARNING, "Number of input events are not enough for runtime " + runTime + " ms");
-                        sleep(endTs - currentTs);
-                        break;
-                    }
                     long batchId = func.apply(input.next());
+                    currentTs = System.currentTimeMillis();
                     if(!startTsMap.containsKey(batchId)){
                         startTsMap.put(batchId, new ArrayList<>());
                     }
@@ -132,9 +120,7 @@ public final class WorkloadUtils {
                     LOGGER.log(ERROR,"Exception in Thread ID: " + (e.getMessage() == null ? "No message" : e.getMessage()));
                     throw new RuntimeException(e);
                 }
-                currentTs = System.currentTimeMillis();
-            } while (currentTs < endTs);
-
+            }
             allThreadsAreDone.countDown();
             return startTsMap;
         }
@@ -238,13 +224,10 @@ public final class WorkloadUtils {
         int not_found = NUM_ITEMS + 1;
         int rbk;
 
-        int max_num_items_per_order_ = Math.min(MAX_NUM_ITEMS_PER_ORDER, NUM_ITEMS);
-        int min_num_items_per_order_ = Math.min(5, max_num_items_per_order_);
-
         d_id = randomNumber(1, NUM_DIST_PER_WARE);
         c_id = nuRand(1023, 1, NUM_CUST_PER_DIST);
 
-        ol_cnt = randomNumber(min_num_items_per_order_, max_num_items_per_order_);
+        ol_cnt = randomNumber(MIN_NUM_ITEMS_PER_ORDER, MAX_NUM_ITEMS_PER_ORDER);
         rbk = randomNumber(1, 100);
 
         int[] itemIds = new int[ol_cnt];

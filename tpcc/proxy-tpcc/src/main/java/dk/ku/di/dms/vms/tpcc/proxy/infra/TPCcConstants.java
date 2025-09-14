@@ -16,6 +16,7 @@ public final class TPCcConstants {
     public static final int NUM_DIST_PER_WARE = 10;
     public static final int NUM_CUST_PER_DIST = 3000;
     public static final int NUM_ITEMS = 100000;
+    public static final int MIN_NUM_ITEMS_PER_ORDER = 5;
     public static final int MAX_NUM_ITEMS_PER_ORDER = 15;
 
     /**
