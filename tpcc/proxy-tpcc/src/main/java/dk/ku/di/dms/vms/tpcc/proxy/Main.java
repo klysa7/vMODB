@@ -59,6 +59,7 @@ public final class Main {
 
         Scanner scanner = new Scanner(System.in);
         boolean running = true;
+        boolean dataLoaded = false;
         while (running) {
             printMenu(menuType);
             System.out.print("Enter your choice: ");
@@ -97,6 +98,7 @@ public final class Main {
                     }
                     Map<String, QueueTableIterator> tablesInMem = DataLoadUtils.mapTablesFromDisk(tables, metadata.entityHandlerMap());
                     DataLoadUtils.ingestData(tablesInMem, vmsToHostMap, NUM_INGESTION_WORKERS);
+                    dataLoaded = true;
                     break;
                 case "3":
                     System.out.println("Option 3: \"Create workload\" selected.");
@@ -119,6 +121,15 @@ public final class Main {
                     break;
                 case "4":
                     System.out.println("Option 4: \"Submit workload\" selected.");
+
+                    if(!dataLoaded){
+                        System.out.println("Data has not been loaded!");
+                        System.out.println("Do you want to proceed? [y/n]");
+                        String resp = scanner.nextLine();
+                        if(resp.equalsIgnoreCase("n")){
+                            break;
+                        }
+                    }
 
                     // check if workload files exist
                     int numFiles = WorkloadUtils.getNumWorkloadInputFiles();
@@ -223,6 +234,7 @@ public final class Main {
                         }
                     }
                     System.out.println("Service states reset.");
+                    dataLoaded = false;
                     break;
                 case "0":
                     System.out.println("Exiting the application...");
