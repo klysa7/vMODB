@@ -42,6 +42,9 @@ public class Customer implements IEntity<Customer.CustomerId> {
     public String c_first;
 
     @Column
+    public String c_middle;
+
+    @Column
     public String c_last;
 
     @Column
@@ -66,14 +69,15 @@ public class Customer implements IEntity<Customer.CustomerId> {
 
     public Customer(int c_id, int c_d_id, int c_w_id,
                     String c_first, String c_middle, String c_last,
-                    String  C_STREET_1, String C_STREET_2,
-                    String C_CITY, String C_STATE, String C_ZIP, String C_PHONE,
-                    Date c_since, String c_credit, int c_credit_lim, float c_discount, float c_balance, int c_ytd_payment, int C_PAYMENT_CNT, int C_DELIVERY_CNT, String C_DATA) {
+                    String  C_STREET_1, String C_STREET_2, String C_CITY, String C_STATE, String C_ZIP, String C_PHONE,
+                    Date c_since, String c_credit, int c_credit_lim, float c_discount, float c_balance, int c_ytd_payment,
+                    int C_PAYMENT_CNT, int C_DELIVERY_CNT, String C_DATA) {
         this.c_id = c_id;
         this.c_d_id = c_d_id;
         this.c_w_id = c_w_id;
         this.c_discount = c_discount;
         this.c_first = c_first;
+        this.c_middle = c_middle;
         this.c_last = c_last;
         this.c_since = c_since;
         this.c_credit = c_credit;
@@ -89,6 +93,7 @@ public class Customer implements IEntity<Customer.CustomerId> {
                 + ",\"c_w_id\":\"" + c_w_id + "\""
                 + ",\"c_d_id\":\"" + c_d_id + "\""
                 + ",\"c_first\":\"" + c_first + "\""
+                + ",\"c_middle\":\"" + c_middle + "\""
                 + ",\"c_last\":\"" + c_last + "\""
                 + ",\"c_since\":\"" + c_since.getTime() + "\""
                 + ",\"c_credit\":\"" + c_credit + "\""

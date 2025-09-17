@@ -1,6 +1,7 @@
 package dk.ku.di.dms.vms.tpcc.common.events;
 
 import dk.ku.di.dms.vms.modb.api.annotations.Event;
+import dk.ku.di.dms.vms.tpcc.common.etc.WareDistId;
 
 import java.util.Arrays;
 
@@ -28,11 +29,9 @@ public final class NewOrderWareIn {
             this.allLocal = allLocal;
     }
 
-    public record WareDistId(int w_id, int d_id){}
-
     @SuppressWarnings("unused")
-    public NewOrderWareIn.WareDistId getId(){
-        return new NewOrderWareIn.WareDistId(this.w_id, this.d_id);
+    public WareDistId getId(){
+        return new WareDistId(this.w_id, this.d_id);
     }
 
     @Override

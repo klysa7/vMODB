@@ -20,7 +20,7 @@ public final class Main {
 
     private static int NUM_INGESTION_WORKERS;
 
-    public static void main(String[] args) throws Exception {
+    public static void main(String[] ignoredArgs) throws Exception {
         System.out.println("Select your deployment scheme: \n1 - Distributed \n2 - Local \nq - Quit");
         String choice = new Scanner(System.in).nextLine();
         switch (choice){

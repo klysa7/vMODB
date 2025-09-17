@@ -63,8 +63,10 @@ public final class Stock implements IEntity<Stock.StockId> {
     @Column
     public String s_data;
 
+    @SuppressWarnings("unused")
     public Stock(){}
 
+    @SuppressWarnings("unused")
     public Stock(int s_i_id, int s_w_id, int s_quantity, HashMap<Integer, String> s_dist, int S_YTD, int S_ORDER_CNT, int S_REMOTE_CNT, String s_data) {
         this.s_i_id = s_i_id;
         this.s_w_id = s_w_id;

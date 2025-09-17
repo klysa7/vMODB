@@ -26,8 +26,10 @@ public final class Item implements IEntity<Integer> {
     @Column
     public String i_data;
 
+    @SuppressWarnings("unused")
     public Item(){}
 
+    @SuppressWarnings("unused")
     public Item(int i_id, int i_im_id, float i_price, String i_name, String i_data) {
         this.i_id = i_id;
         this.i_im_id = i_im_id;

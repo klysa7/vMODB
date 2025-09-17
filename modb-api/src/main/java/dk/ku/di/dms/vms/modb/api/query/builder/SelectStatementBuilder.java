@@ -32,6 +32,10 @@ public class SelectStatementBuilder extends AbstractStatementBuilder  {
         return this.entryPoint.project(param);
     }
 
+    public NewProjectionOrFromClause max(String param){
+        return this.entryPoint.max(param);
+    }
+
     public NewProjectionOrFromClause avg(String param){
         return this.entryPoint.avg(param);
     }
@@ -85,6 +89,16 @@ public class SelectStatementBuilder extends AbstractStatementBuilder  {
             return this.agg(element);
         }
 
+        public NewProjectionOrFromClause max(String param){
+            GroupBySelectElement element = new GroupBySelectElement( param, GroupByOperationEnum.MAX );
+            this.statement.SQL.append( ", " );
+            this.statement.SQL.append( GroupByOperationEnum.MAX.name() );
+            this.statement.SQL.append( " ( " );
+            this.statement.SQL.append( param );
+            this.statement.SQL.append( " ) " );
+            return this.agg(element);
+        }
+
         public NewProjectionOrFromClause count(String param){
             GroupBySelectElement element = new GroupBySelectElement( param, GroupByOperationEnum.COUNT );
             this.statement.SQL.append( GroupByOperationEnum.COUNT.name() );
@@ -124,6 +138,10 @@ public class SelectStatementBuilder extends AbstractStatementBuilder  {
 
         public NewProjectionOrFromClause min(String param){
             return this.entryPoint.min(param);
+        }
+
+        public NewProjectionOrFromClause max(String param){
+            return this.entryPoint.max(param);
         }
 
         public NewProjectionOrFromClause count(String param){
@@ -250,8 +268,13 @@ public class SelectStatementBuilder extends AbstractStatementBuilder  {
             return this;
         }
 
-        public OrderByHavingBridge groupBy(String... params) {
+        @Override
+        public OrderByGroupByJoinWhereClauseBridge and(String param, final ExpressionTypeEnum expr, final Object value){
+            super.and(param, expr, value);
+            return this;
+        }
 
+        public OrderByHavingBridge groupBy(String... params) {
             for( int i = 0; i < params.length; i++ ) {
                 params[i] = params[i].replace(" ", "");
             }
@@ -271,7 +294,6 @@ public class SelectStatementBuilder extends AbstractStatementBuilder  {
             }
             this.statement.orderByClause = orderByClauseElements;
             return new OrderByClausePredicate(this.statement);
-
         }
 
     }

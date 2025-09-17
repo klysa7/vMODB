@@ -127,7 +127,7 @@ public final class SellerService {
     public static final SellerDashboard EMPTY_DASHBOARD = new SellerDashboard(new OrderSellerView(), List.of());
 
     /**
-     * Parallel by default -- http clients trigger it
+     * Parallel by default since HTTP clients trigger it directly
      */
     public SellerDashboard queryDashboard(int sellerId){
         LOGGER.log(DEBUG, "APP: Seller received a seller dashboard request for ID: "+ sellerId);

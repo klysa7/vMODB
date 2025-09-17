@@ -1,10 +1,9 @@
 package dk.ku.di.dms.vms.tpcc.common.events;
 
 import dk.ku.di.dms.vms.modb.api.annotations.Event;
+import dk.ku.di.dms.vms.tpcc.common.etc.WareItemId;
 
-import java.util.ArrayList;
 import java.util.HashSet;
-import java.util.List;
 import java.util.Set;
 
 @Event
@@ -43,9 +42,17 @@ public final class NewOrderWareOut {
     public Set<Integer> getId(){
         if(this.allLocal) return Set.of(this.w_id);
         Set<Integer> set = new HashSet<>(4);
-        List<Integer> list = new ArrayList<>(4);
         for (int supWare : this.supWares) {
             set.add(supWare);
+        }
+        return set;
+    }
+
+    @SuppressWarnings("unused")
+    public Set<WareItemId> getIds(){
+        Set<WareItemId> set = new HashSet<>(4);
+        for (int i = 0; i <= this.supWares.length; i++) {
+            set.add(new WareItemId(supWares[i], itemsIds[i]));
         }
         return set;
     }

@@ -104,7 +104,6 @@ public final class TPCcWorkflowTest {
         WorkloadUtils.createWorkload(NUM_WARE, 10, true, 50);
         List<Iterator<Object>> iterators = WorkloadUtils.mapWorkloadInputFiles(NUM_WARE);
         Assert.assertFalse(iterators.isEmpty());
-
         for(var iterator : iterators){
             while (iterator.hasNext()) {
                 System.out.println(iterator.next());
