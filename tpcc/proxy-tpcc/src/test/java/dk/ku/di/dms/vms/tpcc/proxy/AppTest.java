@@ -6,6 +6,8 @@ import dk.ku.di.dms.vms.tpcc.proxy.workload.WorkloadUtils;
 import org.junit.Assert;
 import org.junit.Test;
 
+import java.io.IOException;
+
 public final class AppTest {
 
     private static final int NUM_WARE = 2;
@@ -25,9 +27,9 @@ public final class AppTest {
     }
 
     @Test
-    public void testWorkload() {
+    public void testWorkload() throws IOException {
         // create
-        WorkloadUtils.createWorkload(NUM_WARE, 100000, false);
+        WorkloadUtils.createWorkload(NUM_WARE, 100000, false, 100);
         // load
         var loaded = WorkloadUtils.mapWorkloadInputFiles(NUM_WARE);
         Assert.assertEquals(NUM_WARE, loaded.size());

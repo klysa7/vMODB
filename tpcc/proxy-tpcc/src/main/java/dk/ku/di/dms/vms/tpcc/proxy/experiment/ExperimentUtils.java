@@ -31,10 +31,10 @@ public final class ExperimentUtils {
 
     private static int lastExperimentLastTID = 0;
 
-    public static ExperimentStats runExperiment(Coordinator coordinator, List<Iterator<NewOrderWareIn>> input, int runTime, int warmUp) {
+    public static ExperimentStats runExperiment(Coordinator coordinator, List<Iterator<Object>> input, int runTime, int warmUp) {
 
         // provide a consumer to avoid depending on the coordinator
-        Function<NewOrderWareIn, Long> func = newOrderInputBuilder(coordinator);
+        Function<Object, Long> func = tpccInputBuilder(coordinator);
 
         if(CONSUMER_REGISTERED) {
             // clean up possible entries from previous run
@@ -179,10 +179,11 @@ public final class ExperimentUtils {
 
     private record BatchStats(long batchId, long lastTid, long endTs){}
 
-    private static Function<NewOrderWareIn, Long> newOrderInputBuilder(final Coordinator coordinator) {
-        return newOrderWareIn -> {
-            TransactionInput.Event eventPayload = new TransactionInput.Event("new-order-ware-in", newOrderWareIn.toString());
-            TransactionInput txInput = new TransactionInput("new_order", eventPayload);
+    private static Function<Object, Long> tpccInputBuilder(final Coordinator coordinator) {
+        return tpccInput -> {
+            boolean newOrder = tpccInput instanceof NewOrderWareIn;
+            TransactionInput.Event eventPayload = new TransactionInput.Event(newOrder ? "new-order-ware-in" : "order-status-in", tpccInput.toString());
+            TransactionInput txInput = new TransactionInput(newOrder ? "new_order" : "order_status", eventPayload);
             coordinator.queueTransactionInput(txInput);
             return (long) BATCH_TO_FINISHED_TS_MAP.size() + 1;
         };
@@ -190,12 +191,20 @@ public final class ExperimentUtils {
 
     public static Coordinator loadCoordinator(Properties properties) {
         Map<String, TransactionDAG> transactionMap = new HashMap<>();
+        // new order
         TransactionDAG newOrderDag = TransactionBootstrap.name("new_order")
                 .input("a", "warehouse", "new-order-ware-in")
                 .internal("b", "inventory", "new-order-ware-out", "a")
                 .terminal("c", "order", "b")
                 .build();
         transactionMap.put(newOrderDag.name, newOrderDag);
+        // order status
+        TransactionDAG orderStatusDag = TransactionBootstrap.name("order_status")
+                .input("a", "warehouse", "order-status-in")
+                .terminal("b", "order", "a")
+                .build();
+        transactionMap.put(orderStatusDag.name, orderStatusDag);
+
         Map<String, IdentifiableNode> starterVMSs = getVmsMap(properties);
         Coordinator coordinator = Coordinator.build(properties, starterVMSs, transactionMap, (ignored1) -> IHttpHandler.DEFAULT);
         Thread coordinatorThread = new Thread(coordinator);

@@ -54,10 +54,13 @@ public final class ConfigUtils {
     }
 
     public static String getCallerPackage(){
-        for (StackTraceElement element : Thread.currentThread().getStackTrace()) {
-            if ("main".equals(element.getMethodName())) {
+        StackTraceElement[] stackTrace = Thread.currentThread().getStackTrace();
+        for (int i = 0; i < stackTrace.length; i++) {
+            StackTraceElement element = stackTrace[i];
+            if ("build".equals(element.getMethodName()) &&
+                    "VmsApplication.java".equals(element.getFileName())) {
                 try {
-                    Class<?> mainClass = Class.forName(element.getClassName());
+                    Class<?> mainClass = Class.forName(stackTrace[i+1].getClassName());
                     Package pkg = mainClass.getPackage();
                     return pkg != null ? pkg.getName() : "(default package)";
                 } catch (ClassNotFoundException e) {

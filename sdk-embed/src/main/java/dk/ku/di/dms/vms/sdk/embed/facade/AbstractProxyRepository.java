@@ -59,7 +59,7 @@ public abstract class AbstractProxyRepository<PK extends Serializable, T extends
     /**
      * <a href="http://mydailyjava.blogspot.com/2022/02/using-byte-buddy-for-proxy-creation.html">Proxy creation in ByteBuddy</a>
      */
-    @SuppressWarnings("rawtypes")
+    @SuppressWarnings({"rawtypes, unused"})
     public static final class Interceptor {
         @RuntimeType
         public static Object intercept(

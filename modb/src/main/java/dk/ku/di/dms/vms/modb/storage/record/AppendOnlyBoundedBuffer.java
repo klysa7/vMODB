@@ -24,12 +24,12 @@ import static dk.ku.di.dms.vms.modb.common.memory.MemoryUtils.UNSAFE;
  * - Can also be used for caching writes of transactions
  *
  */
-public final class AppendOnlyBuffer extends RecordBufferContext {
+public final class AppendOnlyBoundedBuffer extends RecordBufferContext {
 
     // the offset of the bucket
     private long nextOffset;
 
-    public AppendOnlyBuffer(MemorySegment memorySegment, String fileName) {
+    public AppendOnlyBoundedBuffer(MemorySegment memorySegment, String fileName) {
         super(memorySegment, fileName);
         this.nextOffset = memorySegment.address();
     }

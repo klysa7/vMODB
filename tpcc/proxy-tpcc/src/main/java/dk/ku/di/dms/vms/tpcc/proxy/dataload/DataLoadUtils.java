@@ -5,10 +5,7 @@ import dk.ku.di.dms.vms.sdk.embed.entity.EntityHandler;
 import dk.ku.di.dms.vms.tpcc.proxy.infra.MinimalHttpClient;
 import dk.ku.di.dms.vms.tpcc.proxy.infra.TPCcConstants;
 
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.*;
 import java.util.function.BiFunction;
 
@@ -17,6 +14,14 @@ import static java.lang.System.Logger.Level.*;
 public final class DataLoadUtils {
 
     private static final System.Logger LOGGER = System.getLogger(DataLoadUtils.class.getName());
+
+    public static Map<String, String> mapVmsToHost(Properties properties) {
+        Map<String, String> vmsToHostMap = new HashMap<>();
+        vmsToHostMap.put("warehouse_host", properties.getProperty("warehouse_host"));
+        vmsToHostMap.put("inventory_host", properties.getProperty("inventory_host"));
+        vmsToHostMap.put("order_host", properties.getProperty("order_host"));
+        return vmsToHostMap;
+    }
 
     @SuppressWarnings("rawtypes")
     public static Map<String, QueueTableIterator> mapTablesFromDisk(Map<String, UniqueHashBufferIndex> tableToIndexMap,

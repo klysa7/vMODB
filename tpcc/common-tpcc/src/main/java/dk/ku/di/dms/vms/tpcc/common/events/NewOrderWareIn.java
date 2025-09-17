@@ -50,29 +50,23 @@ public final class NewOrderWareIn {
 
     @Override
     public boolean equals(Object o) {
-        if (this == o) return true;
-        if (o == null || getClass() != o.getClass()) return false;
-
-        NewOrderWareIn that = (NewOrderWareIn) o;
-
-        if (this.w_id != that.w_id) return false;
-        if (this.d_id != that.d_id) return false;
-        if (this.c_id != that.c_id) return false;
-        if (this.allLocal != that.allLocal) return false;
-        /*
-        if (!Arrays.equals(itemsIds, that.itemsIds)) return false;
-        if (!Arrays.equals(supWares, that.supWares)) return false;
-        return Arrays.equals(qty, that.qty);
-         */
-        int maxSize = Math.min(this.itemsIds.length, that.itemsIds.length);
-        int idx = 0;
-        while(idx < maxSize){
-            if(this.itemsIds[idx] != that.itemsIds[idx]){
-                return this.itemsIds[idx] == -1 || that.itemsIds[idx] == -1;
+        if (o instanceof NewOrderWareIn that){
+            if (this.w_id != that.w_id) return false;
+            if (this.d_id != that.d_id) return false;
+            if (this.c_id != that.c_id) return false;
+            if (this.allLocal != that.allLocal) return false;
+            // have to do this because remaining fields are filled as -1
+            int maxSize = Math.min(this.itemsIds.length, that.itemsIds.length);
+            int idx = 0;
+            while(idx < maxSize){
+                if(this.itemsIds[idx] != that.itemsIds[idx]){
+                    return this.itemsIds[idx] == -1 || that.itemsIds[idx] == -1;
+                }
+                idx++;
             }
-            idx++;
+            return true;
         }
-        return true;
+        return false;
     }
 
     @Override

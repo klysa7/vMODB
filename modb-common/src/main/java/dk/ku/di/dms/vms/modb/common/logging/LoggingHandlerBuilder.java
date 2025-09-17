@@ -16,8 +16,11 @@ public final class LoggingHandlerBuilder {
         String fileName = identifier + "_" + new Date().getTime() +".llog";
         String userHome = ConfigUtils.getUserHome();
         String basePath = userHome + "/vms";
-        File theDir = new File(basePath);
-        assert theDir.exists() || theDir.mkdirs();
+        File file = new File(basePath);
+        boolean fileExists = file.exists() || file.mkdirs();
+        if(!fileExists){
+            throw new RuntimeException("It was not possible to create the file "+file);
+        }
         String filePath = basePath + "/" + fileName;
         Path path = Paths.get(filePath);
         FileChannel fileChannel;

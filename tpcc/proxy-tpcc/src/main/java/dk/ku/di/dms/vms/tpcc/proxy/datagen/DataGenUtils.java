@@ -46,17 +46,15 @@ public final class DataGenUtils {
         return min + div;
     }
 
+    private static final String[] n = {"BAR", "OUGHT", "ABLE", "PRI", "PRES", "ESE", "ANTI", "CALLY", "ATION", "EING"};
+
     /**
      * Based on <a href="https://github.com/AgilData/tpcc/blob/master/src/main/java/com/codefutures/tpcc/Util.java#L224">AgilData</a>
      * @param num Base number
      * @return A last name
      */
-    static String lastName(int num) {
-        String name;
-        String[] n =
-                {"BAR", "OUGHT", "ABLE", "PRI", "PRES",
-                        "ESE", "ANTI", "CALLY", "ATION", "EING"};
-        name = n[num / 100];
+    public static String lastName(int num) {
+        String name = n[num / 100];
         name = name + n[(num / 10) % 10];
         name = name + n[num % 10];
         return name;

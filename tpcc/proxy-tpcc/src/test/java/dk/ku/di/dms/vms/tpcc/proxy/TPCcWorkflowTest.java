@@ -3,6 +3,7 @@ package dk.ku.di.dms.vms.tpcc.proxy;
 import dk.ku.di.dms.vms.coordinator.Coordinator;
 import dk.ku.di.dms.vms.modb.common.serdes.VmsSerdesProxyBuilder;
 import dk.ku.di.dms.vms.modb.common.utils.ConfigUtils;
+import dk.ku.di.dms.vms.modb.definition.key.composite.TripleCompositeKey;
 import dk.ku.di.dms.vms.sdk.embed.client.VmsApplication;
 import dk.ku.di.dms.vms.tpcc.proxy.dataload.DataLoadUtils;
 import dk.ku.di.dms.vms.tpcc.proxy.entities.District;
@@ -21,12 +22,12 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.Properties;
+import java.util.*;
 
 @FixMethodOrder(MethodSorters.NAME_ASCENDING)
-public final class TPCcWorkloadTest {
+public final class TPCcWorkflowTest {
 
-    private static final int NUM_WARE = 2;
+    private static final int NUM_WARE = 1;
 
     private static final int RUN_TIME = 10000;
 
@@ -55,9 +56,9 @@ public final class TPCcWorkloadTest {
         File ordersFile = dk.ku.di.dms.vms.modb.utils.StorageUtils.buildFile("orders");
         File newOrdersFile = dk.ku.di.dms.vms.modb.utils.StorageUtils.buildFile("new_orders");
 
-        orderLineFile.delete();
-        ordersFile.delete();
-        newOrdersFile.delete();
+        if(orderLineFile.delete() && ordersFile.delete() && newOrdersFile.delete()){
+            System.out.println("Order VMS records deleted.");
+        }
 
         String basePathStr = dk.ku.di.dms.vms.modb.utils.StorageUtils.getBasePath();
         Path basePath = Paths.get(basePathStr);
@@ -67,7 +68,9 @@ public final class TPCcWorkloadTest {
                 // find the log files
                 .filter(path -> path.toString().contains(".llog"))) {
             for(var path : paths.toList()){
-                path.toFile().delete();
+                if(path.toFile().delete()){
+                    System.out.println("Logical log file deleted: "+path);
+                }
             }
         } catch (IOException ignored){ }
 
@@ -92,20 +95,53 @@ public final class TPCcWorkloadTest {
     }
 
     @Test
-    public void test_B_load_and_ingest() throws IOException {
+    public void test_A_create_data() {
+        StorageUtils.createTables(METADATA, NUM_WARE);
+    }
+
+    @Test
+    public void test_B_create_workload() throws IOException {
+        WorkloadUtils.createWorkload(NUM_WARE, 10, true, 50);
+        List<Iterator<Object>> iterators = WorkloadUtils.mapWorkloadInputFiles(NUM_WARE);
+        Assert.assertFalse(iterators.isEmpty());
+
+        for(var iterator : iterators){
+            while (iterator.hasNext()) {
+                System.out.println(iterator.next());
+            }
+        }
+    }
+
+    @Test
+    public void test_C_test_hash_entry() {
+        // generate entries for district for different warehouses, compare the hashes generated. try to find a way to avoid duplicate hashes
+        Map<Integer, List<TripleCompositeKey>> map = new HashMap<>();
+        for(int w_id = 1; w_id <= NUM_WARE; w_id++){
+            for(int d_id = 1; d_id <= TPCcConstants.NUM_DIST_PER_WARE; d_id++) {
+                for(int c_id = 1; c_id <= TPCcConstants.NUM_CUST_PER_DIST; c_id++) {
+                    var key = TripleCompositeKey.of(c_id, d_id, w_id);
+                    map.computeIfAbsent(key.hashCode(), ignored -> new ArrayList<>()).add(key);
+                    Assert.assertFalse(map.get(key.hashCode()).size() > 1);
+                }
+            }
+        }
+    }
+
+    @Test
+    public void test_D_load_and_ingest() throws IOException {
         var tableToIndexMap = StorageUtils.mapTablesInDisk(METADATA, NUM_WARE);
         var tableInputMap = DataLoadUtils.mapTablesFromDisk(tableToIndexMap, METADATA.entityHandlerMap());
-        // FIXME DataLoadUtils.ingestData(tableInputMap);
+        var vmsToHostMap = DataLoadUtils.mapVmsToHost(PROPERTIES);
+        DataLoadUtils.ingestData(tableInputMap, vmsToHostMap, Runtime.getRuntime().availableProcessors());
         hasDataBeenIngested();
     }
 
     @Test
-    public void test_C_submit_workload() throws IOException {
+    public void test_E_submit_workload() throws IOException {
         // mapping all the workload data is not a good idea, it overloads the Java heap
         //  perhaps it is better to iteratively load from memory. instead of list, pass an iterator to the worker
         //  link a file/worker to a warehouse, so there is no need to partition the file among workers
         var input = WorkloadUtils.mapWorkloadInputFiles(NUM_WARE);
-
         Assert.assertFalse(input.isEmpty());
 
         Coordinator coordinator = ExperimentUtils.loadCoordinator(PROPERTIES);
