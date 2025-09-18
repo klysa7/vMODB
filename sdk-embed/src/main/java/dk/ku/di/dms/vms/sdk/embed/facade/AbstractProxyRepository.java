@@ -283,7 +283,7 @@ public abstract class AbstractProxyRepository<PK extends Serializable, T extends
         Object[] object = objects.getFirst();
         Constructor<?> constructor = clazz.getDeclaredConstructors()[0];
         Field[] fields = clazz.getFields();
-        return this.buildDtoInstance(object, constructor, fields);
+        return this.buildDtoInstanceSingle(object, constructor, fields);
     }
 
     @Override
@@ -293,14 +293,14 @@ public abstract class AbstractProxyRepository<PK extends Serializable, T extends
         Field[] fields = clazz.getFields();
         List<DTO> result = new ArrayList<>();
         for(Object[] object : objects){
-            DTO dto = buildDtoInstance(object, constructor, fields);
+            DTO dto = buildDtoInstanceMany(object, constructor, fields);
             result.add(dto);
         }
         return result;
     }
 
     @SuppressWarnings("unchecked")
-    private <DTO> DTO buildDtoInstance(Object[] object, Constructor<?> constructor, Field[] fields) {
+    private <DTO> DTO buildDtoInstanceSingle(Object[] object, Constructor<?> constructor, Field[] fields) {
         try {
             DTO dto = (DTO) constructor.newInstance();
             int i = 0;
@@ -310,6 +310,23 @@ public abstract class AbstractProxyRepository<PK extends Serializable, T extends
                     field.set(dto, object[i]);
                 }
                 i++;
+            }
+            return dto;
+        } catch (InstantiationException | InvocationTargetException| IllegalAccessException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private <DTO> DTO buildDtoInstanceMany(Object[] object, Constructor<?> constructor, Field[] fields) {
+        try {
+            DTO dto = (DTO) constructor.newInstance();
+            for (var field : fields) {
+                int i = this.table.schema().columnPosition(field.getName());
+                // check if field was captured by query
+                if(object[i] != null){
+                    field.set(dto, object[i]);
+                }
             }
             return dto;
         } catch (InstantiationException | InvocationTargetException| IllegalAccessException e) {

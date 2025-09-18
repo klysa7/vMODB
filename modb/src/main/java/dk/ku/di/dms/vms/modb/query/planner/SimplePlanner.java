@@ -17,9 +17,7 @@ import dk.ku.di.dms.vms.modb.query.execution.operators.IndexMultiAggregateScan;
 import dk.ku.di.dms.vms.modb.query.execution.operators.count.IndexCount;
 import dk.ku.di.dms.vms.modb.query.execution.operators.count.IndexCountGroupBy;
 import dk.ku.di.dms.vms.modb.query.execution.operators.min.IndexGroupByMinWithProjection;
-import dk.ku.di.dms.vms.modb.query.execution.operators.scan.AbstractScan;
-import dk.ku.di.dms.vms.modb.query.execution.operators.scan.FullScanWithProjection;
-import dk.ku.di.dms.vms.modb.query.execution.operators.scan.IndexScanWithProjection;
+import dk.ku.di.dms.vms.modb.query.execution.operators.scan.*;
 import dk.ku.di.dms.vms.modb.query.execution.operators.sum.IndexSum;
 import dk.ku.di.dms.vms.modb.query.execution.operators.sum.Sum;
 import dk.ku.di.dms.vms.modb.transaction.multiversion.index.IMultiVersionIndex;
@@ -71,7 +69,10 @@ public final class SimplePlanner {
 
     public AbstractSimpleOperator plan(QueryTree queryTree) {
         if(queryTree.isSimpleScan()){
-            return this.planSimpleSelect(queryTree);
+            return this.planSimpleScan(queryTree);
+        }
+        if(queryTree.isSimpleScanWithOrder()){
+            return this.planSimpleScanWithOrder(queryTree);
         }
         if(queryTree.isSimpleAggregate()){
             return this.planSimpleAggregate(queryTree);
@@ -217,16 +218,32 @@ public final class SimplePlanner {
         }
     }
 
-    private AbstractScan planSimpleSelect(QueryTree queryTree) {
+    private AbstractScan planSimpleScanWithOrder(QueryTree queryTree) {
+        Table tb = queryTree.projections.getFirst().table;
+        IndexSelectionVerdict indexSelectionVerdict = this.getOptimalIndex(tb, queryTree.wherePredicates);
+        int[] projectionColumns = new int[queryTree.projections.size()];
+        int idxCol = 0;
+        for(var column : queryTree.projections){
+            projectionColumns[idxCol] = column.getColumnPosition();
+            idxCol++;
+        }
+        int entrySize = calculateQueryResultEntrySize(tb.schema(), queryTree.projections.size(), projectionColumns);
+        if(indexSelectionVerdict.indexIsUsedGivenWhereClause()) {
+            return new IndexScanWithOrder(indexSelectionVerdict.index(), projectionColumns,
+                    queryTree.orderByPredicates.getFirst().columnReference.columnPosition,  entrySize);
+        } else {
+            return new FullScanWithOrder(tb.primaryKeyIndex(), projectionColumns,
+                    queryTree.orderByPredicates.getFirst().columnReference.columnPosition,  entrySize);
+        }
+          }
 
+    private AbstractScan planSimpleScan(QueryTree queryTree) {
         // given it is simple, pick the table from one of the columns
         // must always have at least one projected column
         Table tb = queryTree.projections.getFirst().table;
-
         // avoid one of the columns to have expression different from EQUALS
         // to be picked by unique and non-unique index
         IndexSelectionVerdict indexSelectionVerdict = this.getOptimalIndex(tb, queryTree.wherePredicates);
-
         // build projection
         int[] projectionColumns = new int[queryTree.projections.size()];
         int idxCol = 0;
@@ -234,15 +251,13 @@ public final class SimplePlanner {
             projectionColumns[idxCol] = column.getColumnPosition();
             idxCol++;
         }
-        
         int entrySize = calculateQueryResultEntrySize(tb.schema(), queryTree.projections.size(), projectionColumns);
-
         if(indexSelectionVerdict.indexIsUsedGivenWhereClause()) {
             // return the index scan with projection
-            return new IndexScanWithProjection(indexSelectionVerdict.index(), projectionColumns, entrySize);
+            return new IndexScan(indexSelectionVerdict.index(), projectionColumns, entrySize);
         } else {
             // then must get the PK index, ScanWithProjection
-            return new FullScanWithProjection(tb.primaryKeyIndex(), projectionColumns, entrySize);
+            return new FullScan(tb.primaryKeyIndex(), projectionColumns, entrySize);
         }
     }
 

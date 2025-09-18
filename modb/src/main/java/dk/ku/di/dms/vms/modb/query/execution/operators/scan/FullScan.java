@@ -8,11 +8,11 @@ import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 
-public class FullScanWithProjection extends AbstractScan {
+public class FullScan extends AbstractScan {
 
-    public FullScanWithProjection(IMultiVersionIndex index,
-                                  int[] projectionColumns,
-                                  int entrySize) {
+    public FullScan(IMultiVersionIndex index,
+                    int[] projectionColumns,
+                    int entrySize) {
         super(entrySize, index, projectionColumns);
     }
 
@@ -53,7 +53,7 @@ public class FullScanWithProjection extends AbstractScan {
     }
 
     @Override
-    public FullScanWithProjection asFullScan() {
+    public FullScan asFullScan() {
         return this;
     }
 

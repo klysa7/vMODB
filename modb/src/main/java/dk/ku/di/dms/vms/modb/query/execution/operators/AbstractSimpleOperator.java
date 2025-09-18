@@ -2,9 +2,7 @@ package dk.ku.di.dms.vms.modb.query.execution.operators;
 
 import dk.ku.di.dms.vms.modb.query.execution.operators.join.UniqueHashJoinWithProjection;
 import dk.ku.di.dms.vms.modb.query.execution.operators.min.IndexGroupByMinWithProjection;
-import dk.ku.di.dms.vms.modb.query.execution.operators.scan.AbstractScan;
-import dk.ku.di.dms.vms.modb.query.execution.operators.scan.FullScanWithProjection;
-import dk.ku.di.dms.vms.modb.query.execution.operators.scan.IndexScanWithProjection;
+import dk.ku.di.dms.vms.modb.query.execution.operators.scan.*;
 
 /**
  * Used for simple queries.
@@ -36,6 +34,14 @@ public abstract class AbstractSimpleOperator {
         return false;
     }
 
+    public boolean isIndexScanWithOrder(){
+        return false;
+    }
+
+    public boolean isFullScanWithOrder() {
+        return false;
+    }
+
     public boolean isHashJoin() { return false; }
 
     public IndexGroupByMinWithProjection asIndexAggregationScan(){
@@ -46,11 +52,19 @@ public abstract class AbstractSimpleOperator {
         throw new IllegalStateException("No index scan operator");
     }
 
-    public IndexScanWithProjection asIndexScan(){
+    public IndexScan asIndexScan(){
         throw new IllegalStateException("No index scan operator");
     }
 
-    public FullScanWithProjection asFullScan(){
+    public IndexScanWithOrder asIndexScanWithOrder(){
+        throw new IllegalStateException("No index scan operator");
+    }
+
+    public FullScanWithOrder asFullScanWithOrder() {
+        throw new IllegalStateException("No index scan operator");
+    }
+
+    public FullScan asFullScan(){
         throw new IllegalStateException("No full scan operator");
     }
 

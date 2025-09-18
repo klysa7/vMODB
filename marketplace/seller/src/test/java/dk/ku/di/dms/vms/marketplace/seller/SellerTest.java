@@ -63,8 +63,8 @@ public final class SellerTest {
         vms.getTransactionManager().beginTransaction(LAST_TID, 0, LAST_TID, true);
         SellerDashboard dash = sellerService.queryDashboard(1);
         Assert.assertNotNull(dash);
-        Assert.assertEquals(dash.view.count_items, 10);
-        Assert.assertEquals(dash.view.count_orders, 10);
+        Assert.assertEquals(10, dash.view.count_items);
+        Assert.assertEquals(10, dash.view.count_orders);
     }
 
     @Test
@@ -77,8 +77,8 @@ public final class SellerTest {
         vms.getTransactionManager().beginTransaction(LAST_TID, 0, LAST_TID, true);
         SellerDashboard dash = sellerService.queryDashboard(1);
         Assert.assertNotNull(dash);
-        Assert.assertEquals(dash.view.count_items, 1);
-        Assert.assertEquals(dash.view.count_orders, 1);
+        Assert.assertEquals(1, dash.view.count_items);
+        Assert.assertEquals(1, dash.view.count_orders);
     }
 
     @Test

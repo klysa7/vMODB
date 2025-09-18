@@ -18,9 +18,9 @@ import java.util.List;
  * We can have a method called seal or close() in abstract operator
  * It will put the information on header.
  */
-public final class IndexScanWithProjection extends AbstractScan {
+public final class IndexScan extends AbstractScan {
 
-    public IndexScanWithProjection(IMultiVersionIndex index, int[] projectionColumns, int entrySize) {
+    public IndexScan(IMultiVersionIndex index, int[] projectionColumns, int entrySize) {
         super(entrySize, index, projectionColumns);
     }
 
@@ -30,7 +30,7 @@ public final class IndexScanWithProjection extends AbstractScan {
     }
 
     @Override
-    public IndexScanWithProjection asIndexScan() {
+    public IndexScan asIndexScan() {
         return this;
     }
 

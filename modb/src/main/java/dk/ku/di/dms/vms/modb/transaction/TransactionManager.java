@@ -19,8 +19,8 @@ import dk.ku.di.dms.vms.modb.query.execution.filter.FilterContext;
 import dk.ku.di.dms.vms.modb.query.execution.filter.FilterContextBuilder;
 import dk.ku.di.dms.vms.modb.query.execution.operators.AbstractSimpleOperator;
 import dk.ku.di.dms.vms.modb.query.execution.operators.min.IndexGroupByMinWithProjection;
-import dk.ku.di.dms.vms.modb.query.execution.operators.scan.FullScanWithProjection;
-import dk.ku.di.dms.vms.modb.query.execution.operators.scan.IndexScanWithProjection;
+import dk.ku.di.dms.vms.modb.query.execution.operators.scan.FullScan;
+import dk.ku.di.dms.vms.modb.query.execution.operators.scan.IndexScan;
 import dk.ku.di.dms.vms.modb.query.planner.SimplePlanner;
 import dk.ku.di.dms.vms.modb.transaction.multiversion.index.IMultiVersionIndex;
 import dk.ku.di.dms.vms.modb.transaction.multiversion.index.NonUniqueSecondaryIndex;
@@ -104,6 +104,12 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
                 IKey[] keys = this.getMultiKeysFromWhereClause(wherePredicates.get(0));
                 return scanOperator.asIndexScan().runAsEmbedded(this.txCtxMap.get(Thread.currentThread().threadId()), keys);
             }
+        } else if(scanOperator.isIndexScanWithOrder()) {
+            IKey key = this.getIndexedKeysFromWhereClause(wherePredicates, scanOperator.asIndexMultiAggregationScan().index());
+            return scanOperator.asIndexScanWithOrder().runAsEmbedded(this.txCtxMap.get(Thread.currentThread().threadId()), key);
+        } else if(scanOperator.isFullScanWithOrder()){
+            FilterContext filterContext = FilterContextBuilder.build(wherePredicates);
+            return scanOperator.asFullScanWithOrder().runAsEmbedded(this.txCtxMap.get(Thread.currentThread().threadId()), filterContext);
         } else if(scanOperator.isIndexAggregationScan()){
             return scanOperator.asIndexAggregationScan().runAsEmbedded(this.txCtxMap.get(Thread.currentThread().threadId()));
         } else if(scanOperator.isIndexMultiAggregationScan()){
@@ -387,7 +393,7 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
     }
 
     public MemoryRefNode run(List<WherePredicate> wherePredicates,
-                             IndexScanWithProjection operator){
+                             IndexScan operator){
         /* COMMENTED FOR NOW
         int i = 0;
         Object[] keyList = new Object[operator.index.columns().length];
@@ -419,7 +425,7 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
 
     public MemoryRefNode run(Table table,
                              List<WherePredicate> wherePredicates,
-                             FullScanWithProjection operator){
+                             FullScan operator){
         FilterContext filterContext = FilterContextBuilder.build(wherePredicates);
         return null; //operator.run( table.underlyingPrimaryKeyIndex(), filterContext );
     }

@@ -55,13 +55,14 @@ public final class SelectStatement extends AbstractStatement {
     }
 
     public SelectStatement(StringBuilder sql, List<String> selectClause, List<GroupBySelectElement> groupBySelectClause,
-                           List<String> fromClause, List<WhereClauseElement> whereClause, List<String> groupByClause) {
+                           List<String> fromClause, List<WhereClauseElement> whereClause, List<String> groupByClause, List<OrderByClauseElement> orderByClause) {
         super(sql);
         this.selectClause = selectClause;
         this.groupBySelectClause = groupBySelectClause;
         this.fromClause = fromClause;
         this.whereClause.addAll(whereClause);
         this.groupByClause = groupByClause;
+        this.orderByClause = orderByClause;
     }
 
     @Override
@@ -86,7 +87,7 @@ public final class SelectStatement extends AbstractStatement {
             );
         }
         return new SelectStatement(this.SQL, this.selectClause, this.groupBySelectClause,
-                this.fromClause, whereClause_, this.groupByClause);
+                this.fromClause, whereClause_, this.groupByClause, this.orderByClause);
     }
 
 }

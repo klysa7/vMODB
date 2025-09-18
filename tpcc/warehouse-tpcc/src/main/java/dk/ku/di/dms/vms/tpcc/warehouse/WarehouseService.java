@@ -19,9 +19,12 @@ import java.util.List;
 
 import static dk.ku.di.dms.vms.modb.api.enums.TransactionTypeEnum.R;
 import static dk.ku.di.dms.vms.modb.api.enums.TransactionTypeEnum.RW;
+import static java.lang.System.Logger.Level.DEBUG;
 
 @Microservice("warehouse")
 public final class WarehouseService {
+
+    private static final System.Logger LOGGER = System.getLogger(WarehouseService.class.getName());
 
     private final IWarehouseRepository warehouseRepository;
     private final IDistrictRepository districtRepository;
@@ -48,13 +51,18 @@ public final class WarehouseService {
     @PartitionBy(clazz = OrderStatusIn.class, method = "getId")
     public OrderStatusOut processOrderStatus(OrderStatusIn in) {
         if(in.by_name){
-            List<CustomerInfoDTO> customers = this.customerRepository
-                    .fetchMany(ORDER_STATUS_BASE_QUERY.setParam( in.w_id, in.d_id, in.c_last ), CustomerInfoDTO.class);
-
+            List<CustomerInfoDTO> customers = this.issueOrderStatusQuery(in);
+            LOGGER.log(DEBUG, customers);
         } else {
             Customer customer = this.customerRepository.lookupByKey(new Customer.CustomerId(in.c_id, in.d_id, in.w_id));
+            LOGGER.log(DEBUG, customer);
         }
         return new OrderStatusOut(in.w_id, in.d_id, in.c_id);
+    }
+
+    public List<CustomerInfoDTO> issueOrderStatusQuery(OrderStatusIn in) {
+        return this.customerRepository
+                .fetchMany(ORDER_STATUS_BASE_QUERY.setParam( in.w_id, in.d_id, in.c_last ), CustomerInfoDTO.class);
     }
 
     @Inbound(values = "new-order-ware-in")

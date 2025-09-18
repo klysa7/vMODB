@@ -16,13 +16,13 @@ import java.util.Date;
 public class Customer implements IEntity<Customer.CustomerId> {
 
     public static class CustomerId implements Serializable {
-        public long c_id;
+        public int c_id;
         public int c_d_id;
         public int c_w_id;
 
         public CustomerId(){}
 
-        public CustomerId(long c_id, int c_d_id, int c_w_id) {
+        public CustomerId(int c_id, int c_d_id, int c_w_id) {
             this.c_id = c_id;
             this.c_d_id = c_d_id;
             this.c_w_id = c_w_id;

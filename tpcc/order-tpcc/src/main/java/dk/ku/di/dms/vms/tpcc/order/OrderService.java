@@ -1,13 +1,11 @@
 package dk.ku.di.dms.vms.tpcc.order;
 
-import dk.ku.di.dms.vms.modb.api.annotations.Inbound;
-import dk.ku.di.dms.vms.modb.api.annotations.Microservice;
-import dk.ku.di.dms.vms.modb.api.annotations.Parallel;
-import dk.ku.di.dms.vms.modb.api.annotations.Transactional;
+import dk.ku.di.dms.vms.modb.api.annotations.*;
 import dk.ku.di.dms.vms.modb.api.query.builder.QueryBuilderFactory;
 import dk.ku.di.dms.vms.modb.api.query.enums.ExpressionTypeEnum;
 import dk.ku.di.dms.vms.modb.api.query.statement.SelectStatement;
 import dk.ku.di.dms.vms.tpcc.common.events.NewOrderInvOut;
+import dk.ku.di.dms.vms.tpcc.common.events.NewOrderWareOut;
 import dk.ku.di.dms.vms.tpcc.common.events.OrderStatusOut;
 import dk.ku.di.dms.vms.tpcc.order.dto.OrderInfoDto;
 import dk.ku.di.dms.vms.tpcc.order.entities.NewOrder;
@@ -47,6 +45,7 @@ public final class OrderService {
 
     @Inbound(values = "order-status-out")
     @Transactional(type = R)
+    @PartitionBy(clazz = OrderStatusOut.class, method = "getId")
     public void processOrderStatus(OrderStatusOut in){
         int max_o_id = this.orderRepository.fetchOne( ORDER_BASE_QUERY, int.class );
         OrderInfoDto orderInfoDto = this.orderRepository.getOrderInfo( max_o_id, in.d_id, in.w_id, in.c_id );

@@ -375,7 +375,7 @@ public class SelectStatementBuilder extends AbstractStatementBuilder  {
         }
 
         public SelectStatement build(){
-            return statement;
+            return this.statement;
         }
 
     }

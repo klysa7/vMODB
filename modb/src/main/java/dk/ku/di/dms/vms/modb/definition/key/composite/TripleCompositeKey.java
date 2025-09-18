@@ -26,10 +26,10 @@ public final class TripleCompositeKey extends BaseComposite implements IKey {
 
     @Override
     public boolean equals(Object key){
-        return key instanceof TripleCompositeKey pairCompositeKey &&
-                this.value0.equals(pairCompositeKey.value0) &&
-                this.value1.equals(pairCompositeKey.value1) &&
-                this.value2.equals(pairCompositeKey.value2);
+        return key instanceof TripleCompositeKey tripleCompositeKey &&
+                this.value0.equals(tripleCompositeKey.value0) &&
+                this.value1.equals(tripleCompositeKey.value1) &&
+                this.value2.equals(tripleCompositeKey.value2);
     }
 
     @Override

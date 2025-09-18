@@ -83,19 +83,6 @@ public final class VmsTransactionTaskBuilder {
             return partitionIdAux;
         }
 
-        private void readOnlyRun(){
-            try {
-                transactionManager.beginTransaction(this.tid, -1, this.lastTid, true);
-                Object output = this.signature.method().invoke(this.signature.vmsInstance(), this.inputEvent);
-                OutboundEventResult eventOutput = new OutboundEventResult(this.tid, this.batch, this.signature.outputQueue(), output);
-                schedulerCallback.success(this.signature.executionMode(), eventOutput);
-            } catch (IllegalAccessException | InvocationTargetException e) {
-                this.handleErrorOnTask(e, this.inputEvent);
-            } catch (Exception e){
-                this.handleGenericError(e, this.inputEvent);
-            }
-        }
-
         private void handleGenericError(Exception e, Object input) {
             LOGGER.log(ERROR, "Error not related to invoking task "+this.toString()+"\n Input event: "+input+"\n"+ e);
             e.printStackTrace(System.out);
@@ -111,15 +98,13 @@ public final class VmsTransactionTaskBuilder {
         @Override
         public void run() {
             this.signalRunning();
-            if(this.signature.transactionType() == TransactionTypeEnum.R){
-                this.readOnlyRun();
-                return;
-            }
-            ITransactionContext txCtx = transactionManager.beginTransaction(this.tid, -1, this.lastTid, false);
+            ITransactionContext txCtx = transactionManager.beginTransaction(this.tid, -1, this.lastTid, this.signature.transactionType() == TransactionTypeEnum.R);
             try {
                 Object output = this.signature.method().invoke(this.signature.vmsInstance(), this.inputEvent);
                 OutboundEventResult eventOutput = new OutboundEventResult(this.tid, this.batch, this.signature.outputQueue(), output);
-                transactionManager.commit();
+                if(this.signature.transactionType() != TransactionTypeEnum.R){
+                    transactionManager.commit();
+                }
                 schedulerCallback.success(this.signature.executionMode(), eventOutput);
             } catch (IllegalAccessException | InvocationTargetException e) {
                 this.handleErrorOnTask(e, this.inputEvent);

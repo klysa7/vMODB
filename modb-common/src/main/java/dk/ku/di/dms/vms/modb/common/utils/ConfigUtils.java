@@ -57,8 +57,11 @@ public final class ConfigUtils {
         StackTraceElement[] stackTrace = Thread.currentThread().getStackTrace();
         for (int i = 0; i < stackTrace.length; i++) {
             StackTraceElement element = stackTrace[i];
-            if ("build".equals(element.getMethodName()) &&
-                    "VmsApplication.java".equals(element.getFileName())) {
+            if (isVmsApplicationBuild(element)) {
+
+                // if next is also vms app build, skip
+                if(isVmsApplicationBuild(stackTrace[i+1])) continue;
+
                 try {
                     Class<?> mainClass = Class.forName(stackTrace[i+1].getClassName());
                     Package pkg = mainClass.getPackage();
@@ -83,6 +86,11 @@ public final class ConfigUtils {
         }
 
         return null;
+    }
+
+    private static boolean isVmsApplicationBuild(StackTraceElement element) {
+        return "build".equals(element.getMethodName()) &&
+                "VmsApplication.java".equals(element.getFileName());
     }
 
 }

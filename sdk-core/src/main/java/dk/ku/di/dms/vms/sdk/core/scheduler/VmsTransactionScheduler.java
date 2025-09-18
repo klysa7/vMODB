@@ -13,10 +13,10 @@ import dk.ku.di.dms.vms.sdk.core.scheduler.complex.VmsComplexTransactionSchedule
 
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 
+import static dk.ku.di.dms.vms.modb.api.enums.TransactionTypeEnum.R;
 import static java.lang.System.Logger.Level.*;
 
 /**
@@ -39,9 +39,9 @@ public final class VmsTransactionScheduler extends StoppableRunnable {
      */
     private final ExecutorService sharedTaskPool;
 
-    private final AtomicInteger numParallelTasksRunning = new AtomicInteger(0);
+    private final Set<Long> parallelTasksRunning = ConcurrentHashMap.newKeySet();
 
-    private final AtomicInteger numPartitionedTasksRunning = new AtomicInteger(0);
+    private final Set<Long> partitionedTasksRunning = ConcurrentHashMap.newKeySet();
 
     private volatile boolean singleThreadTaskRunning = false;
 
@@ -165,7 +165,7 @@ public final class VmsTransactionScheduler extends StoppableRunnable {
         private void updateSchedulerTaskStats(ExecutionModeEnum executionMode, VmsTransactionTask task) {
             switch (executionMode){
                 case SINGLE_THREADED -> singleThreadTaskRunning = false;
-                case PARALLEL -> numParallelTasksRunning.decrementAndGet();
+                case PARALLEL -> parallelTasksRunning.remove(task.tid());
                 case PARTITIONED -> {
                     if(!task.partitionKeys().isEmpty()){
                         for(var partitionKey : task.partitionKeys()) {
@@ -173,7 +173,7 @@ public final class VmsTransactionScheduler extends StoppableRunnable {
                                 LOGGER.log(WARNING, vmsIdentifier + ": Partitioned task " + task.tid() + " did not find its partition ID (" + partitionKey + ") in the tracking map!");
                             }
                         }
-                        numPartitionedTasksRunning.decrementAndGet();
+                        partitionedTasksRunning.remove(task.tid());
                         LOGGER.log(DEBUG, vmsIdentifier + ": Partitioned task " + task.tid() + " finished execution.");
                     } else {
                         singleThreadTaskRunning = false;
@@ -229,7 +229,7 @@ public final class VmsTransactionScheduler extends StoppableRunnable {
                     if (!this.canParallelTaskRun()) {
                         return;
                     }
-                    this.numParallelTasksRunning.incrementAndGet();
+                    this.parallelTasksRunning.add(task.tid());
                     task.signalReady();
                     LOGGER.log(DEBUG, this.vmsIdentifier+": Scheduling parallel task for execution:\n"+task);
                     this.sharedTaskPool.submit(task);
@@ -258,7 +258,7 @@ public final class VmsTransactionScheduler extends StoppableRunnable {
 
     private void submitPartitionedTaskForExecution(VmsTransactionTask task) {
         this.partitionKeyTrackingMap.addAll(task.partitionKeys());
-        this.numPartitionedTasksRunning.incrementAndGet();
+        this.partitionedTasksRunning.add(task.tid());
         task.signalReady();
         LOGGER.log(DEBUG, this.vmsIdentifier+": Scheduling partitioned task for execution:\n"+ task);
         this.sharedTaskPool.submit(task);
@@ -273,15 +273,28 @@ public final class VmsTransactionScheduler extends StoppableRunnable {
     }
 
     private boolean canSingleThreadTaskRun() {
-        return !this.singleThreadTaskRunning && this.numParallelTasksRunning.get() == 0 && numPartitionedTasksRunning.get() == 0;
+        return !this.singleThreadTaskRunning &&
+            (
+                (this.parallelTasksRunning.isEmpty() && partitionedTasksRunning.isEmpty()) ||
+                (this.areAllReadOnly(this.parallelTasksRunning) && this.areAllReadOnly(this.partitionedTasksRunning))
+            );
     }
 
     private boolean canPartitionedTaskRun(){
-        return !this.singleThreadTaskRunning && this.numParallelTasksRunning.get() == 0;
+        return !this.singleThreadTaskRunning &&
+                (this.parallelTasksRunning.isEmpty() || this.areAllReadOnly(this.parallelTasksRunning));
     }
 
     private boolean canParallelTaskRun(){
-        return !this.singleThreadTaskRunning && this.numPartitionedTasksRunning.get() == 0;
+        return !this.singleThreadTaskRunning &&
+                (this.partitionedTasksRunning.isEmpty() || this.areAllReadOnly(this.partitionedTasksRunning));
+    }
+
+    private boolean areAllReadOnly(Set<Long> runningSet){
+        for(Long tid : runningSet){
+            if(this.transactionTaskMap.get(tid).signature().transactionType() != R) return false;
+        }
+        return true;
     }
 
     private final List<InboundEvent> drained = new ArrayList<>(1024*10);
