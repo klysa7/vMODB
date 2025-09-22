@@ -103,14 +103,15 @@ public final class ExperimentUtils {
 
         numCompletedWithWarmUp = (int) prevBatchStats.lastTid - lastExperimentLastTID;
         numCompleted = numCompletedWithWarmUp - numCompletedDuringWarmUp;
-        long actualRuntime = prevBatchStats.endTs - firstBatchStats.endTs;
+        long liquidRuntime = prevBatchStats.endTs - firstBatchStats.endTs;
 
         double average = allLatencies.stream().mapToLong(Long::longValue).average().orElse(0.0);
         allLatencies.sort(null);
         double percentile_50 = PercentileCalculator.calculatePercentile(allLatencies, 0.50);
         double percentile_75 = PercentileCalculator.calculatePercentile(allLatencies, 0.75);
         double percentile_90 = PercentileCalculator.calculatePercentile(allLatencies, 0.90);
-        double txPerSec = numCompleted / ((double) actualRuntime / 1000L);
+        double txPerSecGross = numCompleted / ((double) runTime / 1000L);
+        double txPerSecLiquid = numCompleted / ((double) liquidRuntime / 1000L);
 
         System.out.println("Average latency: "+ average);
         System.out.println("Latency at 50th percentile: "+ percentile_50);
@@ -119,10 +120,13 @@ public final class ExperimentUtils {
         System.out.println("Number of completed transactions (during warm up): "+ numCompletedDuringWarmUp);
         System.out.println("Number of completed transactions (after warm up): "+ numCompleted);
         System.out.println("Number of completed transactions (total): "+ numCompletedWithWarmUp);
-        System.out.println("Transactions per second: "+txPerSec);
+        System.out.println("Gross runtime (ms): "+ runTime);
+        System.out.println("Transactions per second (gross): "+txPerSecGross);
+        System.out.println("Liquid runtime (ms): "+ liquidRuntime);
+        System.out.println("Transactions per second (liquid): "+txPerSecLiquid);
         System.out.println();
 
-        return new ExperimentStats(workloadStats.initTs(), numCompletedWithWarmUp, numCompleted, txPerSec, average, percentile_50, percentile_75, percentile_90);
+        return new ExperimentStats(workloadStats.initTs(), numCompletedWithWarmUp, numCompleted, txPerSecGross, average, percentile_50, percentile_75, percentile_90);
     }
 
     public record ExperimentStats(long initTs, int numCompletedWithWarmUp, int numCompleted, double txPerSec, double average,

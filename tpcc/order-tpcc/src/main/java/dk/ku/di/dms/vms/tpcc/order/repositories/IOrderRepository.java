@@ -9,7 +9,7 @@ import dk.ku.di.dms.vms.tpcc.order.entities.Order;
 @Repository
 public interface IOrderRepository extends IRepository<Order.OrderId, Order> {
 
-    @Query("select o_id, o_entry_d, o_carrier_id from order where o_id = :o_id and c_d_id = :c_d_id and o_w_id = :o_w_id and c_id = :c_id")
-    OrderInfoDto getOrderInfo(int o_id, int c_d_id, int o_w_id, int c_id);
+    @Query("select o_id, o_entry_d, o_carrier_id from orders where o_id = :o_id and o_d_id = :o_d_id and o_w_id = :o_w_id and o_c_id = :o_c_id")
+    OrderInfoDto getOrderInfo(int o_id, int o_d_id, int o_w_id, int o_c_id);
 
 }

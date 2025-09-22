@@ -25,10 +25,13 @@ public final class Main {
         String choice = new Scanner(System.in).nextLine();
         switch (choice){
             case "1" -> {
+                // TODO find a way to ignore the 'app.properties' files outside the proxy project
+//                PROPERTIES.setProperty("logging", "true");
                 NUM_INGESTION_WORKERS = Runtime.getRuntime().availableProcessors();
                 loadMenu("Distributed Deployment Menu");
             }
             case "2" -> {
+//                PROPERTIES.setProperty("logging", "true");
                 NUM_INGESTION_WORKERS = Runtime.getRuntime().availableProcessors() / 2;
                 loadLocalDeploymentMenu();
             }
@@ -123,8 +126,8 @@ public final class Main {
                         multiWarehouses = Integer.parseInt(scanner.nextLine()) > 0;
                     }
                     System.out.println("Enter number of transactions per warehouse: ");
-                    int numTxn = Integer.parseInt(scanner.nextLine());
                     try {
+                        int numTxn = Integer.parseInt(scanner.nextLine());
                         WorkloadUtils.createWorkload(numWare, numTxn, multiWarehouses, newOrderRatio);
                     } catch (IOException e){
                         System.out.println("ERROR:\n"+e);

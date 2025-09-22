@@ -4,15 +4,32 @@ import dk.ku.di.dms.vms.modb.definition.key.IKey;
 import dk.ku.di.dms.vms.modb.transaction.TransactionContext;
 import dk.ku.di.dms.vms.modb.transaction.multiversion.index.IMultiVersionIndex;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.List;
 
-public final class IndexScanWithOrder extends AbstractScan {
-
-    private final int orderByColumn;
+public final class IndexScanWithOrder extends AbstractScanWithOrder {
 
     public IndexScanWithOrder(IMultiVersionIndex index, int[] projectionColumns, int orderByColumn, int entrySize) {
-        super(entrySize, index, projectionColumns);
-        this.orderByColumn = orderByColumn;
+        super(index, projectionColumns, orderByColumn, entrySize);
+    }
+
+    public List<Object[]> runAsEmbedded(TransactionContext txCtx, IKey key) {
+        List<Object[]> result = new ArrayList<>();
+        Iterator<Object[]> iterator = this.index.iterator(txCtx, key);
+        while(iterator.hasNext()){
+            this.insert(result, iterator.next());
+        }
+        return this.projectIfNecessary(result);
+    }
+
+    public List<Object[]> runAsEmbedded(TransactionContext txCtx, IKey[] keys) {
+        List<Object[]> result = new ArrayList<>();
+        Iterator<Object[]> iterator = this.index.iterator(txCtx, keys);
+        while(iterator.hasNext()){
+            this.insert(result, iterator.next());
+        }
+        return this.projectIfNecessary(result);
     }
 
     @Override
@@ -23,26 +40,6 @@ public final class IndexScanWithOrder extends AbstractScan {
     @Override
     public IndexScanWithOrder asIndexScanWithOrder() {
         return this;
-    }
-
-    public List<Object[]> runAsEmbedded(TransactionContext txCtx, IKey key) {
-        Map<Object, Object[]> orderedMap = new TreeMap<>();
-        Iterator<Object[]> iterator = this.index.iterator(txCtx, key);
-        while(iterator.hasNext()){
-            var next = iterator.next();
-            orderedMap.put(next[this.orderByColumn], next);
-        }
-        return orderedMap.values().stream().toList();
-    }
-
-    public List<Object[]> runAsEmbedded(TransactionContext txCtx, IKey[] keys) {
-        Map<Object, Object[]> orderedMap = new TreeMap<>();
-        Iterator<Object[]> iterator = this.index.iterator(txCtx, keys);
-        while(iterator.hasNext()){
-            var next = iterator.next();
-            orderedMap.put(next[this.orderByColumn], next);
-        }
-        return orderedMap.values().stream().toList();
     }
 
 }

@@ -4,52 +4,38 @@ import dk.ku.di.dms.vms.modb.query.execution.filter.FilterContext;
 import dk.ku.di.dms.vms.modb.transaction.TransactionContext;
 import dk.ku.di.dms.vms.modb.transaction.multiversion.index.IMultiVersionIndex;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.List;
 
-public class FullScanWithOrder extends AbstractScan {
-
-    private final int orderByColumn;
+public class FullScanWithOrder extends AbstractScanWithOrder {
 
     public FullScanWithOrder(IMultiVersionIndex index,
                              int[] projectionColumns,
                              int orderByColumn,
                              int entrySize) {
-        super(entrySize, index, projectionColumns);
-        this.orderByColumn = orderByColumn;
+        super(index, projectionColumns, orderByColumn, entrySize);
     }
 
-//    public MemoryRefNode run(FilterContext filterContext){
-//        Iterator<IKey> iterator = index.iterator();
-//        while(iterator.hasNext()){
-//            if(index.checkCondition(iterator, filterContext)){
-//                append(iterator, projectionColumns);
-//            }
-//            iterator.next();
-//        }
-//        return memoryRefNode;
-//    }
-
     public List<Object[]> runAsEmbedded(TransactionContext txCtx){
-        Map<Object, Object[]> orderedMap = new TreeMap<>();
+        List<Object[]> result = new ArrayList<>();
         Iterator<Object[]> iterator = this.index.iterator(txCtx);
         while(iterator.hasNext()){
-            var next = iterator.next();
-            orderedMap.put(next[this.orderByColumn], next);
+            this.insert(result, iterator.next());
         }
-        return orderedMap.values().stream().toList();
+        return this.projectIfNecessary(result);
     }
 
     public List<Object[]> runAsEmbedded(TransactionContext txCtx, FilterContext filterContext){
-        Map<Object, Object[]> orderedMap = new TreeMap<>();
+        List<Object[]> result = new ArrayList<>();
         Iterator<Object[]> iterator = this.index.iterator(txCtx);
         while(iterator.hasNext()){
-            Object[] obj = iterator.next();
-            if(this.index.checkCondition(filterContext, obj)) {
-                // ideally this should be a insertion sort. equal order column would remove the previous element
-                orderedMap.put(obj[this.orderByColumn], obj);
+            Object[] record = iterator.next();
+            if(this.index.checkCondition(filterContext, record)) {
+                this.insert(result, record);
             }
         }
-        return orderedMap.values().stream().toList();
+        return this.projectIfNecessary(result);
     }
 
     @Override

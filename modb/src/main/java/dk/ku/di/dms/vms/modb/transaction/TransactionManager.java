@@ -18,7 +18,7 @@ import dk.ku.di.dms.vms.modb.query.analyzer.predicate.WherePredicate;
 import dk.ku.di.dms.vms.modb.query.execution.filter.FilterContext;
 import dk.ku.di.dms.vms.modb.query.execution.filter.FilterContextBuilder;
 import dk.ku.di.dms.vms.modb.query.execution.operators.AbstractSimpleOperator;
-import dk.ku.di.dms.vms.modb.query.execution.operators.min.IndexGroupByMinWithProjection;
+import dk.ku.di.dms.vms.modb.query.execution.operators.minmax.IndexAggregateScan;
 import dk.ku.di.dms.vms.modb.query.execution.operators.scan.FullScan;
 import dk.ku.di.dms.vms.modb.query.execution.operators.scan.IndexScan;
 import dk.ku.di.dms.vms.modb.query.planner.SimplePlanner;
@@ -361,7 +361,7 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
      * disaggregate the index choice, limit, aka query details, from the operator
      */
     public MemoryRefNode run(List<WherePredicate> wherePredicates,
-                             IndexGroupByMinWithProjection operator){
+                             IndexAggregateScan operator){
         return null; // operator.run();
     }
 

@@ -1,6 +1,7 @@
 package dk.ku.di.dms.vms.modb.query.planner;
 
 import dk.ku.di.dms.vms.modb.api.query.enums.ExpressionTypeEnum;
+import dk.ku.di.dms.vms.modb.api.query.enums.GroupByOperationEnum;
 import dk.ku.di.dms.vms.modb.definition.ColumnReference;
 import dk.ku.di.dms.vms.modb.definition.Schema;
 import dk.ku.di.dms.vms.modb.definition.Table;
@@ -16,7 +17,8 @@ import dk.ku.di.dms.vms.modb.query.execution.operators.AbstractSimpleOperator;
 import dk.ku.di.dms.vms.modb.query.execution.operators.IndexMultiAggregateScan;
 import dk.ku.di.dms.vms.modb.query.execution.operators.count.IndexCount;
 import dk.ku.di.dms.vms.modb.query.execution.operators.count.IndexCountGroupBy;
-import dk.ku.di.dms.vms.modb.query.execution.operators.min.IndexGroupByMinWithProjection;
+import dk.ku.di.dms.vms.modb.query.execution.operators.minmax.IndexGroupByMax;
+import dk.ku.di.dms.vms.modb.query.execution.operators.minmax.IndexGroupByMin;
 import dk.ku.di.dms.vms.modb.query.execution.operators.scan.*;
 import dk.ku.di.dms.vms.modb.query.execution.operators.sum.IndexSum;
 import dk.ku.di.dms.vms.modb.query.execution.operators.sum.Sum;
@@ -147,8 +149,9 @@ public final class SimplePlanner {
 
     private AbstractSimpleOperator planSimpleAggregate(QueryTree queryTree) {
         // then just one since it is simple
-        switch (queryTree.groupByProjections.getFirst().groupByOperation()){
-            case MIN -> {
+        var op = queryTree.groupByProjections.getFirst().groupByOperation();
+        switch (op){
+            case MIN, MAX -> {
                 Table tb = queryTree.groupByProjections.getFirst().columnReference().table;
                 IMultiVersionIndex indexSelected = this.getOptimalIndex(
                         queryTree.groupByProjections.getFirst().columnReference().table,
@@ -157,7 +160,7 @@ public final class SimplePlanner {
                         .mapToInt(ColumnReference::getColumnPosition ).toArray();
 
                 // assumed to be only one
-                int minColumn = queryTree.groupByProjections.stream().mapToInt( GroupByPredicate::columnPosition ).toArray()[0];
+                int minMaxColumn = queryTree.groupByProjections.stream().mapToInt( GroupByPredicate::columnPosition ).toArray()[0];
 
                 final int[] projectionColumns = new int[queryTree.projections.size()+1];
                 int idxCol = 0;
@@ -165,13 +168,18 @@ public final class SimplePlanner {
                     projectionColumns[idxCol] = column.getColumnPosition();
                     idxCol++;
                 }
-                projectionColumns[idxCol] = minColumn;
+                projectionColumns[idxCol] = minMaxColumn;
 
                 // calculate entry size... sum of the size of the column types of the projection
                 int entrySize = calculateQueryResultEntrySize(tb.schema(), queryTree.projections.size()+1, projectionColumns);
 
-                return new IndexGroupByMinWithProjection( indexSelected, tb.schema(),
-                        indexColumns, projectionColumns, minColumn, entrySize, queryTree.limit.orElse(Integer.MAX_VALUE));
+                if(op == GroupByOperationEnum.MIN) {
+                    return new IndexGroupByMin(entrySize, indexSelected, projectionColumns, tb.schema(),
+                            indexColumns, minMaxColumn, queryTree.limit.orElse(Integer.MAX_VALUE));
+                } else {
+                    return new IndexGroupByMax(entrySize, indexSelected, projectionColumns, tb.schema(),
+                            indexColumns, minMaxColumn, queryTree.limit.orElse(Integer.MAX_VALUE));
+                }
             }
             case SUM -> {
                 // check if there is an index that can be applied

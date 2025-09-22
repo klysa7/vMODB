@@ -17,4 +17,14 @@ public class OrderInfoDto {
         this.o_entry_d = o_entry_d;
         this.o_carrier_id = o_carrier_id;
     }
+
+    @Override
+    public String toString() {
+        return "{"
+                + "\"o_id\":\"" + o_id + "\""
+                + ",\"o_entry_d\":" + o_entry_d
+                + ",\"o_carrier_id\":\"" + o_carrier_id + "\""
+                + "}";
+    }
+
 }

@@ -209,7 +209,7 @@ public final class Analyzer {
             // the order of the columns declared in the index definition matters
             queryTree.addWhereClauseSortedByColumnIndex(whereClause);
         }
-        if(!statement.orderByClause.isEmpty()){
+        if(statement.orderByClause != null && !statement.orderByClause.isEmpty()){
             ColumnReference columnReference = new ColumnReference(statement.orderByClause.getFirst().column, this.catalog.get(statement.fromClause.getFirst()));
             queryTree.orderByPredicates.add(new OrderByPredicate(columnReference, OrderBySortOrderEnum.ASC));
         }

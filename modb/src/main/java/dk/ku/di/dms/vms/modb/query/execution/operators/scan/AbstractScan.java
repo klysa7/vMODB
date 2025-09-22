@@ -8,7 +8,7 @@ public abstract class AbstractScan extends AbstractSimpleOperator {
     protected final IMultiVersionIndex index;
 
     // index of the columns
-    private final int[] projectionColumns;
+    protected final int[] projectionColumns;
 
     public AbstractScan(int entrySize, IMultiVersionIndex index, int[] projectionColumns) {
         super(entrySize);
@@ -16,19 +16,16 @@ public abstract class AbstractScan extends AbstractSimpleOperator {
         this.projectionColumns = projectionColumns;
     }
 
-//    @Override
-//    public AbstractScan asScan(){
-//        return this;
-//    }
-
-//    protected void append(Iterator<IKey> iterator, int[] projectionColumns) {
-////        ensureMemoryCapacity();
-//        Object[] record = index.record(iterator);
-//        for (int projectionColumn : projectionColumns) {
-//            DataTypeUtils.callWriteFunction(this.currentBuffer.address(), index.schema().columnDataType(projectionColumn), record[projectionColumn]);
-//            this.currentBuffer.forwardOffset(index.schema().columnDataType(projectionColumn).value);
-//        }
-//    }
+    protected Object[] getProjection(Object[] record) {
+        if(record.length == this.projectionColumns.length) return record;
+        int j = 0;
+        Object[] projection = new Object[this.projectionColumns.length];
+        for (int projectionColumn : this.projectionColumns) {
+            projection[j] = record[projectionColumn];
+            j++;
+        }
+        return projection;
+    }
 
     public IMultiVersionIndex index(){
         return this.index;

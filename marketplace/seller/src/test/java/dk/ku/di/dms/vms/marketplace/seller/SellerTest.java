@@ -59,7 +59,7 @@ public final class SellerTest {
         }
 
         sleep(2000);
-        SellerService sellerService = vms.getService("seller");
+        SellerService sellerService = vms.getService("dk.ku.di.dms.vms.marketplace.seller.SellerService");
         vms.getTransactionManager().beginTransaction(LAST_TID, 0, LAST_TID, true);
         SellerDashboard dash = sellerService.queryDashboard(1);
         Assert.assertNotNull(dash);
@@ -73,7 +73,7 @@ public final class SellerTest {
         vms.start();
         generateInvoiceIssuedEvents(vms);
         sleep(2000);
-        SellerService sellerService = vms.getService("seller");
+        SellerService sellerService = vms.getService("dk.ku.di.dms.vms.marketplace.seller.SellerService");
         vms.getTransactionManager().beginTransaction(LAST_TID, 0, LAST_TID, true);
         SellerDashboard dash = sellerService.queryDashboard(1);
         Assert.assertNotNull(dash);

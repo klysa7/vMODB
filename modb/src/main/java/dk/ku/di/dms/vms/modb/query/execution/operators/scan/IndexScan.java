@@ -24,21 +24,11 @@ public final class IndexScan extends AbstractScan {
         super(entrySize, index, projectionColumns);
     }
 
-    @Override
-    public boolean isIndexScan() {
-        return true;
-    }
-
-    @Override
-    public IndexScan asIndexScan() {
-        return this;
-    }
-
     public List<Object[]> runAsEmbedded(TransactionContext txCtx, IKey key) {
         List<Object[]> res = new ArrayList<>();
         Iterator<Object[]> iterator = this.index.iterator(txCtx, key);
         while(iterator.hasNext()){
-            res.add(iterator.next());
+            res.add(this.getProjection(iterator.next()));
         }
         return res;
     }
@@ -47,9 +37,19 @@ public final class IndexScan extends AbstractScan {
         List<Object[]> res = new ArrayList<>();
         Iterator<Object[]> iterator = this.index.iterator(txCtx, keys);
         while(iterator.hasNext()){
-            res.add(iterator.next());
+            res.add(this.getProjection(iterator.next()));
         }
         return res;
+    }
+
+    @Override
+    public boolean isIndexScan() {
+        return true;
+    }
+
+    @Override
+    public IndexScan asIndexScan() {
+        return this;
     }
 
 }

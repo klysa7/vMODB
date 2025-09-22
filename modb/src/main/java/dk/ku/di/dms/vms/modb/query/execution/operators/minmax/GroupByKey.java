@@ -1,4 +1,4 @@
-package dk.ku.di.dms.vms.modb.query.execution.operators.min;
+package dk.ku.di.dms.vms.modb.query.execution.operators.minmax;
 
 import dk.ku.di.dms.vms.modb.definition.key.IKey;
 

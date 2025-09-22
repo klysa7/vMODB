@@ -3,6 +3,7 @@ package dk.ku.di.dms.vms.sdk.embed.metadata;
 import dk.ku.di.dms.vms.modb.api.annotations.Query;
 import dk.ku.di.dms.vms.modb.api.annotations.VmsIndex;
 import dk.ku.di.dms.vms.modb.api.annotations.VmsPartialIndex;
+import dk.ku.di.dms.vms.modb.api.query.statement.SelectStatement;
 import dk.ku.di.dms.vms.modb.common.constraint.ForeignKeyReference;
 import dk.ku.di.dms.vms.modb.common.data_structure.Tuple;
 import dk.ku.di.dms.vms.modb.common.schema.VmsDataModel;
@@ -92,7 +93,7 @@ public final class EmbedMetadataLoader {
 
                 Method[] queryMethods = repositoryType.getDeclaredMethods();
                 // read queries
-                var repositoryQueriesMap = VmsMetadataLoader.loadStaticQueries(queryMethods);
+                Map<String, SelectStatement> repositoryQueriesMap = VmsMetadataLoader.loadStaticQueries(queryMethods);
 
                 Object instance = type.getConstructors()[0].newInstance(
                         pkClazz,

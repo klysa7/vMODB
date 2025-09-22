@@ -2,7 +2,7 @@ package dk.ku.di.dms.vms.tpcc.order.dto;
 
 import java.util.Date;
 
-public class OrderLineInfoDto {
+public final class OrderLineInfoDto {
 
     public int ol_i_id;
 
@@ -23,4 +23,16 @@ public class OrderLineInfoDto {
         this.ol_quantity = ol_quantity;
         this.ol_amount = ol_amount;
     }
+
+    @Override
+    public String toString() {
+        return "{"
+                + "\"ol_i_id\":\"" + ol_i_id + "\""
+                + ",\"ol_supply_w_id\":\"" + ol_supply_w_id + "\""
+                + ",\"ol_delivery_d\":" + ol_delivery_d
+                + ",\"ol_quantity\":\"" + ol_quantity + "\""
+                + ",\"ol_amount\":\"" + ol_amount + "\""
+                + "}";
+    }
+
 }

@@ -1,7 +1,7 @@
 package dk.ku.di.dms.vms.modb.query.execution.operators;
 
 import dk.ku.di.dms.vms.modb.query.execution.operators.join.UniqueHashJoinWithProjection;
-import dk.ku.di.dms.vms.modb.query.execution.operators.min.IndexGroupByMinWithProjection;
+import dk.ku.di.dms.vms.modb.query.execution.operators.minmax.IndexAggregateScan;
 import dk.ku.di.dms.vms.modb.query.execution.operators.scan.*;
 
 /**
@@ -44,7 +44,7 @@ public abstract class AbstractSimpleOperator {
 
     public boolean isHashJoin() { return false; }
 
-    public IndexGroupByMinWithProjection asIndexAggregationScan(){
+    public IndexAggregateScan asIndexAggregationScan(){
         throw new IllegalStateException("No index scan operator");
     }
 

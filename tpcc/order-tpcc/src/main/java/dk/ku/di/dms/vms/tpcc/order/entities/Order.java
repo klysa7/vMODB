@@ -35,6 +35,7 @@ public final class Order implements IEntity<Order.OrderId> {
     @Id
     public int o_w_id;
 
+    @Column
     public int o_c_id;
 
     @Column

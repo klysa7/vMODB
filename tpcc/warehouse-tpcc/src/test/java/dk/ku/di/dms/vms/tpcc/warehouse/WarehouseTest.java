@@ -1,7 +1,5 @@
 package dk.ku.di.dms.vms.tpcc.warehouse;
 
-import dk.ku.di.dms.vms.modb.definition.key.IKey;
-import dk.ku.di.dms.vms.modb.definition.key.KeyUtils;
 import dk.ku.di.dms.vms.sdk.core.operational.InboundEvent;
 import dk.ku.di.dms.vms.sdk.embed.client.VmsApplication;
 import dk.ku.di.dms.vms.sdk.embed.client.VmsApplicationOptions;
@@ -15,9 +13,6 @@ import org.junit.Test;
 
 import java.util.Date;
 
-/**
- * Unit test for simple App.
- */
 public class WarehouseTest {
 
     private static VmsApplication getVmsApplication() throws Exception {
@@ -38,7 +33,6 @@ public class WarehouseTest {
 
     @SuppressWarnings("unchecked")
     private static void insertCustomers(VmsApplication vms) {
-        // var customerTable = vms.getTable("customer");
         var customerRepository = (AbstractProxyRepository<Customer.CustomerId, Customer>) vms.getRepositoryProxy("customer");
         for(int i = 1; i <= 10; i++){
             Customer customer = new Customer(i, 1, 1,
@@ -46,9 +40,6 @@ public class WarehouseTest {
                     "test", "test", "test", "test", "test",
                     new Date(), "test", 1,
                     1, 1, 1, 1, 1, "test" );
-//            Object[] obj = customerRepository.extractFieldValuesFromEntityObject(seller);
-//            IKey key = KeyUtils.buildRecordKey( customerTable.schema().getPrimaryKeyColumns(), obj );
-//            customerTable.underlyingPrimaryKeyIndex().insert(key, obj);
             VMS.getTransactionManager().beginTransaction(0, 0, 0, false);
             customerRepository.upsert(customer);
             Assert.assertTrue(customerRepository.exists(new Customer.CustomerId(i, 1 , 1)));
@@ -66,10 +57,6 @@ public class WarehouseTest {
     public void testOrderStatusQueryByName() throws Exception {
         ICustomerRepository customerRepository = (ICustomerRepository) VMS.getRepositoryProxy("customer");
         insertCustomers(VMS);
-//        for(int i = 1; i <= 10; i++) {
-//            generateOrderStatus(VMS, i, i - 1);
-//        }
-//        sleep(5000);
         var txCtx = VMS.getTransactionManager().beginTransaction( 1, 0, 10, true );
         // get warehouse service
         WarehouseService warehouseService = VMS.getService("dk.ku.di.dms.vms.tpcc.warehouse.WarehouseService");

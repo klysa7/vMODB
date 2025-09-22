@@ -5,9 +5,9 @@ import dk.ku.di.dms.vms.modb.api.query.builder.QueryBuilderFactory;
 import dk.ku.di.dms.vms.modb.api.query.enums.ExpressionTypeEnum;
 import dk.ku.di.dms.vms.modb.api.query.statement.SelectStatement;
 import dk.ku.di.dms.vms.tpcc.common.events.NewOrderInvOut;
-import dk.ku.di.dms.vms.tpcc.common.events.NewOrderWareOut;
 import dk.ku.di.dms.vms.tpcc.common.events.OrderStatusOut;
 import dk.ku.di.dms.vms.tpcc.order.dto.OrderInfoDto;
+import dk.ku.di.dms.vms.tpcc.order.dto.OrderLineInfoDto;
 import dk.ku.di.dms.vms.tpcc.order.entities.NewOrder;
 import dk.ku.di.dms.vms.tpcc.order.entities.Order;
 import dk.ku.di.dms.vms.tpcc.order.entities.OrderLine;
@@ -21,9 +21,12 @@ import java.util.List;
 
 import static dk.ku.di.dms.vms.modb.api.enums.TransactionTypeEnum.R;
 import static dk.ku.di.dms.vms.modb.api.enums.TransactionTypeEnum.W;
+import static java.lang.System.Logger.Level.DEBUG;
 
 @Microservice("order")
 public final class OrderService {
+
+    private static final System.Logger LOGGER = System.getLogger(OrderService.class.getName());
 
     private final IOrderRepository orderRepository;
     private final INewOrderRepository newOrderRepository;
@@ -37,18 +40,36 @@ public final class OrderService {
 
     public static final SelectStatement ORDER_BASE_QUERY = QueryBuilderFactory.select()
             .max("o_id")
-            .from("order")
+            .from("orders")
             .where("o_w_id", ExpressionTypeEnum.EQUALS, ":w_id")
             .and("o_d_id", ExpressionTypeEnum.EQUALS, ":d_id")
             .and("o_c_id", ExpressionTypeEnum.EQUALS, ":c_id")
-            .groupBy( "o_w_id", "o_d_id", "o_c_id" ).build();
+            .groupBy( "o_w_id", "o_d_id", "o_c_id" )
+            .build();
 
     @Inbound(values = "order-status-out")
     @Transactional(type = R)
     @PartitionBy(clazz = OrderStatusOut.class, method = "getId")
     public void processOrderStatus(OrderStatusOut in){
-        int max_o_id = this.orderRepository.fetchOne( ORDER_BASE_QUERY, int.class );
-        OrderInfoDto orderInfoDto = this.orderRepository.getOrderInfo( max_o_id, in.d_id, in.w_id, in.c_id );
+        Integer max_o_id = this.orderRepository.fetchOne(ORDER_BASE_QUERY, Integer.class);
+        if(max_o_id == null) {
+            LOGGER.log(DEBUG, "Input event OrderStatusOut led to null max_o_id:\n"+in);
+            return;
+        }
+        // LOGGER.log(DEBUG, max_o_id);
+        OrderInfoDto orderInfoDto = this.orderRepository.getOrderInfo(max_o_id, in.d_id, in.w_id, in.c_id);
+        if(orderInfoDto == null) {
+            LOGGER.log(DEBUG, "Input event OrderStatusOut led to null order info:\n"+in);
+            return;
+        }
+        // LOGGER.log(DEBUG, orderInfoDto);
+        List<OrderLineInfoDto> orderLinesInfo = this.orderLineRepository.getOrderLinesInfo(max_o_id, in.d_id, in.w_id);
+        if(orderLinesInfo == null) {
+            LOGGER.log(DEBUG, "Input event OrderStatusOut led to null order lines info:\n"+in);
+            return;
+        }
+        // LOGGER.log(DEBUG, orderLinesInfo);
+        // LOGGER.log(WARNING, "max_o_id = "+max_o_id+"\n"+"OrderInfoDto = "+orderInfoDto+"\n"+"orderLinesInfo = "+orderLinesInfo);
     }
 
     @Inbound(values = "new-order-inv-out")
@@ -66,7 +87,6 @@ public final class OrderService {
                 in.itemsIds.length,
                 in.allLocal ? 1 : 0
         );
-
         NewOrder newOrder = new NewOrder(in.d_next_o_id, in.d_id, in.w_id);
 
         this.orderRepository.insert(order);

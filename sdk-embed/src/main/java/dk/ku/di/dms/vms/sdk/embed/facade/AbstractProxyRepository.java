@@ -85,31 +85,52 @@ public abstract class AbstractProxyRepository<PK extends Serializable, T extends
         List<Object[]> records = this.operationalAPI.fetch(this.table, selectStatement);
 
         if (List.class.isAssignableFrom(method.getReturnType())) {
-            List<T> result = new ArrayList<>(records.size());
-            for(Object[] record : records) {
-                result.add( this.parseObjectIntoEntity(record) );
+            // this requires a fix. need to know whether the return type specified in the list is an entity
+            if(selectStatement.selectClause.get(0).equals("*")) {
+                List<T> result = new ArrayList<>(records.size());
+                for (Object[] record : records) {
+                    result.add(this.parseObjectIntoEntity(record));
+                }
+                return result;
+            } else {
+                ParameterizedType paramType = (ParameterizedType) method.getGenericReturnType();
+                Class<?> clazz = (Class<?>) paramType.getActualTypeArguments()[0];
+                Constructor<?> constructor = clazz.getDeclaredConstructors()[0];
+                Field[] fields = clazz.getFields();
+                List<?> result = new ArrayList<>(records.size());
+                for (Object[] record : records) {
+                    result.add(this.buildDtoInstanceFromResult(record, constructor, fields));
+                }
+                return result;
             }
-            return result;
         }
 
-        if(method.getReturnType().isPrimitive()) {
-            String column = selectStatement.selectClause.get(0);
-            return records.get(0)[this.table.schema().columnPosition(column)];
+        if(method.getReturnType().isPrimitive() || Number.class.isAssignableFrom(method.getReturnType())) {
+            // String column = selectStatement.selectClause.get(0);
+            // this.table.schema().columnPosition(column)
+            return records.get(0)[0];
         }
 
-        // assuming app objects never return with array, it only works for arrays of primitive types
         if(method.getReturnType().isArray()){
-            String column = selectStatement.selectClause.get(0);
-            // parse to array of given type
-            Class<?> primitiveType = method.getReturnType().getComponentType();
-            Object primitiveArray = Array.newInstance(primitiveType, records.size());
-            int columnPos = this.table.schema().columnPosition(column);
-            for (int i = 0; i < records.size(); i++) {
-                Array.set(primitiveArray, i, DataTypeUtils.parseToPrimitive(primitiveType, records.get(i)[columnPos]));
+            Class<?> componentType = method.getReturnType().getComponentType();
+            Object array = Array.newInstance(componentType, records.size());
+            if(componentType.isPrimitive()){
+                for (int i = 0; i < records.size(); i++) {
+                    Array.set(array, i, DataTypeUtils.parseToPrimitive(componentType, records.get(i)[0]));
+                }
+                return array;
+            } else {
+                for (int i = 0; i < records.size(); i++) {
+                    Array.set(array, i, this.parseObjectIntoEntity(records.get(i)));
+                }
             }
-            return primitiveArray;
         }
 
+        if(!records.isEmpty()) {
+            Constructor<?> constructor = method.getReturnType().getDeclaredConstructors()[0];
+            Field[] fields = method.getReturnType().getFields();
+            return this.buildDtoInstanceFromResult(records.getFirst(), constructor, fields);
+        }
         return null;
     }
 
@@ -189,7 +210,7 @@ public abstract class AbstractProxyRepository<PK extends Serializable, T extends
             parsedEntities.add(parsed);
         }
         // can only add to cache if all items were inserted since it is transactional
-        this.operationalAPI.insertAll( this.table, parsedEntities );
+        this.operationalAPI.insertAll(this.table, parsedEntities);
     }
 
     @Override
@@ -235,55 +256,20 @@ public abstract class AbstractProxyRepository<PK extends Serializable, T extends
         this.operationalAPI.deleteAll(this.table, parsedEntities);
     }
 
-    /**
-     * This implementation should be used is a possible implementation with a sidecar
-     * We can return objects in embedded mode. See last method
-    public <DTO> List<DTO> fetchMany(SelectStatement statement, Class<DTO> clazz){
-        // we need some context about the results in this memory space
-        // solved by now with the assumption the result is of the same size of memory
-        // number of records
-        // schema of the return (maybe not if it is a dto)
-        var memRes = this.operationalAPI.fetchMemoryReference(this.table, statement);
-        try {
-            List<DTO> result = new ArrayList<>(10);
-            Constructor<?> constructor = clazz.getDeclaredConstructors()[0];
-            Field[] fields = clazz.getFields();
-            long currAddress = memRes.address();
-            long lastOffset = currAddress + memRes.bytes();
-            while(memRes != null) {
-                DTO dto = (DTO) constructor.newInstance();
-                for (var field : fields) {
-                    DataType dt = DataTypeUtils.getDataTypeFromJavaType(field.getType());
-                    field.set(dto, DataTypeUtils.callReadFunction(currAddress, dt));
-                    currAddress += dt.value;
-                }
-                result.add(dto);
-
-                if(currAddress == lastOffset) {
-                    MemoryManager.releaseTemporaryDirectMemory(memRes.address());
-                    memRes = memRes.next;
-                    if(memRes != null){
-                        memRes = memRes.next;
-                        currAddress = memRes.address();
-                        lastOffset = currAddress + memRes.bytes();
-                    }
-                }
-            }
-            return result;
-        } catch (InstantiationException | IllegalAccessException | InvocationTargetException e) {
-            throw new RuntimeException(e);
-        }
-    }
-     */
-
     @Override
+    @SuppressWarnings({"unhecked", "unchecked"})
     public <DTO> DTO fetchOne(SelectStatement statement, Class<DTO> clazz){
         List<Object[]> objects = this.operationalAPI.fetch(this.table, statement);
-        assert objects.size() == 1;
-        Object[] object = objects.getFirst();
+        if(objects.isEmpty()){
+            return null;
+        }
+        Object[] object = objects.get(0);
+        if(clazz.isPrimitive() || Number.class.isAssignableFrom(clazz)){
+            return (DTO) object[0];
+        }
         Constructor<?> constructor = clazz.getDeclaredConstructors()[0];
         Field[] fields = clazz.getFields();
-        return this.buildDtoInstanceSingle(object, constructor, fields);
+        return this.buildDtoInstanceFromResult(object, constructor, fields);
     }
 
     @Override
@@ -293,14 +279,17 @@ public abstract class AbstractProxyRepository<PK extends Serializable, T extends
         Field[] fields = clazz.getFields();
         List<DTO> result = new ArrayList<>();
         for(Object[] object : objects){
-            DTO dto = buildDtoInstanceMany(object, constructor, fields);
+            DTO dto = this.buildDtoInstanceFromResult(object, constructor, fields);
             result.add(dto);
         }
         return result;
     }
 
+    /**
+     * This method assumes that the order of the fields is consistent with the result object
+     */
     @SuppressWarnings("unchecked")
-    private <DTO> DTO buildDtoInstanceSingle(Object[] object, Constructor<?> constructor, Field[] fields) {
+    private <DTO> DTO buildDtoInstanceFromResult(Object[] object, Constructor<?> constructor, Field[] fields) {
         try {
             DTO dto = (DTO) constructor.newInstance();
             int i = 0;
@@ -312,24 +301,7 @@ public abstract class AbstractProxyRepository<PK extends Serializable, T extends
                 i++;
             }
             return dto;
-        } catch (InstantiationException | InvocationTargetException| IllegalAccessException e) {
-            throw new RuntimeException(e);
-        }
-    }
-
-    @SuppressWarnings("unchecked")
-    private <DTO> DTO buildDtoInstanceMany(Object[] object, Constructor<?> constructor, Field[] fields) {
-        try {
-            DTO dto = (DTO) constructor.newInstance();
-            for (var field : fields) {
-                int i = this.table.schema().columnPosition(field.getName());
-                // check if field was captured by query
-                if(object[i] != null){
-                    field.set(dto, object[i]);
-                }
-            }
-            return dto;
-        } catch (InstantiationException | InvocationTargetException| IllegalAccessException e) {
+        } catch (Exception e) {
             throw new RuntimeException(e);
         }
     }

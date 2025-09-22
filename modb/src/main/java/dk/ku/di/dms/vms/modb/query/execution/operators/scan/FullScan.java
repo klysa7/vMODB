@@ -16,22 +16,11 @@ public class FullScan extends AbstractScan {
         super(entrySize, index, projectionColumns);
     }
 
-//    public MemoryRefNode run(FilterContext filterContext){
-//        Iterator<IKey> iterator = index.iterator();
-//        while(iterator.hasNext()){
-//            if(index.checkCondition(iterator, filterContext)){
-//                append(iterator, projectionColumns);
-//            }
-//            iterator.next();
-//        }
-//        return memoryRefNode;
-//    }
-
     public List<Object[]> runAsEmbedded(TransactionContext txCtx){
         List<Object[]> res = new ArrayList<>();
         Iterator<Object[]> iterator = this.index.iterator(txCtx);
         while(iterator.hasNext()){
-            res.add(iterator.next());
+            res.add(this.getProjection(iterator.next()));
         }
         return res;
     }
@@ -42,7 +31,7 @@ public class FullScan extends AbstractScan {
         while(iterator.hasNext()){
             Object[] obj = iterator.next();
             if(this.index.checkCondition(filterContext, obj))
-                res.add(obj);
+                res.add(this.getProjection(obj));
         }
         return res;
     }
