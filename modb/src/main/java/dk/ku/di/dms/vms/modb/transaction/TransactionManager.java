@@ -30,6 +30,7 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 import static java.lang.System.Logger.Level.INFO;
+import static java.lang.System.Logger.Level.WARNING;
 
 /**
  * A transaction management facade
@@ -441,7 +442,12 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
         if(this.checkpointing) {
             for (Table table : this.catalog.values()) {
                 LOGGER.log(INFO, "Checkpointing table "+table.getName());
-                table.primaryKeyIndex().checkpoint(maxTid);
+                int numRecords = table.primaryKeyIndex().checkpoint(maxTid);
+                if(numRecords > 0) {
+                    LOGGER.log(INFO, "Persisted "+numRecords+" records in table "+table.getName());
+                } else {
+                    LOGGER.log(WARNING, "No records have been flushed to table "+table.getName());
+                }
             }
         } else {
             LOGGER.log(INFO, "Checkpoint disabled. Starting only garbage collection for max TID "+maxTid);
@@ -460,7 +466,7 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
     @Override
     public void commit(){
         TransactionContext txCtx = this.txCtxMap.get(Thread.currentThread().threadId());
-        for(var index : txCtx.indexes){
+        for(IMultiVersionIndex index : txCtx.indexes){
             index.installWrites(txCtx);
         }
     }

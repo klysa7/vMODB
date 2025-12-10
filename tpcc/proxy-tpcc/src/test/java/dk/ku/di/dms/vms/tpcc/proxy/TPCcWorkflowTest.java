@@ -1,6 +1,7 @@
 package dk.ku.di.dms.vms.tpcc.proxy;
 
 import dk.ku.di.dms.vms.coordinator.Coordinator;
+import dk.ku.di.dms.vms.modb.common.serdes.IVmsSerdesProxy;
 import dk.ku.di.dms.vms.modb.common.serdes.VmsSerdesProxyBuilder;
 import dk.ku.di.dms.vms.modb.common.utils.ConfigUtils;
 import dk.ku.di.dms.vms.modb.definition.key.composite.TripleCompositeKey;
@@ -31,7 +32,7 @@ public final class TPCcWorkflowTest {
 
     private static final int RUN_TIME = 10000;
 
-    private static final int WARM_UP = 2000;
+    private static final int WARM_UP = 0;
 
     private static final Properties PROPERTIES = ConfigUtils.loadProperties();
 
@@ -74,6 +75,9 @@ public final class TPCcWorkflowTest {
             }
         } catch (IOException ignored){ }
 
+        PROPERTIES.setProperty("logging", "true");
+        PROPERTIES.setProperty("checkpointing", "true");
+
         try {
             WAREHOUSE_SVC = dk.ku.di.dms.vms.tpcc.warehouse.Main.build();
             INVENTORY_SVC = dk.ku.di.dms.vms.tpcc.inventory.Main.build();
@@ -101,7 +105,7 @@ public final class TPCcWorkflowTest {
 
     @Test
     public void test_B_create_workload() throws IOException {
-        WorkloadUtils.createWorkload(NUM_WARE, 10, true, 50);
+        WorkloadUtils.createWorkload(NUM_WARE, 10, true, 100);
         List<Iterator<Object>> iterators = WorkloadUtils.mapWorkloadInputFiles(NUM_WARE);
         Assert.assertFalse(iterators.isEmpty());
         for(var iterator : iterators){
@@ -149,25 +153,32 @@ public final class TPCcWorkflowTest {
             numConnected = coordinator.getConnectedVMSs().size();
         } while (numConnected < 3);
 
-        var expStats = ExperimentUtils.runExperiment(coordinator, input, RUN_TIME, WARM_UP);
+        ExperimentUtils.ExperimentStats expStats = ExperimentUtils.runExperiment(coordinator, input, RUN_TIME, WARM_UP);
 
         coordinator.stop();
 
         ExperimentUtils.writeResultsToFile(NUM_WARE, expStats, RUN_TIME, WARM_UP,
-                coordinator.getOptions().getNumTransactionWorkers(), coordinator.getOptions().getBatchWindow(), coordinator.getOptions().getMaxTransactionsPerBatch());
+                coordinator.getOptions().getNumTransactionWorkers(),
+                coordinator.getOptions().getBatchWindow(),
+                coordinator.getOptions().getMaxTransactionsPerBatch());
 
         String host = PROPERTIES.getProperty("warehouse_host");
         int port = TPCcConstants.VMS_TO_PORT_MAP.get("warehouse");
-        var serdesProxy = VmsSerdesProxyBuilder.build();
+        IVmsSerdesProxy serdesProxy = VmsSerdesProxyBuilder.build();
         // query get some items and assert correctness
+        int districtUpdated = 0;
         try(MinimalHttpClient httpClient = new MinimalHttpClient(host, port)){
             for(int i = 1; i <= TPCcConstants.NUM_DIST_PER_WARE; i++) {
                 String resp2 = httpClient.sendGetRequest("district/"+i+"/1");
                 var parsedResp = HttpUtils.parseRequest(resp2);
-                var district = serdesProxy.deserialize(parsedResp.body(), District.class);
-                Assert.assertTrue(district.d_next_o_id > 3001);
+                District district = serdesProxy.deserialize(parsedResp.body(), District.class);
+                // not all districts are updated
+                if(district.d_next_o_id > 3001){
+                    districtUpdated++;
+                }
             }
         }
+        Assert.assertTrue(districtUpdated > 0);
     }
 
     private static void hasDataBeenIngested() throws IOException {

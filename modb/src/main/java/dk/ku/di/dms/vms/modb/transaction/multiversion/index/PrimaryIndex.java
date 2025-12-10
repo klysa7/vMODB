@@ -86,7 +86,7 @@ public final class PrimaryIndex implements IMultiVersionIndex {
 
     @Override
     public int hashCode() {
-        return this.rawIndex.key().hashCode();
+        return this.rawIndex.hashCode();
     }
 
     /**
@@ -99,7 +99,7 @@ public final class PrimaryIndex implements IMultiVersionIndex {
         if(opSet != null){
             // why checking first if I am a WRITE. because by checking if I am right, I don't need to pay O(log n)
             // 1 write thread at a time. if that is a writer thread, does not matter my lastTid. I can just check the last write for this entry
-            if( !txCtx.readOnly ){
+            if(!txCtx.readOnly){
                 return opSet.lastWriteType != WriteType.DELETE;
             }
             Entry<Long, TransactionWrite> floorEntry = opSet.floorEntry(txCtx.lastTid);
@@ -419,8 +419,8 @@ public final class PrimaryIndex implements IMultiVersionIndex {
 
     private static final boolean GARBAGE_COLLECTION = false;
 
-    public void checkpoint(long maxTid){
-        if(this.keysToFlush.isEmpty() || this.updatesPerKeyMap.isEmpty()) return;
+    public int checkpoint(long maxTid){
+        if(this.keysToFlush.isEmpty() || this.updatesPerKeyMap.isEmpty()) return 0;
         int numRecords = 0;
         Iterator<IKey> it = this.keysToFlush.iterator();
         this.rawIndex.lock();
@@ -448,11 +448,9 @@ public final class PrimaryIndex implements IMultiVersionIndex {
         }
         this.rawIndex.unlock();
         if(numRecords > 0) {
-            LOGGER.log(INFO, "Updated "+numRecords+" records in disk");
             this.rawIndex.flush();
-        } else {
-            LOGGER.log(WARNING, "No records have been flushed");
         }
+        return numRecords;
     }
 
     public void installWrites(TransactionContext txCtx){

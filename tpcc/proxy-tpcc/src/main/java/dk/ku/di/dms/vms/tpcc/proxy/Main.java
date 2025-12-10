@@ -44,6 +44,10 @@ public final class Main {
         PROPERTIES.setProperty("vms_thread_pool_size", "0");
         PROPERTIES.setProperty("network_thread_pool_size", "0");
 
+        // if persistence is required, uncomment below lines
+        // PROPERTIES.setProperty("logging", "true");
+        // PROPERTIES.setProperty("checkpointing", "true");
+
         dk.ku.di.dms.vms.tpcc.warehouse.Main.main(null);
         dk.ku.di.dms.vms.tpcc.inventory.Main.main(null);
         dk.ku.di.dms.vms.tpcc.order.Main.main(null);

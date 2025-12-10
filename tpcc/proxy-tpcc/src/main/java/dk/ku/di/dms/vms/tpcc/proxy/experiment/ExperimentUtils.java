@@ -84,11 +84,12 @@ public final class ExperimentUtils {
             break;
         }
 
-        // if none, consider the first batch as the warmup
+        // if none, consider the first batch as the warmup, unless warmup is 0
         if(prevBatchStats == null) {
             Long lowestKey = BATCH_TO_FINISHED_TS_MAP.keySet().stream().min(Long::compareTo).orElse(null);
             prevBatchStats = BATCH_TO_FINISHED_TS_MAP.get(lowestKey);
-            numCompletedDuringWarmUp = (int) prevBatchStats.lastTid - lastExperimentLastTID;
+            if(warmUp > 0)
+                numCompletedDuringWarmUp = (int) prevBatchStats.lastTid - lastExperimentLastTID;
         }
 
         BatchStats firstBatchStats = prevBatchStats;
