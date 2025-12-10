@@ -54,22 +54,10 @@ public final class DataGenUtils {
      * @return A last name
      */
     public static String lastName(int num) {
-        String name = n[num / 100];
-        name = name + n[(num / 10) % 10];
-        name = name + n[num % 10];
-        return name;
+        return n[num / 100] + n[(num / 10) % 10] + n[num % 10];
     }
 
-    /**
-     * Based on <a href="https://github.com/AgilData/tpcc/blob/master/src/main/java/com/codefutures/tpcc/Util.java#L120">AgilData</a>
-     */
-    public static int nuRand(int A, int x, int y) {
-        int C = switch (A) {
-            case 255 -> C_255;
-            case 1023 -> C_1023;
-            case 8191 -> C_8191;
-            default -> throw new RuntimeException("NURand: unexpected value (%d) of A used\n" + A);
-        };
+    public static int nuRand(int A, int C, int x, int y) {
         return ((((randomNumber(0, A) | randomNumber(x, y)) + C) % (y - x + 1)) + x);
     }
 

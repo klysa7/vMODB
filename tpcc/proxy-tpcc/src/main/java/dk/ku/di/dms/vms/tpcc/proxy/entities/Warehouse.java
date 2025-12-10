@@ -36,12 +36,11 @@ public final class Warehouse implements IEntity<Integer> {
     public float w_tax;
 
     @Column
-    public double w_ytd;
+    public float w_ytd;
 
     public Warehouse(){}
 
-    public Warehouse(int w_id, String w_name, String w_street_1, String w_street_2, String w_city,
-                     String w_state, String w_zip, float w_tax, double w_ytd) {
+    public Warehouse(int w_id, String w_name, String w_street_1, String w_street_2, String w_city, String w_state, String w_zip, float w_tax, float w_ytd) {
         this.w_id = w_id;
         this.w_name = w_name;
         this.w_street_1 = w_street_1;

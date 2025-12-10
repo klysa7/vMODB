@@ -15,7 +15,7 @@ public final class Parser {
 
     /**
      *
-     * @param sql a simple select statement (select <x,y,x,...> from table where <>
+     * @param sql a simple select statement (select <x,y,x,...> from table where <> order by
      */
     public static SelectStatement parse(String sql) {
 

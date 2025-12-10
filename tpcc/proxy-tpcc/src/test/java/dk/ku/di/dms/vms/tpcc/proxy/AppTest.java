@@ -7,6 +7,8 @@ import org.junit.Assert;
 import org.junit.Test;
 
 import java.io.IOException;
+import java.util.HashMap;
+import java.util.Map;
 
 public final class AppTest {
 
@@ -28,8 +30,10 @@ public final class AppTest {
 
     @Test
     public void testWorkload() throws IOException {
+        Map<String, Integer> numTxPerType = new HashMap<>(3);
+        numTxPerType.put("new_order", 10);
         // create
-        WorkloadUtils.createWorkload(NUM_WARE, 100000, false, 100);
+        WorkloadUtils.createWorkload(NUM_WARE, 100000, false, numTxPerType);
         // load
         var loaded = WorkloadUtils.mapWorkloadInputFiles(NUM_WARE);
         Assert.assertEquals(NUM_WARE, loaded.size());

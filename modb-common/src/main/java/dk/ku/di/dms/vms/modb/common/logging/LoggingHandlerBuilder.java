@@ -8,12 +8,11 @@ import java.nio.channels.FileChannel;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
-import java.util.Date;
 
 public final class LoggingHandlerBuilder {
 
     public static ILoggingHandler build(String identifier) {
-        String fileName = identifier + "_" + new Date().getTime() +".llog";
+        String fileName = identifier + "_" + System.currentTimeMillis() +".llog";
         String userHome = ConfigUtils.getUserHome();
         String basePath = userHome + "/vms";
         File file = new File(basePath);

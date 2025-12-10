@@ -59,9 +59,20 @@ public final class Main {
         Coordinator coordinator = null;
         int numWare = 0;
         Map<String, UniqueHashBufferIndex> tables = null;
-        List<Iterator<Object>> input;
+        List<Map<String,Iterator<Object>>> input;
         StorageUtils.EntityMetadata metadata = StorageUtils.loadEntityMetadata();
         Map<String, String> vmsToHostMap = DataLoadUtils.mapVmsToHost(PROPERTIES);
+
+        Map<String, Integer> numTxPerType = new HashMap<>(3);
+        numTxPerType.put("new_order", Integer.valueOf(PROPERTIES.get("new_order_size").toString()));
+        numTxPerType.put("payment", Integer.valueOf(PROPERTIES.get("payment_size").toString()));
+        numTxPerType.put("order_status", Integer.valueOf(PROPERTIES.get("order_status_size").toString()));
+
+        Map<Integer, String> txRatio = new TreeMap<>();
+        txRatio.put(Integer.valueOf(PROPERTIES.get("new_order").toString()), "new_order");
+        txRatio.put(Integer.valueOf(PROPERTIES.get("payment").toString()), "payment");
+        txRatio.put(Integer.valueOf(PROPERTIES.get("order_status").toString()), "order_status");
+
         Scanner scanner = new Scanner(System.in);
         boolean running = true;
         boolean dataLoaded = false;
@@ -118,21 +129,10 @@ public final class Main {
 
                     System.out.println("Number of warehouses: "+numWare);
 
-                    int newOrderRatio;
-                    do {
-                        System.out.println("Enter New Order ratio [0-100]");
-                        newOrderRatio = Integer.parseInt(scanner.nextLine());
-                    } while(newOrderRatio < 0 || newOrderRatio > 100);
-
-                    boolean multiWarehouses = true;
-                    if(newOrderRatio > 0) {
-                        System.out.println("Allow multi warehouse transactions? [0/1]");
-                        multiWarehouses = Integer.parseInt(scanner.nextLine()) > 0;
-                    }
                     System.out.println("Enter number of transactions per warehouse: ");
                     try {
                         int numTxn = Integer.parseInt(scanner.nextLine());
-                        WorkloadUtils.createWorkload(numWare, numTxn, multiWarehouses, newOrderRatio);
+                        WorkloadUtils.createWorkload(numWare, numTxn, Boolean.getBoolean( PROPERTIES.get("multi_warehouse").toString() ), numTxPerType);
                     } catch (IOException e){
                         System.out.println("ERROR:\n"+e);
                     }
@@ -165,7 +165,7 @@ public final class Main {
                         }
                     }
 
-                    int batchWindow = Integer.parseInt( PROPERTIES.getProperty("batch_window_ms") );
+                    int batchWindow = Integer.parseInt(PROPERTIES.getProperty("batch_window_ms"));
                     int runTime;
 
                     while(true) {
@@ -202,7 +202,7 @@ public final class Main {
                             numConnected = coordinator.getConnectedVMSs().size();
                         } while (numConnected < 3);
                     }
-                    var expStats = ExperimentUtils.runExperiment(coordinator, input, runTime, warmUp);
+                    ExperimentUtils.ExperimentStats expStats = ExperimentUtils.runExperiment(coordinator, txRatio, input, runTime, warmUp);
                     ExperimentUtils.writeResultsToFile(numWare, expStats, runTime, warmUp,
                             coordinator.getOptions().getNumTransactionWorkers(), coordinator.getOptions().getBatchWindow(), coordinator.getOptions().getMaxTransactionsPerBatch());
                     break;

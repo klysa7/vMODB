@@ -6,11 +6,14 @@ import dk.ku.di.dms.vms.modb.api.query.enums.ExpressionTypeEnum;
 import dk.ku.di.dms.vms.modb.api.query.statement.SelectStatement;
 import dk.ku.di.dms.vms.tpcc.common.events.NewOrderInvOut;
 import dk.ku.di.dms.vms.tpcc.common.events.OrderStatusOut;
+import dk.ku.di.dms.vms.tpcc.common.events.PaymentOut;
 import dk.ku.di.dms.vms.tpcc.order.dto.OrderInfoDto;
 import dk.ku.di.dms.vms.tpcc.order.dto.OrderLineInfoDto;
+import dk.ku.di.dms.vms.tpcc.order.entities.History;
 import dk.ku.di.dms.vms.tpcc.order.entities.NewOrder;
 import dk.ku.di.dms.vms.tpcc.order.entities.Order;
 import dk.ku.di.dms.vms.tpcc.order.entities.OrderLine;
+import dk.ku.di.dms.vms.tpcc.order.repositories.IHistoryRepository;
 import dk.ku.di.dms.vms.tpcc.order.repositories.INewOrderRepository;
 import dk.ku.di.dms.vms.tpcc.order.repositories.IOrderLineRepository;
 import dk.ku.di.dms.vms.tpcc.order.repositories.IOrderRepository;
@@ -31,11 +34,13 @@ public final class OrderService {
     private final IOrderRepository orderRepository;
     private final INewOrderRepository newOrderRepository;
     private final IOrderLineRepository orderLineRepository;
+    private final IHistoryRepository historyRepository;
 
-    public OrderService(IOrderRepository orderRepository, INewOrderRepository newOrderRepository, IOrderLineRepository orderLineRepository) {
+    public OrderService(IOrderRepository orderRepository, INewOrderRepository newOrderRepository, IOrderLineRepository orderLineRepository, IHistoryRepository historyRepository) {
         this.orderRepository = orderRepository;
         this.newOrderRepository = newOrderRepository;
         this.orderLineRepository = orderLineRepository;
+        this.historyRepository = historyRepository;
     }
 
     public static final SelectStatement ORDER_BASE_QUERY = QueryBuilderFactory.select()
@@ -46,6 +51,14 @@ public final class OrderService {
             .and("o_c_id", ExpressionTypeEnum.EQUALS, ":c_id")
             .groupBy( "o_w_id", "o_d_id", "o_c_id" )
             .build();
+
+    @Inbound(values = "payment-out")
+    @Transactional(type = W)
+    @Parallel
+    public void processPayment(PaymentOut out){
+        History history = new History(out.c_id, out.c_d_id, out.c_w_id, out.d_id, out.w_id, new Date(), out.amount, out.data);
+        this.historyRepository.insert(history);
+    }
 
     @Inbound(values = "order-status-out")
     @Transactional(type = R)

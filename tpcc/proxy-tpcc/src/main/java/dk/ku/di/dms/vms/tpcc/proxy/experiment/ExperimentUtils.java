@@ -6,6 +6,7 @@ import dk.ku.di.dms.vms.coordinator.transaction.TransactionDAG;
 import dk.ku.di.dms.vms.coordinator.transaction.TransactionInput;
 import dk.ku.di.dms.vms.modb.common.schema.network.node.IdentifiableNode;
 import dk.ku.di.dms.vms.tpcc.common.events.NewOrderWareIn;
+import dk.ku.di.dms.vms.tpcc.common.events.PaymentIn;
 import dk.ku.di.dms.vms.tpcc.proxy.workload.WorkloadUtils;
 import dk.ku.di.dms.vms.web_common.IHttpHandler;
 
@@ -31,7 +32,7 @@ public final class ExperimentUtils {
 
     private static int lastExperimentLastTID = 0;
 
-    public static ExperimentStats runExperiment(Coordinator coordinator, List<Iterator<Object>> input, int runTime, int warmUp) {
+    public static ExperimentStats runExperiment(Coordinator coordinator, Map<Integer, String> txRatio, List<Map<String, Iterator<Object>>> input, int runTime, int warmUp) {
 
         // provide a consumer to avoid depending on the coordinator
         Function<Object, Long> func = tpccInputBuilder(coordinator);
@@ -49,13 +50,7 @@ public final class ExperimentUtils {
         }
 
         int newRuntime = runTime + warmUp;
-        WorkloadUtils.WorkloadStats workloadStats = WorkloadUtils.submitWorkload(input, func);
-
-        try {
-            Thread.sleep(newRuntime);
-        } catch (InterruptedException e) {
-            throw new RuntimeException(e);
-        }
+        WorkloadUtils.WorkloadStats workloadStats = WorkloadUtils.submitWorkload(txRatio, input, func, newRuntime);
 
         // avoid submitting after experiment termination
         coordinator.clearTransactionInputs();
@@ -185,10 +180,20 @@ public final class ExperimentUtils {
     private record BatchStats(long batchId, long lastTid, long endTs){}
 
     private static Function<Object, Long> tpccInputBuilder(final Coordinator coordinator) {
-        return tpccInput -> {
-            boolean newOrder = tpccInput instanceof NewOrderWareIn;
-            TransactionInput.Event eventPayload = new TransactionInput.Event(newOrder ? "new-order-ware-in" : "order-status-in", tpccInput.toString());
-            TransactionInput txInput = new TransactionInput(newOrder ? "new_order" : "order_status", eventPayload);
+        return input -> {
+            TransactionInput.Event eventPayload;
+            String txIdentifier;
+            if(input instanceof NewOrderWareIn newOrderInput){
+                txIdentifier = "new_order";
+                eventPayload = new TransactionInput.Event("new-order-ware-in", newOrderInput.toString());
+            } else if(input instanceof PaymentIn paymentInput){
+                txIdentifier = "payment";
+                eventPayload = new TransactionInput.Event("payment-in", paymentInput.toString());
+            } else {
+                txIdentifier = "order_status";
+                eventPayload = new TransactionInput.Event("order-status-in", input.toString());
+            }
+            TransactionInput txInput = new TransactionInput(txIdentifier, eventPayload);
             coordinator.queueTransactionInput(txInput);
             return (long) BATCH_TO_FINISHED_TS_MAP.size() + 1;
         };
@@ -203,6 +208,14 @@ public final class ExperimentUtils {
                 .terminal("c", "order", "b")
                 .build();
         transactionMap.put(newOrderDag.name, newOrderDag);
+
+        // payment
+        TransactionDAG paymentDag = TransactionBootstrap.name("payment")
+                .input("a", "warehouse", "payment-in")
+                .terminal("b", "order", "a")
+                .build();
+        transactionMap.put(paymentDag.name, paymentDag);
+
         // order status
         TransactionDAG orderStatusDag = TransactionBootstrap.name("order_status")
                 .input("a", "warehouse", "order-status-in")

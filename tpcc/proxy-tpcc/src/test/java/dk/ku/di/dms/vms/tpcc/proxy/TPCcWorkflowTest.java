@@ -105,13 +105,18 @@ public final class TPCcWorkflowTest {
 
     @Test
     public void test_B_create_workload() throws IOException {
-        WorkloadUtils.createWorkload(NUM_WARE, 10, true, 100);
-        List<Iterator<Object>> iterators = WorkloadUtils.mapWorkloadInputFiles(NUM_WARE);
-        Assert.assertFalse(iterators.isEmpty());
-        for(var iterator : iterators){
-            while (iterator.hasNext()) {
-                System.out.println(iterator.next());
-            }
+
+        Map<String, Integer> numTxPerType = new HashMap<>(3);
+        numTxPerType.put("new_order", 10);
+//        numTxPerType.put("payment", (int) PROPERTIES.get("payment_size"));
+//        numTxPerType.put("order_status", (int) PROPERTIES.get("order_status_size"));
+
+        WorkloadUtils.createWorkload(NUM_WARE, 10, true, numTxPerType);
+        List<Map<String,Iterator<Object>>> iteratorMap = WorkloadUtils.mapWorkloadInputFiles(NUM_WARE);
+        Assert.assertFalse(iteratorMap.isEmpty());
+        var iterator = iteratorMap.getFirst().get("new_order");
+        while (iterator.hasNext()) {
+            System.out.println(iterator.next());
         }
     }
 
@@ -153,7 +158,12 @@ public final class TPCcWorkflowTest {
             numConnected = coordinator.getConnectedVMSs().size();
         } while (numConnected < 3);
 
-        ExperimentUtils.ExperimentStats expStats = ExperimentUtils.runExperiment(coordinator, input, RUN_TIME, WARM_UP);
+        Map<Integer, String> txRatio = new TreeMap<>();
+        txRatio.put(100, "new_order");
+//        txRatio.put(Integer.valueOf(PROPERTIES.get("payment").toString()), "payment");
+//        txRatio.put(Integer.valueOf(PROPERTIES.get("order_status").toString()), "order_status");
+
+        ExperimentUtils.ExperimentStats expStats = ExperimentUtils.runExperiment(coordinator, txRatio, input, RUN_TIME, WARM_UP);
 
         coordinator.stop();
 
