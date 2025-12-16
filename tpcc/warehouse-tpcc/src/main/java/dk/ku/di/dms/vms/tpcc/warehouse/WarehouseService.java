@@ -60,6 +60,10 @@ public final class WarehouseService {
         Customer customer;
         if(in.by_name){
             List<Customer> customers = this.customerRepository.getCustomerByLastName(in.c_d_id, in.c_w_id, in.c_last);
+            if(customers.isEmpty()){
+                System.out.printf("Empty customer list\nc_d_id: %d c_w_id: %d c_last: %s\n", in.c_d_id, in.c_w_id, in.c_last);
+
+            }
             int index = customers.size() / 2;
             if (customers.size() % 2 == 0) {
                 index -= 1;

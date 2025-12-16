@@ -26,14 +26,10 @@ public final class DataTypeUtils {
                 StringBuilder sb = new StringBuilder();
                 long currAddress = address;
                 for(int i = 0; i < DEFAULT_MAX_SIZE_STRING; i++) {
-                    sb.append( UNSAFE.getChar(null, currAddress) );
+                    char ch = UNSAFE.getChar(null, currAddress);
+                    if (ch == '\0') break;
+                    sb.append(ch);
                     currAddress += Character.BYTES;
-                }
-                // temporary solution due to the lack of string size metadata
-                for(int i = DEFAULT_MAX_SIZE_STRING-1; i >= 0; i--) {
-                    if(sb.charAt(sb.length()-1) == '\0'){
-                        sb.delete(sb.length()-1, sb.length());
-                    }
                 }
                 return sb.toString();
             }
@@ -97,6 +93,12 @@ public final class DataTypeUtils {
                         int length = Math.min(strValue.length(), DEFAULT_MAX_SIZE_STRING);
                         while (i < length) {
                             UNSAFE.putChar(null, currPos, strValue.charAt(i));
+                            currPos += Character.BYTES;
+                            i++;
+                        }
+                        // prevent reading stale data and also storing size of string (more metadata)
+                        while(i < DEFAULT_MAX_SIZE_STRING){
+                            UNSAFE.putChar(null, currPos, '\0');
                             currPos += Character.BYTES;
                             i++;
                         }

@@ -4,6 +4,7 @@ import dk.ku.di.dms.vms.coordinator.Coordinator;
 import dk.ku.di.dms.vms.coordinator.transaction.TransactionBootstrap;
 import dk.ku.di.dms.vms.coordinator.transaction.TransactionDAG;
 import dk.ku.di.dms.vms.coordinator.transaction.TransactionInput;
+import dk.ku.di.dms.vms.modb.common.data_structure.Tuple;
 import dk.ku.di.dms.vms.modb.common.schema.network.node.IdentifiableNode;
 import dk.ku.di.dms.vms.tpcc.common.events.NewOrderWareIn;
 import dk.ku.di.dms.vms.tpcc.common.events.PaymentIn;
@@ -32,7 +33,7 @@ public final class ExperimentUtils {
 
     private static int lastExperimentLastTID = 0;
 
-    public static ExperimentStats runExperiment(Coordinator coordinator, Map<Integer, String> txRatio, List<Map<String, Iterator<Object>>> input, int runTime, int warmUp) {
+    public static ExperimentStats runExperiment(Coordinator coordinator, Tuple<Integer, String>[] txRatio, List<Map<String, Iterator<Object>>> input, int runTime, int warmUp) {
 
         // provide a consumer to avoid depending on the coordinator
         Function<Object, Long> func = tpccInputBuilder(coordinator);

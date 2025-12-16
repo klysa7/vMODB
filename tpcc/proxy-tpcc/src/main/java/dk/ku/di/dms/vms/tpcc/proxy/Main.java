@@ -1,6 +1,7 @@
 package dk.ku.di.dms.vms.tpcc.proxy;
 
 import dk.ku.di.dms.vms.coordinator.Coordinator;
+import dk.ku.di.dms.vms.modb.common.data_structure.Tuple;
 import dk.ku.di.dms.vms.modb.common.utils.ConfigUtils;
 import dk.ku.di.dms.vms.modb.index.unique.UniqueHashBufferIndex;
 import dk.ku.di.dms.vms.tpcc.proxy.dataload.DataLoadUtils;
@@ -63,15 +64,12 @@ public final class Main {
         StorageUtils.EntityMetadata metadata = StorageUtils.loadEntityMetadata();
         Map<String, String> vmsToHostMap = DataLoadUtils.mapVmsToHost(PROPERTIES);
 
-        Map<String, Integer> numTxPerType = new HashMap<>(3);
-        numTxPerType.put("new_order", Integer.valueOf(PROPERTIES.get("new_order_size").toString()));
-        numTxPerType.put("payment", Integer.valueOf(PROPERTIES.get("payment_size").toString()));
-        numTxPerType.put("order_status", Integer.valueOf(PROPERTIES.get("order_status_size").toString()));
+        Map<String, Integer> numTxInputPerType = new HashMap<>(3);
+        numTxInputPerType.put("new_order", Integer.valueOf(PROPERTIES.get("new_order_input_size").toString()));
+        numTxInputPerType.put("payment", Integer.valueOf(PROPERTIES.get("payment_input_size").toString()));
+        numTxInputPerType.put("order_status", Integer.valueOf(PROPERTIES.get("order_status_input_size").toString()));
 
-        Map<Integer, String> txRatio = new TreeMap<>();
-        txRatio.put(Integer.valueOf(PROPERTIES.get("new_order").toString()), "new_order");
-        txRatio.put(Integer.valueOf(PROPERTIES.get("payment").toString()), "payment");
-        txRatio.put(Integer.valueOf(PROPERTIES.get("order_status").toString()), "order_status");
+        Tuple<Integer, String>[] txRatio = buildTransactionRatio();
 
         Scanner scanner = new Scanner(System.in);
         boolean running = true;
@@ -129,10 +127,8 @@ public final class Main {
 
                     System.out.println("Number of warehouses: "+numWare);
 
-                    System.out.println("Enter number of transactions per warehouse: ");
                     try {
-                        int numTxn = Integer.parseInt(scanner.nextLine());
-                        WorkloadUtils.createWorkload(numWare, numTxn, Boolean.getBoolean( PROPERTIES.get("multi_warehouse").toString() ), numTxPerType);
+                        WorkloadUtils.createWorkload(numWare, Boolean.getBoolean( PROPERTIES.get("multi_warehouse").toString() ), numTxInputPerType);
                     } catch (IOException e){
                         System.out.println("ERROR:\n"+e);
                     }
@@ -202,6 +198,10 @@ public final class Main {
                             numConnected = coordinator.getConnectedVMSs().size();
                         } while (numConnected < 3);
                     }
+
+                    // prevent log pollution, i.e., interleaving of handshaking and experiment messages
+                    try { Thread.sleep(100); } catch (InterruptedException _) { }
+
                     ExperimentUtils.ExperimentStats expStats = ExperimentUtils.runExperiment(coordinator, txRatio, input, runTime, warmUp);
                     ExperimentUtils.writeResultsToFile(numWare, expStats, runTime, warmUp,
                             coordinator.getOptions().getNumTransactionWorkers(), coordinator.getOptions().getBatchWindow(), coordinator.getOptions().getMaxTransactionsPerBatch());
@@ -246,6 +246,21 @@ public final class Main {
         }
         scanner.close();
         System.exit(0);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Tuple<Integer, String>[] buildTransactionRatio() {
+        Map<Integer, String> txRatioMap = new TreeMap<>();
+        txRatioMap.put(Integer.valueOf(PROPERTIES.get("new_order").toString()), "new_order");
+        txRatioMap.put(Integer.valueOf(PROPERTIES.get("payment").toString()), "payment");
+        txRatioMap.put(Integer.valueOf(PROPERTIES.get("order_status").toString()), "order_status");
+        Tuple<Integer, String>[] txRatio = new Tuple[txRatioMap.size()];
+        int i = 0;
+        for(var entry : txRatioMap.entrySet()){
+            txRatio[i] = Tuple.of(entry.getKey(), entry.getValue());
+            i++;
+        }
+        return txRatio;
     }
 
     private static void printMenu(String menuType) {

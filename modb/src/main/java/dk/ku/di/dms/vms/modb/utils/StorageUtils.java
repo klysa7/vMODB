@@ -23,6 +23,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 
 import static java.lang.System.Logger.Level.DEBUG;
+import static java.lang.System.Logger.Level.INFO;
 
 public class StorageUtils {
 
@@ -114,13 +115,16 @@ public class StorageUtils {
 
     public static AppendOnlyUnboundedBuffer loadAppendOnlyUnboundedBuffer(String fileName){
         File file = buildFile(fileName);
+        if(file.delete()){
+            LOGGER.log(INFO, "Old file in directory deleted successfully: " + file.getAbsolutePath());
+        }
         StandardOpenOption[] options = new StandardOpenOption[]{
-                StandardOpenOption.CREATE,
+                StandardOpenOption.CREATE_NEW,
                 StandardOpenOption.TRUNCATE_EXISTING,
                 StandardOpenOption.WRITE};
         try {
             FileChannel fc = FileChannel.open(Path.of(file.toURI()), options);
-            LOGGER.log(DEBUG, "Attempt to open file in directory completed successfully: " + file.getAbsolutePath());
+            LOGGER.log(INFO, "Attempt to open file in directory completed successfully: " + file.getAbsolutePath());
             return new AppendOnlyUnboundedBuffer(fc, fileName);
         } catch (Exception e) {
             throw new RuntimeException(e);

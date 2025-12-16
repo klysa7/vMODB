@@ -48,7 +48,7 @@ public final class DataGenerator {
 
     public static Customer generateCustomer(int c_id, int c_d_id, int c_w_id) {
         String C_FIRST = makeAlphaString(8, 16);
-        String C_MIDDLE = "O" + "E";
+        String C_MIDDLE = "OE";
         String C_LAST;
         if (c_id <= 1000) {
             C_LAST = lastName(c_id - 1);
@@ -66,22 +66,20 @@ public final class DataGenerator {
 
         String C_CREDIT;
         if (randomNumber(0, 1) == 1)
-            C_CREDIT = "G";
+            C_CREDIT = "GC";
         else
-            C_CREDIT = "B";
-        C_CREDIT += "C";
+            C_CREDIT = "BC";
 
         int C_CREDIT_LIM = 50000;
         float C_DISCOUNT = (float) (((float) randomNumber(0, 50)) / 100.0);
-        float C_BALANCE =  (float) -10.0;
+        float C_BALANCE = (float) -10.0;
 
         int C_YTD_PAYMENT = 10;
         int C_PAYMENT_CNT = 1;
         int C_DELIVERY_CNT = 0;
         String C_DATA = makeAlphaString(300, 500);
 
-        return new Customer(c_id, c_d_id, c_w_id, C_FIRST, C_MIDDLE, C_LAST, C_STREET_1, C_STREET_2, C_CITY, C_STATE, C_ZIP,
-                C_PHONE, C_SINCE, C_CREDIT, C_CREDIT_LIM, C_DISCOUNT, C_BALANCE, C_YTD_PAYMENT, C_PAYMENT_CNT, C_DELIVERY_CNT, C_DATA);
+        return new Customer(c_id, c_d_id, c_w_id, C_FIRST, C_MIDDLE, C_LAST, C_STREET_1, C_STREET_2, C_CITY, C_STATE, C_ZIP, C_PHONE, C_SINCE, C_CREDIT, C_CREDIT_LIM, C_DISCOUNT, C_BALANCE, C_YTD_PAYMENT, C_PAYMENT_CNT, C_DELIVERY_CNT, C_DATA);
     }
 
     public static Stock generateStockItem(int w_id, int S_I_ID) {

@@ -12,10 +12,6 @@ public final class DataGenUtils {
     private static final int arrmax = 61;  /* index of last array element */
     private static final Random generate = new Random();
 
-    private static final int C_255 = randomNumber(0, 255);
-    private static final int C_1023 = randomNumber(0, 1023);
-    private static final int C_8191 = randomNumber(0, 8191);
-
     /**
      * Based on <a href="https://github.com/AgilData/tpcc/blob/master/src/main/java/com/codefutures/tpcc/Util.java#L147">AgilData</a>
      * @param x Min length

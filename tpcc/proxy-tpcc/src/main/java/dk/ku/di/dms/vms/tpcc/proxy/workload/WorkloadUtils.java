@@ -1,6 +1,7 @@
 package dk.ku.di.dms.vms.tpcc.proxy.workload;
 
 import dk.ku.di.dms.vms.modb.common.constraint.ConstraintReference;
+import dk.ku.di.dms.vms.modb.common.data_structure.Tuple;
 import dk.ku.di.dms.vms.modb.common.memory.MemoryUtils;
 import dk.ku.di.dms.vms.modb.common.type.DataType;
 import dk.ku.di.dms.vms.modb.common.type.DataTypeUtils;
@@ -26,8 +27,7 @@ import java.util.function.Function;
 import static dk.ku.di.dms.vms.tpcc.proxy.datagen.DataGenUtils.nuRand;
 import static dk.ku.di.dms.vms.tpcc.proxy.datagen.DataGenUtils.randomNumber;
 import static dk.ku.di.dms.vms.tpcc.proxy.infra.TPCcConstants.*;
-import static java.lang.System.Logger.Level.ERROR;
-import static java.lang.System.Logger.Level.INFO;
+import static java.lang.System.Logger.Level.*;
 
 public final class WorkloadUtils {
 
@@ -96,7 +96,7 @@ public final class WorkloadUtils {
     public record WorkloadStats(long initTs, Map<Long, List<Long>>[] submitted){}
 
     @SuppressWarnings("unchecked")
-    public static WorkloadStats submitWorkload(Map<Integer, String> txRatio, List<Map<String, Iterator<Object>>> input, Function<Object, Long> func, int runtime) {
+    public static WorkloadStats submitWorkload(Tuple<Integer, String>[] txRatio, List<Map<String, Iterator<Object>>> input, Function<Object, Long> func, int runtime) {
         int numWorkers = input.size();
         LOGGER.log(INFO, "Submitting transactions through "+numWorkers+" worker(s)");
         CountDownLatch allThreadsStart = new CountDownLatch(numWorkers+1);
@@ -126,7 +126,7 @@ public final class WorkloadUtils {
 
     private static final class Worker {
 
-        public static Map<Long, List<Long>> run(CountDownLatch allThreadsStart, CountDownLatch allThreadsAreDone, Map<Integer, String> txRatio, Map<String, Iterator<Object>> input, Function<Object, Long> func, int runTime) {
+        public static Map<Long, List<Long>> run(CountDownLatch allThreadsStart, CountDownLatch allThreadsAreDone, Tuple<Integer, String>[] txRatio, Map<String, Iterator<Object>> input, Function<Object, Long> func, int runTime) {
             Map<Long,List<Long>> startTsMap = new HashMap<>();
             ThreadLocalRandom random = ThreadLocalRandom.current();
             long threadId = Thread.currentThread().threadId();
@@ -144,15 +144,20 @@ public final class WorkloadUtils {
             long currentTs = initTs;
             do {
 
-                ratio = random.nextInt();
-                for(var entry : txRatio.entrySet()){
-                    if(entry.getKey() <= ratio){
-                        tx = entry.getValue();
+                ratio = random.nextInt(1,101);
+                for(int i = 0; i < txRatio.length; i++){
+                    if(ratio <= txRatio[i].t1){
+                        tx = txRatio[i].t2;
                         break;
                     }
                 }
 
                 try {
+                    if(!input.get(tx).hasNext()){
+                        LOGGER.log(WARNING,"Not enough transaction inputs for: "+tx+"\nTerminating experiment earlier...");
+                        break;
+                        // input.remove(tx);
+                    }
                     long batchId = func.apply(input.get(tx).next());
                     if(!startTsMap.containsKey(batchId)){
                         startTsMap.put(batchId, new ArrayList<>());
@@ -163,9 +168,7 @@ public final class WorkloadUtils {
                     throw new RuntimeException(e);
                 }
                 currentTs = System.currentTimeMillis();
-
                 tx = null;
-
             } while (currentTs - initTs < runTime);
             allThreadsAreDone.countDown();
             return startTsMap;
@@ -199,7 +202,7 @@ public final class WorkloadUtils {
             input.add(wareInput);
         }
         long endTs = System.currentTimeMillis();
-        LOGGER.log(INFO, "Mapped "+numWare+" warehouse input files from disk in "+(endTs-initTs)+" ms");
+        LOGGER.log(INFO, "Mapped input files for "+numWare+" warehouse(s) from disk in "+(endTs-initTs)+" ms");
         return input;
     }
 
@@ -254,9 +257,9 @@ public final class WorkloadUtils {
         };
     }
 
-    public static void createWorkload(int numWare, int numTransactions, boolean allowMultiWarehouses, Map<String, Integer> numTxPerType) throws IOException {
+    public static void createWorkload(int numWare, boolean allowMultiWarehouses, Map<String, Integer> numTxPerType) throws IOException {
         deleteWorkloadInputFiles();
-        LOGGER.log(INFO, "Generating "+(numTransactions * numWare)+" transactions ("+numTransactions+" per warehouse/worker)");
+        LOGGER.log(INFO, "Starting transaction generation per warehouse/worker");
         long initTs = System.currentTimeMillis();
 
         ByteBuffer newOrderNativeBuffer = ByteBuffer.allocateDirect(NEW_ORDER_SCHEMA.getRecordSize());
@@ -269,6 +272,9 @@ public final class WorkloadUtils {
         long orderStatusBufferAddress = MemoryUtils.getByteBufferAddress(orderStatusNativeBuffer);
 
         for (int ware = 1; ware <= numWare; ware++) {
+
+            LOGGER.log(INFO, "Warehouse "+ware+" started");
+
             String newOrderInputFileName = NEW_ORDER_INPUT_BASE_FILE_NAME + ware;
             AppendOnlyUnboundedBuffer newOrderBuffer = StorageUtils.loadAppendOnlyUnboundedBuffer(newOrderInputFileName);
 
@@ -288,6 +294,7 @@ public final class WorkloadUtils {
                             newOrderNativeBuffer.clear();
                         }
                         newOrderBuffer.force();
+                        LOGGER.log(INFO, "Generated "+entry.getValue()+" new order inputs");
                     }
                     case "payment" -> {
                         for (int i = 1; i <= entry.getValue(); i++) {
@@ -297,6 +304,7 @@ public final class WorkloadUtils {
                             paymentNativeBuffer.clear();
                         }
                         paymentBuffer.force();
+                        LOGGER.log(INFO, "Generated "+entry.getValue()+" payment inputs");
                     }
                     case "order_status" -> {
                         for (int i = 1; i <= entry.getValue(); i++) {
@@ -306,13 +314,14 @@ public final class WorkloadUtils {
                             orderStatusNativeBuffer.clear();
                         }
                         orderStatusBuffer.force();
+                        LOGGER.log(INFO, "Generated "+entry.getValue()+" order status inputs");
                     }
                 }
             }
+            LOGGER.log(INFO, "Warehouse "+ware+" done");
         }
-
         long endTs = System.currentTimeMillis();
-        LOGGER.log(INFO, "Generated "+(numTransactions * numWare)+" transactions in "+(endTs-initTs)+" ms");
+        LOGGER.log(INFO, "Transaction generation finished in "+(endTs-initTs)+" ms");
     }
     
     public static void deleteWorkloadInputFiles(){
@@ -459,7 +468,7 @@ public final class WorkloadUtils {
         int d_id = randomNumber(1, NUM_DIST_PER_WARE);
         int c_id = nuRand(1023, 259, 1, NUM_CUST_PER_DIST);
         float amount = (float) (randomNumber(100, 500000) / 100.0);
-        int c_d_id = c_id;
+        int c_d_id = d_id;
         int c_w_id = w_id;
         if (randomNumber(1, 100) > 85) {
             c_d_id = randomNumber(1, NUM_DIST_PER_WARE);

@@ -1,6 +1,7 @@
 package dk.ku.di.dms.vms.tpcc.proxy;
 
 import dk.ku.di.dms.vms.coordinator.Coordinator;
+import dk.ku.di.dms.vms.modb.common.data_structure.Tuple;
 import dk.ku.di.dms.vms.modb.common.serdes.IVmsSerdesProxy;
 import dk.ku.di.dms.vms.modb.common.serdes.VmsSerdesProxyBuilder;
 import dk.ku.di.dms.vms.modb.common.utils.ConfigUtils;
@@ -111,7 +112,7 @@ public final class TPCcWorkflowTest {
 //        numTxPerType.put("payment", (int) PROPERTIES.get("payment_size"));
 //        numTxPerType.put("order_status", (int) PROPERTIES.get("order_status_size"));
 
-        WorkloadUtils.createWorkload(NUM_WARE, 10, true, numTxPerType);
+        WorkloadUtils.createWorkload(NUM_WARE, true, numTxPerType);
         List<Map<String,Iterator<Object>>> iteratorMap = WorkloadUtils.mapWorkloadInputFiles(NUM_WARE);
         Assert.assertFalse(iteratorMap.isEmpty());
         var iterator = iteratorMap.getFirst().get("new_order");
@@ -158,12 +159,9 @@ public final class TPCcWorkflowTest {
             numConnected = coordinator.getConnectedVMSs().size();
         } while (numConnected < 3);
 
-        Map<Integer, String> txRatio = new TreeMap<>();
-        txRatio.put(100, "new_order");
-//        txRatio.put(Integer.valueOf(PROPERTIES.get("payment").toString()), "payment");
-//        txRatio.put(Integer.valueOf(PROPERTIES.get("order_status").toString()), "order_status");
-
-        ExperimentUtils.ExperimentStats expStats = ExperimentUtils.runExperiment(coordinator, txRatio, input, RUN_TIME, WARM_UP);
+        ExperimentUtils.ExperimentStats expStats = ExperimentUtils.runExperiment(coordinator, new Tuple[]{
+                Tuple.of(100, "new_order")
+        }, input, RUN_TIME, WARM_UP);
 
         coordinator.stop();
 

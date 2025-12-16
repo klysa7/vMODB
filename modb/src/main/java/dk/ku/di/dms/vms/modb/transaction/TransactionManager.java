@@ -96,10 +96,15 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
             wherePredicates = Collections.emptyList();
         }
         if(scanOperator.isIndexScan()){
-            if(//!wherePredicates.isEmpty() && // if it is index scan, then there is where predicate
-                    wherePredicates.get(0).expression == ExpressionTypeEnum.EQUALS) {
+            if(wherePredicates.get(0).expression == ExpressionTypeEnum.EQUALS) {
                 IKey key = this.getIndexedKeysFromWhereClause(wherePredicates, scanOperator.asIndexScan().index());
-                return scanOperator.asIndexScan().runAsEmbedded(this.txCtxMap.get(Thread.currentThread().threadId()), key);
+                if(wherePredicates.size() == key.size()) {
+                    return scanOperator.asIndexScan().runAsEmbedded(this.txCtxMap.get(Thread.currentThread().threadId()), key);
+                } else {
+                    List<WherePredicate> nonIdxClause = this.getNonIndexedColumnsWhereClause(wherePredicates, scanOperator.asIndexScan().index());
+                    FilterContext filterContext = FilterContextBuilder.build(nonIdxClause);
+                    return scanOperator.asIndexScan().runAsEmbedded(this.txCtxMap.get(Thread.currentThread().threadId()), key, filterContext);
+                }
             } else {
                 // can only be IN
                 IKey[] keys = this.getMultiKeysFromWhereClause(wherePredicates.get(0));
@@ -286,6 +291,11 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
             this.undoTransactionWrites(txCtx);
             throw new RuntimeException("Constraint violation in table " + table.getName() + ". Record:\n" + Arrays.stream(values).toList());
         }
+        trackIndexes(txCtx, table, values, primaryIndex, pk);
+        return values;
+    }
+
+    private static void trackIndexes(TransactionContext txCtx, Table table, Object[] values, PrimaryIndex primaryIndex, IKey pk) {
         txCtx.indexes.add(primaryIndex);
         // iterate over secondary indexes to insert the new write
         // this is the delta. records that the underlying index does not know yet
@@ -301,7 +311,6 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
                 entry.getValue().insert(txCtx, pk, values);
             }
         }
-        return values;
     }
 
     @Override
@@ -311,11 +320,13 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
 
     @Override
     public void upsert(Table table, Object[] values){
-        PrimaryIndex index = table.primaryKeyIndex();
-        IKey pk = KeyUtils.buildRecordKey(index.underlyingIndex().schema().getPrimaryKeyColumns(), values);
+        PrimaryIndex primaryIndex = table.primaryKeyIndex();
+        IKey pk = KeyUtils.buildRecordKey(primaryIndex.underlyingIndex().schema().getPrimaryKeyColumns(), values);
         TransactionContext txCtx = this.txCtxMap.get(Thread.currentThread().threadId());
-        if(index.upsert(txCtx, pk, values)) {
-            txCtx.indexes.add(index);
+        if(primaryIndex.upsert(txCtx, pk, values)) {
+            // FIXME must check if it is insert to insert in the secondary indexes
+            //  update may also lead to changes in the secondary index (e.g., a column that requires readdressing)
+            trackIndexes(txCtx, table, values, primaryIndex, pk);
             return;
         }
         this.undoTransactionWrites(txCtx);
@@ -382,15 +393,27 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
     private IKey getIndexedKeysFromWhereClause(List<WherePredicate> wherePredicates, IMultiVersionIndex index){
         int i = 0;
         Object[] keyList = new Object[index.indexColumns().length];
-        // build filters for only those columns not in selected index
+        // build index key for only those columns in the selected index
         for (WherePredicate wherePredicate : wherePredicates) {
-            // not found, then build filter
             if (index.containsColumn(wherePredicate.columnReference.columnPosition)) {
                 keyList[i] = wherePredicate.value;
                 i++;
             }
         }
         return KeyUtils.buildRecordKey(keyList);
+    }
+
+    private List<WherePredicate> getNonIndexedColumnsWhereClause(List<WherePredicate> wherePredicates, IMultiVersionIndex index){
+        List<WherePredicate> nonIdxWhereClause = new ArrayList<>();
+        // build filters for only those columns not in selected index
+        for (WherePredicate wherePredicate : wherePredicates) {
+            // not found, then include in the filter
+            if (index.containsColumn(wherePredicate.columnReference.columnPosition)) {
+                continue;
+            }
+            nonIdxWhereClause.add(wherePredicate);
+        }
+        return nonIdxWhereClause;
     }
 
     public MemoryRefNode run(List<WherePredicate> wherePredicates,

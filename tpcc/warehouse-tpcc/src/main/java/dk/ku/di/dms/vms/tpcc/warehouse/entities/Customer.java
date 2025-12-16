@@ -34,9 +34,9 @@ public class Customer implements IEntity<Customer.CustomerId> {
     @Id
     public int c_id;
 
+    // @VmsIndex(name = "c_last_idx")
     @Id
     @VmsForeignKey(table=District.class, column = "d_id")
-    @VmsIndex(name = "c_last_idx")
     public int c_d_id;
 
     @Id

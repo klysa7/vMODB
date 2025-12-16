@@ -5,6 +5,8 @@ package dk.ku.di.dms.vms.modb.definition.key;
  */
 public interface IKey {
 
+    default int size() { return 1; }
+
     int hashCode();
 
 }
