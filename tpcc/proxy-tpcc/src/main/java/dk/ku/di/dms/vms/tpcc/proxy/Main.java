@@ -250,14 +250,24 @@ public final class Main {
 
     @SuppressWarnings("unchecked")
     private static Tuple<Integer, String>[] buildTransactionRatio() {
-        Map<Integer, String> txRatioMap = new TreeMap<>();
-        txRatioMap.put(Integer.valueOf(PROPERTIES.get("new_order").toString()), "new_order");
-        txRatioMap.put(Integer.valueOf(PROPERTIES.get("payment").toString()), "payment");
-        txRatioMap.put(Integer.valueOf(PROPERTIES.get("order_status").toString()), "order_status");
-        Tuple<Integer, String>[] txRatio = new Tuple[txRatioMap.size()];
+        Map<String, Integer> txRatioMap = new TreeMap<>();
         int i = 0;
-        for(var entry : txRatioMap.entrySet()){
-            txRatio[i] = Tuple.of(entry.getKey(), entry.getValue());
+        if(!PROPERTIES.get("new_order").toString().equals("0")) {
+            txRatioMap.put("new_order", Integer.valueOf(PROPERTIES.get("new_order").toString()));
+            i++;
+        }
+        if(!PROPERTIES.get("payment").toString().equals("0")) {
+            txRatioMap.put("payment", Integer.valueOf(PROPERTIES.get("payment").toString()));
+            i++;
+        }
+        if(!PROPERTIES.get("order_status").toString().equals("0")) {
+            txRatioMap.put("order_status", Integer.valueOf(PROPERTIES.get("order_status").toString()));
+            i++;
+        }
+        Tuple<Integer, String>[] txRatio = new Tuple[i];
+        i = 0;
+        for(var entry : txRatioMap.entrySet()) {
+            txRatio[i] = Tuple.of(entry.getValue(), entry.getKey());
             i++;
         }
         return txRatio;

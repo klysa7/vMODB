@@ -37,13 +37,13 @@ public final class NewOrderWareIn {
     @Override
     public String toString() {
         return "{"
-                + "\"w_id\":\"" + w_id + "\""
-                + ",\"d_id\":\"" + d_id + "\""
-                + ",\"c_id\":\"" + c_id + "\""
+                + "\"w_id\":" + w_id
+                + ",\"d_id\":" + d_id
+                + ",\"c_id\":" + c_id
                 + ",\"itemsIds\":" + Arrays.toString(itemsIds)
                 + ",\"supWares\":" + Arrays.toString(supWares)
                 + ",\"qty\":" + Arrays.toString(qty)
-                + ",\"allLocal\":\"" + allLocal + "\""
+                + ",\"allLocal\":" + allLocal
                 + "}";
     }
 

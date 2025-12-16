@@ -168,7 +168,7 @@ public final class VmsTransactionScheduler extends StoppableRunnable {
                 case PARALLEL -> parallelTasksRunning.remove(task.tid());
                 case PARTITIONED -> {
                     if(!task.partitionKeys().isEmpty()){
-                        for(var partitionKey : task.partitionKeys()) {
+                        for(Object partitionKey : task.partitionKeys()) {
                             if (!partitionKeyTrackingMap.remove(partitionKey)) {
                                 LOGGER.log(WARNING, vmsIdentifier + ": Partitioned task " + task.tid() + " did not find its partition ID (" + partitionKey + ") in the tracking map!");
                             }
@@ -191,7 +191,8 @@ public final class VmsTransactionScheduler extends StoppableRunnable {
             return;
         }
         // it is not the highest tid, so it can update
-        this.lastTidSafeToDelete.updateAndGet(currTid -> Math.max(currTid, tid));
+        // TODO re-enable when cleanup is set up for transaction scheduler
+        // this.lastTidSafeToDelete.updateAndGet(currTid -> Math.max(currTid, tid));
     }
 
     /**

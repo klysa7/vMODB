@@ -112,6 +112,7 @@ public final class WorkloadUtils {
         }
 
         allThreadsStart.countDown();
+        long initTs = System.currentTimeMillis();
         try {
             allThreadsStart.await();
             LOGGER.log(INFO,"Experiment main going to wait for the workers to finish.");
@@ -121,16 +122,20 @@ public final class WorkloadUtils {
             throw new RuntimeException(e);
         }
 
-        return new WorkloadStats(System.currentTimeMillis(), submittedArray);
+        return new WorkloadStats(initTs, submittedArray);
     }
 
     private static final class Worker {
 
         public static Map<Long, List<Long>> run(CountDownLatch allThreadsStart, CountDownLatch allThreadsAreDone, Tuple<Integer, String>[] txRatio, Map<String, Iterator<Object>> input, Function<Object, Long> func, int runTime) {
-            Map<Long,List<Long>> startTsMap = new HashMap<>();
+            Map<Long, List<Long>> startTsMap = new HashMap<>();
+            Map<String, Integer> histogram = new HashMap<>(txRatio.length);
+            for (Tuple<Integer, String> integerStringTuple : txRatio) {
+                histogram.put(integerStringTuple.t2, 0);
+            }
             ThreadLocalRandom random = ThreadLocalRandom.current();
             long threadId = Thread.currentThread().threadId();
-            LOGGER.log(INFO,"Thread ID " + threadId + " started");
+            LOGGER.log(INFO,"Worker run (Thread ID) " + threadId + " started");
             allThreadsStart.countDown();
             try {
                 allThreadsStart.await();
@@ -156,13 +161,13 @@ public final class WorkloadUtils {
                     if(!input.get(tx).hasNext()){
                         LOGGER.log(WARNING,"Not enough transaction inputs for: "+tx+"\nTerminating experiment earlier...");
                         break;
-                        // input.remove(tx);
                     }
                     long batchId = func.apply(input.get(tx).next());
                     if(!startTsMap.containsKey(batchId)){
                         startTsMap.put(batchId, new ArrayList<>());
                     }
                     startTsMap.get(batchId).add(currentTs);
+                    histogram.computeIfPresent(tx, (_, v)-> v+1);
                 } catch (Exception e) {
                     LOGGER.log(ERROR,"Exception in Thread ID: " + (e.getMessage() == null ? "No message" : e.getMessage()));
                     throw new RuntimeException(e);
@@ -170,6 +175,24 @@ public final class WorkloadUtils {
                 currentTs = System.currentTimeMillis();
                 tx = null;
             } while (currentTs - initTs < runTime);
+            LOGGER.log(INFO,"Worker run (Thread ID) " + threadId + " finished");
+
+            boolean sent = false;
+            StringBuilder output = new StringBuilder("Worker run (Thread ID) " + threadId + " histogram:\n");
+            for(var e : histogram.entrySet()){
+                if(e.getValue() > 0) sent = true;
+                output.append(e.getKey()).append(": ").append(e.getValue()).append("\n");
+            }
+            System.out.println(output);
+
+            // wait for experiment finish
+            if(sent){
+                try {
+                    LOGGER.log(INFO,"Worker run (Thread ID) " + threadId + " will wait for experiment duration...");
+                    Thread.sleep(runTime - (System.currentTimeMillis() - initTs));
+                } catch (InterruptedException _) { }
+            }
+
             allThreadsAreDone.countDown();
             return startTsMap;
         }

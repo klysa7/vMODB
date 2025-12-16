@@ -61,18 +61,18 @@ public final class WarehouseService {
         if(in.by_name){
             List<Customer> customers = this.customerRepository.getCustomerByLastName(in.c_d_id, in.c_w_id, in.c_last);
             if(customers.isEmpty()){
-                System.out.printf("Empty customer list\nc_d_id: %d c_w_id: %d c_last: %s\n", in.c_d_id, in.c_w_id, in.c_last);
-
+                String msg = "Empty customer list\nc_d_id: %d c_w_id: %d c_last: %s\n".formatted(in.c_d_id, in.c_w_id, in.c_last);
+                throw new RuntimeException(msg);
             }
             int index = customers.size() / 2;
             if (customers.size() % 2 == 0) {
                 index -= 1;
             }
             customer = customers.get(index);
-            LOGGER.log(DEBUG, customers);
+            // LOGGER.log(DEBUG, customers);
         } else {
             customer = this.customerRepository.lookupByKey(new Customer.CustomerId(in.c_id, in.d_id, in.w_id));
-            LOGGER.log(DEBUG, customer);
+            // LOGGER.log(DEBUG, customer);
         }
 
         if (customer.c_credit.equals("BC")) {
@@ -90,7 +90,7 @@ public final class WarehouseService {
 
         String h_data = "%s    %s".formatted( warehouse.w_name.length() > 10 ? warehouse.w_name.substring(0, 10) : warehouse.w_name, district.d_name.length() > 10 ? district.d_name.substring(0, 10) : district.d_name );
 
-        return new PaymentOut(in.w_id, in.d_id, in.c_id, in.amount, in.c_w_id, in.c_d_id, h_data);
+        return new PaymentOut(in.w_id, in.d_id, in.c_id, in.c_w_id, in.c_d_id, in.amount, h_data);
     }
 
     @Inbound(values = "order-status-in")

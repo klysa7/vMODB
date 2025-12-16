@@ -59,7 +59,7 @@ public final class ExperimentUtils {
 
         if(BATCH_TO_FINISHED_TS_MAP.isEmpty()) {
             LOGGER.log(WARNING, "No batch of transactions completed!");
-            return new ExperimentStats(0, 0, 0, 0, 0, 0, 0, 0);
+            return new ExperimentStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
         }
 
         long endTs = workloadStats.initTs() + newRuntime;
@@ -84,8 +84,6 @@ public final class ExperimentUtils {
         if(prevBatchStats == null) {
             Long lowestKey = BATCH_TO_FINISHED_TS_MAP.keySet().stream().min(Long::compareTo).orElse(null);
             prevBatchStats = BATCH_TO_FINISHED_TS_MAP.get(lowestKey);
-            if(warmUp > 0)
-                numCompletedDuringWarmUp = (int) prevBatchStats.lastTid - lastExperimentLastTID;
         }
 
         BatchStats firstBatchStats = prevBatchStats;
@@ -100,15 +98,18 @@ public final class ExperimentUtils {
 
         numCompletedWithWarmUp = (int) prevBatchStats.lastTid - lastExperimentLastTID;
         numCompleted = numCompletedWithWarmUp - numCompletedDuringWarmUp;
-        long liquidRuntime = prevBatchStats.endTs - firstBatchStats.endTs;
+        long usefulRuntime = prevBatchStats.endTs - firstBatchStats.endTs;
 
         double average = allLatencies.stream().mapToLong(Long::longValue).average().orElse(0.0);
         allLatencies.sort(null);
         double percentile_50 = PercentileCalculator.calculatePercentile(allLatencies, 0.50);
         double percentile_75 = PercentileCalculator.calculatePercentile(allLatencies, 0.75);
         double percentile_90 = PercentileCalculator.calculatePercentile(allLatencies, 0.90);
-        double txPerSecGross = numCompleted / ((double) runTime / 1000L);
-        double txPerSecLiquid = numCompleted / ((double) liquidRuntime / 1000L);
+        double percentile_99 = PercentileCalculator.calculatePercentile(allLatencies, 0.99);
+        // considering fixed experiment time
+        double txPerSec = numCompleted / ((double) runTime / 1000L);
+        // considering first received batch result
+        double txPerSecUseful = numCompleted / ((double) usefulRuntime / 1000L);
 
         System.out.println("Average latency: "+ average);
         System.out.println("Latency at 50th percentile: "+ percentile_50);
@@ -117,20 +118,20 @@ public final class ExperimentUtils {
         System.out.println("Number of completed transactions (during warm up): "+ numCompletedDuringWarmUp);
         System.out.println("Number of completed transactions (after warm up): "+ numCompleted);
         System.out.println("Number of completed transactions (total): "+ numCompletedWithWarmUp);
-        System.out.println("Gross runtime (ms): "+ runTime);
-        System.out.println("Transactions per second (gross): "+txPerSecGross);
-        System.out.println("Liquid runtime (ms): "+ liquidRuntime);
-        System.out.println("Transactions per second (liquid): "+txPerSecLiquid);
+        System.out.println("Total runtime (ms): "+ runTime);
+        System.out.println("Transactions per second: "+txPerSec);
+
+        // useful work: from first useful batch (the first after warm up)
+        System.out.println("Useful work runtime (ms): "+ usefulRuntime);
+        System.out.println("Transactions per second (useful work): "+txPerSecUseful);
         System.out.println();
 
-        return new ExperimentStats(workloadStats.initTs(), numCompletedWithWarmUp, numCompleted, txPerSecGross, average, percentile_50, percentile_75, percentile_90);
+        return new ExperimentStats(workloadStats.initTs(), runTime, usefulRuntime, numCompletedWithWarmUp, numCompleted, txPerSec, txPerSecUseful, average, percentile_50, percentile_75, percentile_90, percentile_99);
     }
 
-    public record ExperimentStats(long initTs, int numCompletedWithWarmUp, int numCompleted, double txPerSec, double average,
-                                   double percentile_50, double percentile_75, double percentile_90){}
+    public record ExperimentStats(long initTs, int runTime, long usefulRuntime, int numCompletedWithWarmUp, int numCompleted, double txPerSec, double txPerSecUseful, double average, double percentile_50, double percentile_75, double percentile_90, double percentile_99){}
 
-    public static void writeResultsToFile(int numWare, ExperimentStats expStats, int runTime, int warmUp,
-                                          int numTransactionWorkers, int batchWindow, int maxTransactionsPerBatch){
+    public static void writeResultsToFile(int numWare, ExperimentStats expStats, int runTime, int warmUp, int numTransactionWorkers, int batchWindow, int maxTransactionsPerBatch){
         LocalDateTime time = LocalDateTime.ofInstant(
                 Instant.ofEpochMilli(expStats.initTs),
                 ZoneId.systemDefault()
@@ -142,11 +143,13 @@ public final class ExperimentUtils {
         try (BufferedWriter writer = new BufferedWriter(new FileWriter(fileName))) {
             writer.write("======= TPC-C in vMODB =======");
             writer.newLine();
-            writer.write("Experiment start: " + formattedDate);
+            writer.write("Start: " + formattedDate);
             writer.newLine();
-            writer.write("Experiment duration (ms): " + runTime);
+            writer.write("Duration (ms): " + runTime);
             writer.newLine();
-            writer.write("Experiment warm up (ms): " + warmUp);
+            writer.write("Warm up (ms): " + warmUp);
+            writer.newLine();
+            writer.write("Useful work (ms): " + expStats.usefulRuntime);
             writer.newLine();
             writer.write("Batch window (ms): " + batchWindow);
             writer.newLine();
@@ -165,11 +168,17 @@ public final class ExperimentUtils {
             writer.newLine();
             writer.write("Latency at 90th percentile: "+ expStats.percentile_90);
             writer.newLine();
-            writer.write("Number of completed transactions (with warm up): "+ expStats.numCompletedWithWarmUp);
+            writer.write("Latency at 99th percentile: "+ expStats.percentile_99);
             writer.newLine();
-            writer.write("Number of completed transactions: "+ expStats.numCompleted);
+            writer.write("Number of completed transactions (during warm up): "+ (expStats.numCompletedWithWarmUp - expStats.numCompleted));
+            writer.newLine();
+            writer.write("Number of completed transactions (after warm up): "+ expStats.numCompleted);
+            writer.newLine();
+            writer.write("Number of completed transactions (total): "+ expStats.numCompletedWithWarmUp);
             writer.newLine();
             writer.write("Throughput (tx/sec): "+expStats.txPerSec);
+            writer.newLine();
+            writer.write("Useful Throughput (tx/sec): "+expStats.txPerSecUseful);
             writer.newLine();
         } catch (IOException e) {
             throw new RuntimeException(e);
