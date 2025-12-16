@@ -884,6 +884,9 @@ public final class Coordinator extends ModbHttpServer {
             }
              */
         }
+        //TODO here i can take the snapshotId probably from the coordinator
+        //just to make sure that the git works fine
+        Long snapshotId = batchContext.batchOffset;
     }
 
     public long getNumTIDsCommitted() {
