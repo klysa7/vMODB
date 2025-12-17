@@ -145,6 +145,7 @@ public final class TPCcWorkflowTest {
         hasDataBeenIngested();
     }
 
+    @SuppressWarnings("unchecked")
     @Test
     public void test_E_submit_workload() throws IOException {
         // mapping all the workload data is not a good idea, it overloads the Java heap
@@ -159,16 +160,15 @@ public final class TPCcWorkflowTest {
             numConnected = coordinator.getConnectedVMSs().size();
         } while (numConnected < 3);
 
-        ExperimentUtils.ExperimentStats expStats = ExperimentUtils.runExperiment(coordinator, new Tuple[]{
-                Tuple.of(100, "new_order")
-        }, input, RUN_TIME, WARM_UP);
+        Tuple<Integer, String>[] txRatio = new Tuple[]{ Tuple.of(100, "new_order") };
+        ExperimentUtils.ExperimentStats expStats = ExperimentUtils.runExperiment(coordinator, txRatio, input, RUN_TIME, WARM_UP);
 
         coordinator.stop();
 
         ExperimentUtils.writeResultsToFile(NUM_WARE, expStats, RUN_TIME, WARM_UP,
                 coordinator.getOptions().getNumTransactionWorkers(),
                 coordinator.getOptions().getBatchWindow(),
-                coordinator.getOptions().getMaxTransactionsPerBatch());
+                coordinator.getOptions().getMaxTransactionsPerBatch(), txRatio);
 
         String host = PROPERTIES.getProperty("warehouse_host");
         int port = TPCcConstants.VMS_TO_PORT_MAP.get("warehouse");

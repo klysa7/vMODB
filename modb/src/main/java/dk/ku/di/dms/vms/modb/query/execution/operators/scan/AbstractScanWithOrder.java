@@ -17,15 +17,6 @@ public abstract class AbstractScanWithOrder extends AbstractScan {
         this.orderByColumn = orderByColumn;
     }
 
-    protected List<Object[]> projectIfNecessary(List<Object[]> result) {
-        if(result.isEmpty() || result.get(0).length == this.projectionColumns.length) return result;
-        List<Object[]> resultWithProjection = new ArrayList<>(result.size());
-        for(var record : result){
-            resultWithProjection.add(this.getProjection(record));
-        }
-        return resultWithProjection;
-    }
-
     @SuppressWarnings({"rawtypes", "unchecked"})
     protected void insert(List<Object[]> result, Object[] record) {
         int left = 0, right = result.size();

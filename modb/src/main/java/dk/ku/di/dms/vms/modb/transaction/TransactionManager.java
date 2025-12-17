@@ -111,8 +111,14 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
                 return scanOperator.asIndexScan().runAsEmbedded(this.txCtxMap.get(Thread.currentThread().threadId()), keys);
             }
         } else if(scanOperator.isIndexScanWithOrder()) {
-            IKey key = this.getIndexedKeysFromWhereClause(wherePredicates, scanOperator.asIndexMultiAggregationScan().index());
-            return scanOperator.asIndexScanWithOrder().runAsEmbedded(this.txCtxMap.get(Thread.currentThread().threadId()), key);
+            IKey key = this.getIndexedKeysFromWhereClause(wherePredicates, scanOperator.asIndexScanWithOrder().index());
+            if(wherePredicates.size() == key.size()) {
+                return scanOperator.asIndexScanWithOrder().runAsEmbedded(this.txCtxMap.get(Thread.currentThread().threadId()), key);
+            } else {
+                List<WherePredicate> nonIdxClause = this.getNonIndexedColumnsWhereClause(wherePredicates, scanOperator.asIndexScanWithOrder().index());
+                FilterContext filterContext = FilterContextBuilder.build(nonIdxClause);
+                return scanOperator.asIndexScanWithOrder().runAsEmbedded(this.txCtxMap.get(Thread.currentThread().threadId()), key, filterContext);
+            }
         } else if(scanOperator.isFullScanWithOrder()){
             FilterContext filterContext = FilterContextBuilder.build(wherePredicates);
             return scanOperator.asFullScanWithOrder().runAsEmbedded(this.txCtxMap.get(Thread.currentThread().threadId()), filterContext);

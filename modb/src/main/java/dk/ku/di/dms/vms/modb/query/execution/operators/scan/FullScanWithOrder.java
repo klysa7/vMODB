@@ -21,9 +21,9 @@ public class FullScanWithOrder extends AbstractScanWithOrder {
         List<Object[]> result = new ArrayList<>();
         Iterator<Object[]> iterator = this.index.iterator(txCtx);
         while(iterator.hasNext()){
-            this.insert(result, iterator.next());
+            this.insert(result, this.getProjection(iterator.next()));
         }
-        return this.projectIfNecessary(result);
+        return result;
     }
 
     public List<Object[]> runAsEmbedded(TransactionContext txCtx, FilterContext filterContext){
@@ -32,10 +32,10 @@ public class FullScanWithOrder extends AbstractScanWithOrder {
         while(iterator.hasNext()){
             Object[] record = iterator.next();
             if(this.index.checkCondition(filterContext, record)) {
-                this.insert(result, record);
+                this.insert(result, this.getProjection(record));
             }
         }
-        return this.projectIfNecessary(result);
+        return result;
     }
 
     @Override

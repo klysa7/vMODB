@@ -66,7 +66,7 @@ public final class Parser {
         i+=2;
         String orderByColumn = tokens[i];
         List<OrderByClauseElement> orderByClauseElement = List.of(new OrderByClauseElement(orderByColumn));
-        return new SelectStatement(projection, table, whereClauseElements, orderByClauseElement);
+        return new SelectStatement(new StringBuilder(sql), projection, List.of(table), whereClauseElements, orderByClauseElement);
     }
 
     private static ExpressionTypeEnum getExpressionFromString(String exp){

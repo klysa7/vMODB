@@ -159,7 +159,7 @@ public final class WorkloadUtils {
 
                 try {
                     if(!input.get(tx).hasNext()){
-                        LOGGER.log(WARNING,"Not enough transaction inputs for: "+tx+"\nTerminating experiment earlier...");
+                        LOGGER.log(WARNING,"Not enough transaction inputs for: "+tx+"\nClosing submission loop earlier...");
                         break;
                     }
                     long batchId = func.apply(input.get(tx).next());
@@ -188,7 +188,7 @@ public final class WorkloadUtils {
             // wait for experiment finish
             if(sent){
                 try {
-                    LOGGER.log(INFO,"Worker run (Thread ID) " + threadId + " will wait for experiment duration...");
+                    LOGGER.log(INFO,"Worker run (Thread ID) " + threadId + " will wait for the end of the experiment duration.");
                     Thread.sleep(runTime - (System.currentTimeMillis() - initTs));
                 } catch (InterruptedException _) { }
             }

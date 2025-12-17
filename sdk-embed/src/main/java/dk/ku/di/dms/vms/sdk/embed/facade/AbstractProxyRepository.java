@@ -79,6 +79,7 @@ public abstract class AbstractProxyRepository<PK extends Serializable, T extends
         for(int i = 0; i < args.length; i++) {
             whereClauseElements.add(selectStatement.whereClause.get(i).overwriteValue( args[i] ));
         }
+        // possible optimization: avoid copying class, just pass new where clause as parameter to method "fetch" below
         selectStatement = selectStatement.clone(whereClauseElements);
 
         // submit for execution. could also see if it is possible to project only what is in the select clause

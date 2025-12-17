@@ -31,11 +31,11 @@ public final class OrderStatusIn {
     @Override
     public String toString() {
         return "{"
-                + "\"w_id\":\"" + w_id + "\""
-                + ",\"d_id\":\"" + d_id + "\""
-                + ",\"c_id\":\"" + c_id + "\""
-                + ",\"c_last\":\"" + c_last + "\""
-                + ",\"by_name\":\"" + by_name + "\""
+                + "\"w_id\":" + w_id
+                + ",\"d_id\":" + d_id
+                + ",\"c_id\":" + c_id
+                + ",\"c_last\":" + c_last + "\""
+                + ",\"by_name\":" + by_name
                 + "}";
     }
 

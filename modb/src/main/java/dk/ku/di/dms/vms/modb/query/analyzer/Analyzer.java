@@ -101,7 +101,6 @@ public final class Analyzer {
         List<String> columns = statement.selectClause;
         // case where the user input is '*'
         if (columns.size() == 1 && columns.getFirst().contentEquals("*")) {
-
             // iterate over all tables involved
             for (final Table table : queryTree.tables.values()) {
                 Schema tableSchema = table.schema();

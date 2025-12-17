@@ -1,6 +1,7 @@
 package dk.ku.di.dms.vms.modb.query.execution.operators.scan;
 
 import dk.ku.di.dms.vms.modb.definition.key.IKey;
+import dk.ku.di.dms.vms.modb.query.execution.filter.FilterContext;
 import dk.ku.di.dms.vms.modb.transaction.TransactionContext;
 import dk.ku.di.dms.vms.modb.transaction.multiversion.index.IMultiVersionIndex;
 
@@ -18,18 +19,30 @@ public final class IndexScanWithOrder extends AbstractScanWithOrder {
         List<Object[]> result = new ArrayList<>();
         Iterator<Object[]> iterator = this.index.iterator(txCtx, key);
         while(iterator.hasNext()){
-            this.insert(result, iterator.next());
+            this.insert(result, this.getProjection(iterator.next()));
         }
-        return this.projectIfNecessary(result);
+        return result;
+    }
+
+    public List<Object[]> runAsEmbedded(TransactionContext txCtx, IKey key, FilterContext filterContext) {
+        List<Object[]> result = new ArrayList<>();
+        Iterator<Object[]> iterator = this.index.iterator(txCtx, key);
+        while(iterator.hasNext()){
+            Object[] record = iterator.next();
+            if(this.index.checkCondition(filterContext, record)) {
+                this.insert(result, this.getProjection(record));
+            }
+        }
+        return result;
     }
 
     public List<Object[]> runAsEmbedded(TransactionContext txCtx, IKey[] keys) {
         List<Object[]> result = new ArrayList<>();
         Iterator<Object[]> iterator = this.index.iterator(txCtx, keys);
         while(iterator.hasNext()){
-            this.insert(result, iterator.next());
+            this.insert(result, this.getProjection(iterator.next()));
         }
-        return this.projectIfNecessary(result);
+        return result;
     }
 
     @Override

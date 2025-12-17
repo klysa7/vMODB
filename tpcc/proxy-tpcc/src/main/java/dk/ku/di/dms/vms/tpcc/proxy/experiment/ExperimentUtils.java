@@ -131,7 +131,7 @@ public final class ExperimentUtils {
 
     public record ExperimentStats(long initTs, int runTime, long usefulRuntime, int numCompletedWithWarmUp, int numCompleted, double txPerSec, double txPerSecUseful, double average, double percentile_50, double percentile_75, double percentile_90, double percentile_99){}
 
-    public static void writeResultsToFile(int numWare, ExperimentStats expStats, int runTime, int warmUp, int numTransactionWorkers, int batchWindow, int maxTransactionsPerBatch){
+    public static void writeResultsToFile(int numWare, ExperimentStats expStats, int runTime, int warmUp, int numTransactionWorkers, int batchWindow, int maxTransactionsPerBatch, Tuple<Integer, String>[] txRatio){
         LocalDateTime time = LocalDateTime.ofInstant(
                 Instant.ofEpochMilli(expStats.initTs),
                 ZoneId.systemDefault()
@@ -159,6 +159,12 @@ public final class ExperimentUtils {
             writer.newLine();
             writer.write("Number of warehouses: " + numWare);
             writer.newLine();
+            writer.write("Transaction ratio: ");
+            writer.newLine();
+            for(Tuple<Integer, String> tx : txRatio){
+                writer.write("  "+tx.t2+"=" + tx.t1);
+                writer.newLine();
+            }
             writer.newLine();
             writer.write("Average latency: "+ expStats.average);
             writer.newLine();
