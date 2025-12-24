@@ -1,6 +1,7 @@
 package dk.ku.di.dms.vms.modb.query.execution.operators.scan;
 
 import dk.ku.di.dms.vms.modb.definition.key.IKey;
+import dk.ku.di.dms.vms.modb.query.execution.filter.FilterContext;
 import dk.ku.di.dms.vms.modb.transaction.TransactionContext;
 import dk.ku.di.dms.vms.modb.transaction.multiversion.index.IMultiVersionIndex;
 
@@ -18,27 +19,30 @@ import java.util.List;
  * We can have a method called seal or close() in abstract operator
  * It will put the information on header.
  */
-public final class IndexScanWithProjection extends AbstractScan {
+public final class IndexScan extends AbstractScan {
 
-    public IndexScanWithProjection(IMultiVersionIndex index, int[] projectionColumns, int entrySize) {
+    public IndexScan(IMultiVersionIndex index, int[] projectionColumns, int entrySize) {
         super(entrySize, index, projectionColumns);
-    }
-
-    @Override
-    public boolean isIndexScan() {
-        return true;
-    }
-
-    @Override
-    public IndexScanWithProjection asIndexScan() {
-        return this;
     }
 
     public List<Object[]> runAsEmbedded(TransactionContext txCtx, IKey key) {
         List<Object[]> res = new ArrayList<>();
         Iterator<Object[]> iterator = this.index.iterator(txCtx, key);
         while(iterator.hasNext()){
-            res.add(iterator.next());
+            res.add(this.getProjection(iterator.next()));
+        }
+        return res;
+    }
+
+    public List<Object[]> runAsEmbedded(TransactionContext txCtx, IKey key, FilterContext filterContext) {
+        List<Object[]> res = new ArrayList<>();
+        Iterator<Object[]> iterator = this.index.iterator(txCtx, key);
+        while(iterator.hasNext()){
+            Object[] record = iterator.next();
+            if(this.index.checkCondition(filterContext, record)) {
+                res.add(this.getProjection(record));
+            }
+
         }
         return res;
     }
@@ -47,9 +51,19 @@ public final class IndexScanWithProjection extends AbstractScan {
         List<Object[]> res = new ArrayList<>();
         Iterator<Object[]> iterator = this.index.iterator(txCtx, keys);
         while(iterator.hasNext()){
-            res.add(iterator.next());
+            res.add(this.getProjection(iterator.next()));
         }
         return res;
+    }
+
+    @Override
+    public boolean isIndexScan() {
+        return true;
+    }
+
+    @Override
+    public IndexScan asIndexScan() {
+        return this;
     }
 
 }

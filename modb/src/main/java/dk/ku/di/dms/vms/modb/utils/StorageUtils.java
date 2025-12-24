@@ -10,10 +10,7 @@ import dk.ku.di.dms.vms.modb.index.non_unique.NonUniqueHashMapIndex;
 import dk.ku.di.dms.vms.modb.index.unique.UniqueHashBufferIndex;
 import dk.ku.di.dms.vms.modb.index.unique.UniqueHashChainingBufferIndex;
 import dk.ku.di.dms.vms.modb.index.unique.UniqueHashMapIndex;
-import dk.ku.di.dms.vms.modb.storage.record.AppendOnlyBuffer;
-import dk.ku.di.dms.vms.modb.storage.record.AppendOnlyBufferOld;
-import dk.ku.di.dms.vms.modb.storage.record.OrderedRecordBuffer;
-import dk.ku.di.dms.vms.modb.storage.record.RecordBufferContext;
+import dk.ku.di.dms.vms.modb.storage.record.*;
 import dk.ku.di.dms.vms.modb.transaction.multiversion.IntegerPrimaryKeyGenerator;
 import dk.ku.di.dms.vms.modb.transaction.multiversion.index.PrimaryIndex;
 
@@ -26,6 +23,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 
 import static java.lang.System.Logger.Level.DEBUG;
+import static java.lang.System.Logger.Level.INFO;
 
 public class StorageUtils {
 
@@ -109,15 +107,34 @@ public class StorageUtils {
         return RecordBufferContext.build(segment, fileName);
     }
 
-    public static AppendOnlyBuffer loadAppendOnlyBuffer(int maxNumberOfRecords, int recordSize, String fileName, boolean truncate){
+    public static AppendOnlyBoundedBuffer loadAppendOnlyBoundedBuffer(int maxNumberOfRecords, int recordSize, String fileName, boolean truncate){
         long sizeInBytes = (long) maxNumberOfRecords * recordSize;
         MemorySegment segment = mapFileIntoMemorySegment(sizeInBytes, fileName, truncate);
-        return new AppendOnlyBuffer(segment, fileName);
+        return new AppendOnlyBoundedBuffer(segment, fileName);
     }
 
-    public static AppendOnlyBuffer loadAppendOnlyBufferUnknownSize(String fileName){
+    public static AppendOnlyUnboundedBuffer loadAppendOnlyUnboundedBuffer(String fileName){
+        File file = buildFile(fileName);
+        if(file.delete()){
+            LOGGER.log(INFO, "Old file in directory deleted successfully: " + file.getAbsolutePath());
+        }
+        StandardOpenOption[] options = new StandardOpenOption[]{
+                StandardOpenOption.CREATE_NEW,
+                StandardOpenOption.TRUNCATE_EXISTING,
+                StandardOpenOption.WRITE};
+        try {
+            FileChannel fc = FileChannel.open(Path.of(file.toURI()), options);
+            LOGGER.log(INFO, "Attempt to open file in directory completed successfully: " + file.getAbsolutePath());
+            return new AppendOnlyUnboundedBuffer(fc, fileName);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    // file size is unknown
+    public static AppendOnlyBoundedBuffer loadAppendOnlyBuffer(String fileName){
         MemorySegment segment = mapFileIntoMemorySegment(fileName);
-        return new AppendOnlyBuffer(segment, fileName);
+        return new AppendOnlyBoundedBuffer(segment, fileName);
     }
 
     private static MemorySegment mapFileIntoMemorySegment(String fileName) {

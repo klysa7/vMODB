@@ -20,15 +20,11 @@ import java.util.ArrayList;
 import static java.lang.Thread.sleep;
 
 /**
- * Test a varied set of configurations
- * to make sure the scheduler progresses
- * correctly according to the expectation.
+ * Test a varied set of configurations to make sure the scheduler progresses correctly according to the expectation.
  * Scenarios:
  * - failure
  * - simple and complex tasks
  * - submission of concurrent tasks
- * -
- * must plug a dumb storage?
  */
 public class SchedulerTest {
 
@@ -37,7 +33,7 @@ public class SchedulerTest {
         VmsInternalChannels vmsInternalChannels = VmsInternalChannels.getInstance();
         VmsRuntimeMetadata vmsRuntimeMetadata = VmsMetadataLoader.load("dk.ku.di.dms.vms.sdk.core.example");
 
-        var scheduler = VmsTransactionScheduler.build("example1", vmsInternalChannels.transactionInputQueue(),
+        VmsTransactionScheduler scheduler = VmsTransactionScheduler.build("example1", vmsInternalChannels.transactionInputQueue(),
                 vmsRuntimeMetadata.queueToVmsTransactionMap(), new ITransactionManager() {}, x -> { }, 4);
 
         for(int i = 1; i <= 4; i++){
@@ -100,7 +96,7 @@ public class SchedulerTest {
         schedulerThread = new Thread(scheduler);
         schedulerThread.start();
 
-        assert out.getOutboundEventResults() != null;
+        Assert.assertNotNull(out.getOutboundEventResults());
 
         for(var res : out.getOutboundEventResults()){
             Class<?> clazz = vmsRuntimeMetadata.queueToEventMap().get( res.outputQueue() );
@@ -114,14 +110,11 @@ public class SchedulerTest {
 
         MicroserviceExample2 ms2 = (MicroserviceExample2) vmsRuntimeMetadata.loadedVmsInstances().get("dk.ku.di.dms.vms.sdk.core.example.MicroserviceExample2");
 
-        assert ms2 != null;
+        Assert.assertNotNull(ms2);
 
-        int count = ms2.getCount();
+        Assert.assertEquals(2, ms2.getCount());
 
         // test abort from the application. test 2
-
-        assert count == 2;
-
     }
 
 }

@@ -1,9 +1,9 @@
 package dk.ku.di.dms.vms.tpcc.proxy;
 
 import dk.ku.di.dms.vms.coordinator.Coordinator;
+import dk.ku.di.dms.vms.modb.common.data_structure.Tuple;
 import dk.ku.di.dms.vms.modb.common.utils.ConfigUtils;
 import dk.ku.di.dms.vms.modb.index.unique.UniqueHashBufferIndex;
-import dk.ku.di.dms.vms.tpcc.common.events.NewOrderWareIn;
 import dk.ku.di.dms.vms.tpcc.proxy.dataload.DataLoadUtils;
 import dk.ku.di.dms.vms.tpcc.proxy.dataload.QueueTableIterator;
 import dk.ku.di.dms.vms.tpcc.proxy.experiment.ExperimentUtils;
@@ -21,41 +21,55 @@ public final class Main {
 
     private static int NUM_INGESTION_WORKERS;
 
-    public static void main(String[] args) throws Exception {
-        System.out.println("Select your deployment scheme: \n1 - Distributed \n2 - Local");
+    public static void main(String[] ignoredArgs) throws Exception {
+        System.out.println("Select your deployment scheme: \n1 - Distributed \n2 - Local \nq - Quit");
         String choice = new Scanner(System.in).nextLine();
-        if(choice.equals("1")) {
-            NUM_INGESTION_WORKERS = Runtime.getRuntime().availableProcessors();
-            loadMenu("Main Menu");
-        } else {
-            NUM_INGESTION_WORKERS = Runtime.getRuntime().availableProcessors() / 2;
-            loadMicroBenchMenu();
+        switch (choice){
+            case "1" -> {
+                // TODO find a way to ignore the 'app.properties' files outside the proxy project
+//                PROPERTIES.setProperty("logging", "true");
+                NUM_INGESTION_WORKERS = Runtime.getRuntime().availableProcessors();
+                loadMenu("Distributed Deployment Menu");
+            }
+            case "2" -> {
+//                PROPERTIES.setProperty("logging", "true");
+                NUM_INGESTION_WORKERS = Runtime.getRuntime().availableProcessors() / 2;
+                loadLocalDeploymentMenu();
+            }
+            default -> System.exit(0);
         }
     }
 
-    private static void loadMicroBenchMenu() throws Exception {
+    private static void loadLocalDeploymentMenu() throws Exception {
         // set default values to override for all in-process VMSes
         PROPERTIES.setProperty("vms_thread_pool_size", "0");
         PROPERTIES.setProperty("network_thread_pool_size", "0");
+
+        // if persistence is required, uncomment below lines
+        // PROPERTIES.setProperty("logging", "true");
+        // PROPERTIES.setProperty("checkpointing", "true");
 
         dk.ku.di.dms.vms.tpcc.warehouse.Main.main(null);
         dk.ku.di.dms.vms.tpcc.inventory.Main.main(null);
         dk.ku.di.dms.vms.tpcc.order.Main.main(null);
 
-        loadMenu("Microbench Menu");
+        loadMenu("Local Deployment Menu");
     }
 
     private static void loadMenu(String menuType) throws NoSuchFieldException, IllegalAccessException {
         Coordinator coordinator = null;
         int numWare = 0;
         Map<String, UniqueHashBufferIndex> tables = null;
-        List<Iterator<NewOrderWareIn>> input;
+        List<Map<String,Iterator<Object>>> input;
         StorageUtils.EntityMetadata metadata = StorageUtils.loadEntityMetadata();
+        Map<String, String> vmsToHostMap = DataLoadUtils.mapVmsToHost(PROPERTIES);
 
-        Map<String, String> vmsToHostMap = new HashMap<>();
-        vmsToHostMap.put("warehouse_host", PROPERTIES.getProperty("warehouse_host"));
-        vmsToHostMap.put("inventory_host", PROPERTIES.getProperty("inventory_host"));
-        vmsToHostMap.put("order_host", PROPERTIES.getProperty("order_host"));
+        Map<String, Integer> numTxInputPerType = new HashMap<>(3);
+        numTxInputPerType.put("new_order", Integer.valueOf(PROPERTIES.get("new_order_input_size").toString()));
+        numTxInputPerType.put("payment", Integer.valueOf(PROPERTIES.get("payment_input_size").toString()));
+        numTxInputPerType.put("order_status", Integer.valueOf(PROPERTIES.get("order_status_input_size").toString()));
+
+        Tuple<Integer, String>[] txRatio = buildTransactionRatio();
 
         Scanner scanner = new Scanner(System.in);
         boolean running = true;
@@ -75,7 +89,7 @@ public final class Main {
                     System.out.println("Tables created!");
                     break;
                 case "2":
-                    System.out.println("Option 2: \"Load services with tables in disk\" selected.");
+                    System.out.println("Option 2: \"Load VMSes with tables in disk\" selected.");
 
                     if(coordinator != null){
                         long submitted = coordinator.getNumTIDsSubmitted();
@@ -113,11 +127,11 @@ public final class Main {
 
                     System.out.println("Number of warehouses: "+numWare);
 
-                    System.out.println("Allow multi warehouse transactions? [0/1]");
-                    boolean multiWarehouses = Integer.parseInt(scanner.nextLine()) > 0;
-                    System.out.println("Enter number of transactions per warehouse: ");
-                    int numTxn = Integer.parseInt(scanner.nextLine());
-                    WorkloadUtils.createWorkload(numWare, numTxn, multiWarehouses);
+                    try {
+                        WorkloadUtils.createWorkload(numWare, Boolean.getBoolean( PROPERTIES.get("multi_warehouse").toString() ), numTxInputPerType);
+                    } catch (IOException e){
+                        System.out.println("ERROR:\n"+e);
+                    }
                     break;
                 case "4":
                     System.out.println("Option 4: \"Submit workload\" selected.");
@@ -147,26 +161,8 @@ public final class Main {
                         }
                     }
 
-                    int batchWindow = Integer.parseInt( PROPERTIES.getProperty("batch_window_ms") );
+                    int batchWindow = Integer.parseInt(PROPERTIES.getProperty("batch_window_ms"));
                     int runTime;
-
-                    /*
-                    if(numWare == 0){
-                        // get number of input files
-                        numWare = WorkloadUtils.getNumWorkloadInputFiles();
-                        if(numWare == 0){
-                            // some unknown bug....
-                            System.out.println("Zero warehouses identified. Falling back to warehouse table information...");
-                            // fallback to table information
-                            numWare = StorageUtils.getNumRecordsFromInDiskTable(metadata.entityToSchemaMap().get("warehouse"), "warehouse");
-                        }
-                        if(numWare == 0){
-                            System.out.println("No warehouses identified! Maybe you forgot to generate?");
-                            break;
-                        }
-                        System.out.println(numWare+" warehouses identified");
-                    }
-                     */
 
                     while(true) {
                         System.out.print("Enter duration (ms): [press 0 for 10s] ");
@@ -202,12 +198,16 @@ public final class Main {
                             numConnected = coordinator.getConnectedVMSs().size();
                         } while (numConnected < 3);
                     }
-                    var expStats = ExperimentUtils.runExperiment(coordinator, input, runTime, warmUp);
+
+                    // prevent log pollution, i.e., interleaving of handshaking and experiment messages
+                    try { Thread.sleep(100); } catch (InterruptedException _) { }
+
+                    ExperimentUtils.ExperimentStats expStats = ExperimentUtils.runExperiment(coordinator, txRatio, input, runTime, warmUp);
                     ExperimentUtils.writeResultsToFile(numWare, expStats, runTime, warmUp,
-                            coordinator.getOptions().getNumTransactionWorkers(), coordinator.getOptions().getBatchWindow(), coordinator.getOptions().getMaxTransactionsPerBatch());
+                            coordinator.getOptions().getNumTransactionWorkers(), coordinator.getOptions().getBatchWindow(), coordinator.getOptions().getMaxTransactionsPerBatch(), txRatio);
                     break;
                 case "5":
-                    System.out.println("Option 5: \"Reset service states\" selected.");
+                    System.out.println("Option 5: \"Reset VMS states\" selected.");
                     // has to wait for all submitted transactions to commit in order to send the reset
                     if(coordinator != null){
                         long numTIDsCommitted = coordinator.getNumTIDsCommitted();
@@ -222,7 +222,7 @@ public final class Main {
                             break;
                         }
                     }
-                    // cleanup service states
+                    // cleanup VMS states
                     for(var vms : TPCcConstants.VMS_TO_PORT_MAP.entrySet()){
                         String host = PROPERTIES.getProperty(vms.getKey() + "_host");
                         try(var client = new MinimalHttpClient(host, vms.getValue())){
@@ -233,10 +233,10 @@ public final class Main {
                             System.out.println("Exception on resetting "+vms+" state: \n"+e);
                         }
                     }
-                    System.out.println("Service states reset.");
+                    System.out.println("VMS states reset.");
                     dataLoaded = false;
                     break;
-                case "0":
+                case "q":
                     System.out.println("Exiting the application...");
                     running = false;
                     break;
@@ -248,14 +248,39 @@ public final class Main {
         System.exit(0);
     }
 
+    @SuppressWarnings("unchecked")
+    private static Tuple<Integer, String>[] buildTransactionRatio() {
+        Map<String, Integer> txRatioMap = new TreeMap<>();
+        int i = 0;
+        if(!PROPERTIES.get("new_order").toString().equals("0")) {
+            txRatioMap.put("new_order", Integer.valueOf(PROPERTIES.get("new_order").toString()));
+            i++;
+        }
+        if(!PROPERTIES.get("payment").toString().equals("0")) {
+            txRatioMap.put("payment", Integer.valueOf(PROPERTIES.get("payment").toString()));
+            i++;
+        }
+        if(!PROPERTIES.get("order_status").toString().equals("0")) {
+            txRatioMap.put("order_status", Integer.valueOf(PROPERTIES.get("order_status").toString()));
+            i++;
+        }
+        Tuple<Integer, String>[] txRatio = new Tuple[i];
+        i = 0;
+        for(var entry : txRatioMap.entrySet()) {
+            txRatio[i] = Tuple.of(entry.getValue(), entry.getKey());
+            i++;
+        }
+        return txRatio;
+    }
+
     private static void printMenu(String menuType) {
         System.out.println("\n=== "+menuType+" ===");
         System.out.println("1. Create tables in disk");
-        System.out.println("2. Load services with tables in disk");
+        System.out.println("2. Load VMSes with tables in disk");
         System.out.println("3. Create workload");
         System.out.println("4. Submit workload");
-        System.out.println("5. Reset service states");
-        System.out.println("0. Exit");
+        System.out.println("5. Reset VMS states");
+        System.out.println("q. Quit program");
     }
 
 }

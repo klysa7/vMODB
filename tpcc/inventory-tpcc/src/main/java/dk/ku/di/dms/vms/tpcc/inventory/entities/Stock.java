@@ -61,11 +61,22 @@ public final class Stock implements IEntity<Stock.StockId> {
     public String s_dist_10;
 
     @Column
+    public int s_ytd;
+
+    @Column
+    public int s_order_cnt;
+
+    @Column
+    public int s_remote_cnt;
+
+    @Column
     public String s_data;
 
+    @SuppressWarnings("unused")
     public Stock(){}
 
-    public Stock(int s_i_id, int s_w_id, int s_quantity, HashMap<Integer, String> s_dist, int S_YTD, int S_ORDER_CNT, int S_REMOTE_CNT, String s_data) {
+    @SuppressWarnings("unused")
+    public Stock(int s_i_id, int s_w_id, int s_quantity, HashMap<Integer, String> s_dist, int s_ytd, int s_order_cnt, int s_remote_cnt, String s_data) {
         this.s_i_id = s_i_id;
         this.s_w_id = s_w_id;
         this.s_quantity = s_quantity;
@@ -81,6 +92,10 @@ public final class Stock implements IEntity<Stock.StockId> {
         this.s_dist_08 = s_dist.get(8);
         this.s_dist_09 = s_dist.get(9);
         this.s_dist_10 = s_dist.get(10);
+
+        this.s_ytd = s_ytd;
+        this.s_order_cnt = s_order_cnt;
+        this.s_remote_cnt = s_remote_cnt;
 
         this.s_data = s_data;
     }
@@ -137,6 +152,9 @@ public final class Stock implements IEntity<Stock.StockId> {
                 + ",\"s_dist_08\":\"" + s_dist_08 + "\""
                 + ",\"s_dist_09\":\"" + s_dist_09 + "\""
                 + ",\"s_dist_10\":\"" + s_dist_10 + "\""
+                + ",\"s_ytd\":\"" + s_ytd + "\""
+                + ",\"s_order_cnt\":\"" + s_order_cnt + "\""
+                + ",\"s_remote_cnt\":\"" + s_remote_cnt + "\""
                 + ",\"s_data\":\"" + s_data + "\""
                 + "}";
     }

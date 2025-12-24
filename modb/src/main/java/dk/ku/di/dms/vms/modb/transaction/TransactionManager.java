@@ -18,9 +18,9 @@ import dk.ku.di.dms.vms.modb.query.analyzer.predicate.WherePredicate;
 import dk.ku.di.dms.vms.modb.query.execution.filter.FilterContext;
 import dk.ku.di.dms.vms.modb.query.execution.filter.FilterContextBuilder;
 import dk.ku.di.dms.vms.modb.query.execution.operators.AbstractSimpleOperator;
-import dk.ku.di.dms.vms.modb.query.execution.operators.min.IndexGroupByMinWithProjection;
-import dk.ku.di.dms.vms.modb.query.execution.operators.scan.FullScanWithProjection;
-import dk.ku.di.dms.vms.modb.query.execution.operators.scan.IndexScanWithProjection;
+import dk.ku.di.dms.vms.modb.query.execution.operators.minmax.IndexAggregateScan;
+import dk.ku.di.dms.vms.modb.query.execution.operators.scan.FullScan;
+import dk.ku.di.dms.vms.modb.query.execution.operators.scan.IndexScan;
 import dk.ku.di.dms.vms.modb.query.planner.SimplePlanner;
 import dk.ku.di.dms.vms.modb.transaction.multiversion.index.IMultiVersionIndex;
 import dk.ku.di.dms.vms.modb.transaction.multiversion.index.NonUniqueSecondaryIndex;
@@ -30,6 +30,7 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 import static java.lang.System.Logger.Level.INFO;
+import static java.lang.System.Logger.Level.WARNING;
 
 /**
  * A transaction management facade
@@ -95,15 +96,32 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
             wherePredicates = Collections.emptyList();
         }
         if(scanOperator.isIndexScan()){
-            if(//!wherePredicates.isEmpty() && // if it is index scan, then there is where predicate
-                    wherePredicates.get(0).expression == ExpressionTypeEnum.EQUALS) {
+            if(wherePredicates.get(0).expression == ExpressionTypeEnum.EQUALS) {
                 IKey key = this.getIndexedKeysFromWhereClause(wherePredicates, scanOperator.asIndexScan().index());
-                return scanOperator.asIndexScan().runAsEmbedded(this.txCtxMap.get(Thread.currentThread().threadId()), key);
+                if(wherePredicates.size() == key.size()) {
+                    return scanOperator.asIndexScan().runAsEmbedded(this.txCtxMap.get(Thread.currentThread().threadId()), key);
+                } else {
+                    List<WherePredicate> nonIdxClause = this.getNonIndexedColumnsWhereClause(wherePredicates, scanOperator.asIndexScan().index());
+                    FilterContext filterContext = FilterContextBuilder.build(nonIdxClause);
+                    return scanOperator.asIndexScan().runAsEmbedded(this.txCtxMap.get(Thread.currentThread().threadId()), key, filterContext);
+                }
             } else {
                 // can only be IN
                 IKey[] keys = this.getMultiKeysFromWhereClause(wherePredicates.get(0));
                 return scanOperator.asIndexScan().runAsEmbedded(this.txCtxMap.get(Thread.currentThread().threadId()), keys);
             }
+        } else if(scanOperator.isIndexScanWithOrder()) {
+            IKey key = this.getIndexedKeysFromWhereClause(wherePredicates, scanOperator.asIndexScanWithOrder().index());
+            if(wherePredicates.size() == key.size()) {
+                return scanOperator.asIndexScanWithOrder().runAsEmbedded(this.txCtxMap.get(Thread.currentThread().threadId()), key);
+            } else {
+                List<WherePredicate> nonIdxClause = this.getNonIndexedColumnsWhereClause(wherePredicates, scanOperator.asIndexScanWithOrder().index());
+                FilterContext filterContext = FilterContextBuilder.build(nonIdxClause);
+                return scanOperator.asIndexScanWithOrder().runAsEmbedded(this.txCtxMap.get(Thread.currentThread().threadId()), key, filterContext);
+            }
+        } else if(scanOperator.isFullScanWithOrder()){
+            FilterContext filterContext = FilterContextBuilder.build(wherePredicates);
+            return scanOperator.asFullScanWithOrder().runAsEmbedded(this.txCtxMap.get(Thread.currentThread().threadId()), filterContext);
         } else if(scanOperator.isIndexAggregationScan()){
             return scanOperator.asIndexAggregationScan().runAsEmbedded(this.txCtxMap.get(Thread.currentThread().threadId()));
         } else if(scanOperator.isIndexMultiAggregationScan()){
@@ -279,6 +297,11 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
             this.undoTransactionWrites(txCtx);
             throw new RuntimeException("Constraint violation in table " + table.getName() + ". Record:\n" + Arrays.stream(values).toList());
         }
+        trackIndexes(txCtx, table, values, primaryIndex, pk);
+        return values;
+    }
+
+    private static void trackIndexes(TransactionContext txCtx, Table table, Object[] values, PrimaryIndex primaryIndex, IKey pk) {
         txCtx.indexes.add(primaryIndex);
         // iterate over secondary indexes to insert the new write
         // this is the delta. records that the underlying index does not know yet
@@ -294,7 +317,6 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
                 entry.getValue().insert(txCtx, pk, values);
             }
         }
-        return values;
     }
 
     @Override
@@ -304,11 +326,13 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
 
     @Override
     public void upsert(Table table, Object[] values){
-        PrimaryIndex index = table.primaryKeyIndex();
-        IKey pk = KeyUtils.buildRecordKey(index.underlyingIndex().schema().getPrimaryKeyColumns(), values);
+        PrimaryIndex primaryIndex = table.primaryKeyIndex();
+        IKey pk = KeyUtils.buildRecordKey(primaryIndex.underlyingIndex().schema().getPrimaryKeyColumns(), values);
         TransactionContext txCtx = this.txCtxMap.get(Thread.currentThread().threadId());
-        if(index.upsert(txCtx, pk, values)) {
-            txCtx.indexes.add(index);
+        if(primaryIndex.upsert(txCtx, pk, values)) {
+            // FIXME must check if it is insert to insert in the secondary indexes
+            //  update may also lead to changes in the secondary index (e.g., a column that requires readdressing)
+            trackIndexes(txCtx, table, values, primaryIndex, pk);
             return;
         }
         this.undoTransactionWrites(txCtx);
@@ -355,7 +379,7 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
      * disaggregate the index choice, limit, aka query details, from the operator
      */
     public MemoryRefNode run(List<WherePredicate> wherePredicates,
-                             IndexGroupByMinWithProjection operator){
+                             IndexAggregateScan operator){
         return null; // operator.run();
     }
 
@@ -375,9 +399,8 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
     private IKey getIndexedKeysFromWhereClause(List<WherePredicate> wherePredicates, IMultiVersionIndex index){
         int i = 0;
         Object[] keyList = new Object[index.indexColumns().length];
-        // build filters for only those columns not in selected index
+        // build index key for only those columns in the selected index
         for (WherePredicate wherePredicate : wherePredicates) {
-            // not found, then build filter
             if (index.containsColumn(wherePredicate.columnReference.columnPosition)) {
                 keyList[i] = wherePredicate.value;
                 i++;
@@ -386,8 +409,21 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
         return KeyUtils.buildRecordKey(keyList);
     }
 
+    private List<WherePredicate> getNonIndexedColumnsWhereClause(List<WherePredicate> wherePredicates, IMultiVersionIndex index){
+        List<WherePredicate> nonIdxWhereClause = new ArrayList<>();
+        // build filters for only those columns not in selected index
+        for (WherePredicate wherePredicate : wherePredicates) {
+            // not found, then include in the filter
+            if (index.containsColumn(wherePredicate.columnReference.columnPosition)) {
+                continue;
+            }
+            nonIdxWhereClause.add(wherePredicate);
+        }
+        return nonIdxWhereClause;
+    }
+
     public MemoryRefNode run(List<WherePredicate> wherePredicates,
-                             IndexScanWithProjection operator){
+                             IndexScan operator){
         /* COMMENTED FOR NOW
         int i = 0;
         Object[] keyList = new Object[operator.index.columns().length];
@@ -419,7 +455,7 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
 
     public MemoryRefNode run(Table table,
                              List<WherePredicate> wherePredicates,
-                             FullScanWithProjection operator){
+                             FullScan operator){
         FilterContext filterContext = FilterContextBuilder.build(wherePredicates);
         return null; //operator.run( table.underlyingPrimaryKeyIndex(), filterContext );
     }
@@ -435,7 +471,12 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
         if(this.checkpointing) {
             for (Table table : this.catalog.values()) {
                 LOGGER.log(INFO, "Checkpointing table "+table.getName());
-                table.primaryKeyIndex().checkpoint(maxTid);
+                int numRecords = table.primaryKeyIndex().checkpoint(maxTid);
+                if(numRecords > 0) {
+                    LOGGER.log(INFO, "Persisted "+numRecords+" records in table "+table.getName());
+                } else {
+                    LOGGER.log(WARNING, "No records have been flushed to table "+table.getName());
+                }
             }
         } else {
             LOGGER.log(INFO, "Checkpoint disabled. Starting only garbage collection for max TID "+maxTid);
@@ -454,7 +495,7 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
     @Override
     public void commit(){
         TransactionContext txCtx = this.txCtxMap.get(Thread.currentThread().threadId());
-        for(var index : txCtx.indexes){
+        for(IMultiVersionIndex index : txCtx.indexes){
             index.installWrites(txCtx);
         }
     }

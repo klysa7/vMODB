@@ -4,6 +4,7 @@ import dk.ku.di.dms.vms.modb.api.query.clause.GroupBySelectElement;
 import dk.ku.di.dms.vms.modb.api.query.clause.JoinClauseElement;
 import dk.ku.di.dms.vms.modb.api.query.clause.WhereClauseElement;
 import dk.ku.di.dms.vms.modb.api.query.enums.JoinTypeEnum;
+import dk.ku.di.dms.vms.modb.api.query.enums.OrderBySortOrderEnum;
 import dk.ku.di.dms.vms.modb.api.query.statement.DeleteStatement;
 import dk.ku.di.dms.vms.modb.api.query.statement.IStatement;
 import dk.ku.di.dms.vms.modb.api.query.statement.SelectStatement;
@@ -16,6 +17,7 @@ import dk.ku.di.dms.vms.modb.definition.Table;
 import dk.ku.di.dms.vms.modb.query.analyzer.exception.AnalyzerException;
 import dk.ku.di.dms.vms.modb.query.analyzer.predicate.GroupByPredicate;
 import dk.ku.di.dms.vms.modb.query.analyzer.predicate.JoinPredicate;
+import dk.ku.di.dms.vms.modb.query.analyzer.predicate.OrderByPredicate;
 import dk.ku.di.dms.vms.modb.query.analyzer.predicate.WherePredicate;
 
 import java.util.ArrayList;
@@ -54,24 +56,19 @@ public final class Analyzer {
     }
 
     private QueryTree analyzeSelectStatement(final SelectStatement statement) throws AnalyzerException {
-
         QueryTree queryTree = new QueryTree();
-
         // from
         // obtain the tables to look for the columns in projection first
         for(String tableStr : statement.fromClause){
             Table table = this.catalog.get(tableStr);
             if(table != null) queryTree.tables.put(tableStr,table);
         }
-
         // join
         if(statement.joinClause != null) {
             List<JoinClauseElement> joinClauseElements = statement.joinClause;
             for (JoinClauseElement join : joinClauseElements) {
                 // TODO an optimization is iterating through the foreign keys of the table to find the match faster
-
                 Table tableLeft = queryTree.tables.get(join.tableLeft);
-
                 // find in catalog if not found in query yet
                 if (tableLeft == null) {
                     tableLeft = catalog.get(join.tableLeft);
@@ -81,10 +78,8 @@ public final class Analyzer {
                         throw new AnalyzerException("Unknown " + join.tableLeft + " table.");
                     }
                 }
-
                 // find left column
                 ColumnReference columnLeftReference = new ColumnReference(join.columnLeft, tableLeft);
-
                 Table tableRight = queryTree.tables.get(join.tableRight);
                 if (tableRight == null) {
                     tableRight = catalog.get(join.tableRight);
@@ -94,25 +89,18 @@ public final class Analyzer {
                         throw new AnalyzerException("Unknown " + join.tableRight + " table.");
                     }
                 }
-
                 // find right column
                 ColumnReference columnRightReference = new ColumnReference(join.columnRight, tableRight);
-
                 // build typed join clause
                 JoinPredicate joinClause = new JoinPredicate(columnLeftReference, columnRightReference, join.expression, join.joinType);
-
                 queryTree.joinPredicates.add(joinClause);
-
             }
         }
-
         // projection
         // columns in projection may come from join
         List<String> columns = statement.selectClause;
-
         // case where the user input is '*'
         if (columns.size() == 1 && columns.getFirst().contentEquals("*")) {
-
             // iterate over all tables involved
             for (final Table table : queryTree.tables.values()) {
                 Schema tableSchema = table.schema();
@@ -122,7 +110,6 @@ public final class Analyzer {
                     colPos++;
                 }
             }
-
         } else {
             // cannot allow same column name without AS from multiple tables
             for (String columnRefStr : columns) {
@@ -134,17 +121,15 @@ public final class Analyzer {
                     ColumnReference columnReference = findColumnReference(columnRefStr, queryTree.tables);
                     queryTree.projections.add(columnReference);
                 }
-
             }
         }
-
+        // group by
         List<ColumnReference> groupByColumnsReference = null;
         if(statement.groupByClause != null) {
             for (String column : statement.groupByClause) {
                 if (groupByColumnsReference == null) {
                     groupByColumnsReference = new ArrayList<>(statement.groupByClause.size());
                 }
-
                 ColumnReference columnReference;
                 if (column.contains(".")) {
                     String[] split = column.split("\\.");
@@ -152,11 +137,9 @@ public final class Analyzer {
                 } else {
                     columnReference = findColumnReference(column, queryTree.tables);
                 }
-
                 queryTree.groupByColumns.add(columnReference);
             }
         }
-
         if(statement.groupBySelectClause != null) {
             List<GroupBySelectElement> groupByProjections = statement.groupBySelectClause;
             for (GroupBySelectElement element : groupByProjections) {
@@ -171,9 +154,7 @@ public final class Analyzer {
                 queryTree.groupByProjections.add(new GroupByPredicate(columnReference, element.operation() ));
             }
         }
-
         // having clause is missing for now
-
         // TODO make sure these exceptions coming from where clause are thrown in the analyzer
         //  e.g., numeric comparisons between numbers and string/characters
         // where
@@ -181,7 +162,6 @@ public final class Analyzer {
             if (currWhere.value() == null) {
                 throw new AnalyzerException("Parameter of where clause cannot be null value");
             }
-
             ColumnReference columnReference;
             String tableName;
             String columnName;
@@ -198,7 +178,6 @@ public final class Analyzer {
             } else {
                 columnReference = this.findColumnReference(currWhere.column(), queryTree.tables);
             }
-
             // 1. is it a reference to a table or a char? e.g., "'something'"
             // 2. check if there is some inner join. i.e., the object is a literal?
             if (currWhere.value() instanceof String value) {
@@ -229,7 +208,10 @@ public final class Analyzer {
             // the order of the columns declared in the index definition matters
             queryTree.addWhereClauseSortedByColumnIndex(whereClause);
         }
-
+        if(statement.orderByClause != null && !statement.orderByClause.isEmpty()){
+            ColumnReference columnReference = new ColumnReference(statement.orderByClause.getFirst().column, this.catalog.get(statement.fromClause.getFirst()));
+            queryTree.orderByPredicates.add(new OrderByPredicate(columnReference, OrderBySortOrderEnum.ASC));
+        }
         if(statement.limit != null){
             queryTree.limit = Optional.of( statement.limit );
         } else {

@@ -44,8 +44,10 @@ public final class OrderLine implements IEntity<OrderLine.OrderLineId> {
     @Id
     public int ol_number;
 
+    @Column
     public int ol_i_id;
 
+    @Column
     public int ol_supply_w_id;
 
     @Column
@@ -60,6 +62,7 @@ public final class OrderLine implements IEntity<OrderLine.OrderLineId> {
     @Column
     public String ol_dist_info;
 
+    @SuppressWarnings("unused")
     public OrderLine(){}
 
     public OrderLine(int ol_o_id, int ol_d_id, int ol_w_id, int ol_number, int ol_i_id, int ol_supply_w_id, Date ol_delivery_d, int ol_quantity, float ol_amount, String ol_dist_info) {

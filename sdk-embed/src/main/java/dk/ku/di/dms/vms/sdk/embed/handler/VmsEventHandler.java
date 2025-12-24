@@ -140,7 +140,7 @@ public final class VmsEventHandler extends ModbHttpServer {
                     transactionalHandler, vmsInternalChannels,
                     new VmsEventHandler.VmsHandlerOptions( options.maxSleep(), options.networkBufferSize(),
                             options.soBufferSize(), options.networkThreadPoolSize(), options.networkSendTimeout(),
-                            options.vmsThreadPoolSize(), options.numVmsWorkers(), options.isLogging(), options.isCheckpointing()),
+                            options.numVmsWorkers(), options.isLogging(), options.isCheckpointing()),
                     httpHandler, serdesProxy);
         } catch (IOException e){
             throw new RuntimeException("Error on setting up event handler: "+e.getCause()+ " "+ e.getMessage());
@@ -152,7 +152,6 @@ public final class VmsEventHandler extends ModbHttpServer {
                                     int soBufferSize,
                                     int networkThreadPoolSize,
                                     int networkSendTimeout,
-                                    int vmsThreadPoolSize,
                                     int numVmsWorkers,
                                     boolean logging,
                                     boolean checkpointing) {}

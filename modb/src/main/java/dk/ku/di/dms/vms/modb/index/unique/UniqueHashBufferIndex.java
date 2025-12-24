@@ -79,7 +79,7 @@ public class UniqueHashBufferIndex extends ReadWriteIndex<IKey> implements ReadW
         long initialSize = this.size;
         LOGGER.log(INFO, "Reset started with initial size: "+initialSize);
         long pos = this.recordBufferCtx.address;
-        while(pos <= limit){
+        while(pos <= this.limit){
             if(UNSAFE.getByte(null, pos) == Header.ACTIVE_BYTE){
                 UNSAFE.putByte(null, pos, Header.INACTIVE_BYTE);
                 this.size--;
@@ -219,7 +219,7 @@ public class UniqueHashBufferIndex extends ReadWriteIndex<IKey> implements ReadW
         int attemptsToFind = OPEN_ADDRESSING_ATTEMPTS;
         int aux = 1;
         long pos = this.getPosition(key.hashCode());
-        while(attemptsToFind > 0){
+        while(attemptsToFind > 0 && pos < this.limit){
             if(UNSAFE.getByte(null, pos) == Header.ACTIVE_BYTE) {
                 Object[] existingRecord = this.readFromIndex(pos + Schema.RECORD_HEADER);
                 IKey existingKey = KeyUtils.buildRecordKey(this.schema().getPrimaryKeyColumns(), existingRecord);

@@ -4,8 +4,10 @@ import dk.ku.di.dms.vms.coordinator.Coordinator;
 import dk.ku.di.dms.vms.coordinator.transaction.TransactionBootstrap;
 import dk.ku.di.dms.vms.coordinator.transaction.TransactionDAG;
 import dk.ku.di.dms.vms.coordinator.transaction.TransactionInput;
+import dk.ku.di.dms.vms.modb.common.data_structure.Tuple;
 import dk.ku.di.dms.vms.modb.common.schema.network.node.IdentifiableNode;
 import dk.ku.di.dms.vms.tpcc.common.events.NewOrderWareIn;
+import dk.ku.di.dms.vms.tpcc.common.events.PaymentIn;
 import dk.ku.di.dms.vms.tpcc.proxy.workload.WorkloadUtils;
 import dk.ku.di.dms.vms.web_common.IHttpHandler;
 
@@ -31,10 +33,10 @@ public final class ExperimentUtils {
 
     private static int lastExperimentLastTID = 0;
 
-    public static ExperimentStats runExperiment(Coordinator coordinator, List<Iterator<NewOrderWareIn>> input, int runTime, int warmUp) {
+    public static ExperimentStats runExperiment(Coordinator coordinator, Tuple<Integer, String>[] txRatio, List<Map<String, Iterator<Object>>> input, int runTime, int warmUp) {
 
         // provide a consumer to avoid depending on the coordinator
-        Function<NewOrderWareIn, Long> func = newOrderInputBuilder(coordinator);
+        Function<Object, Long> func = tpccInputBuilder(coordinator);
 
         if(CONSUMER_REGISTERED) {
             // clean up possible entries from previous run
@@ -49,13 +51,7 @@ public final class ExperimentUtils {
         }
 
         int newRuntime = runTime + warmUp;
-        WorkloadUtils.WorkloadStats workloadStats = WorkloadUtils.submitWorkload(input, func);
-
-        try {
-            Thread.sleep(newRuntime);
-        } catch (InterruptedException e) {
-            throw new RuntimeException(e);
-        }
+        WorkloadUtils.WorkloadStats workloadStats = WorkloadUtils.submitWorkload(txRatio, input, func, newRuntime);
 
         // avoid submitting after experiment termination
         coordinator.clearTransactionInputs();
@@ -63,7 +59,7 @@ public final class ExperimentUtils {
 
         if(BATCH_TO_FINISHED_TS_MAP.isEmpty()) {
             LOGGER.log(WARNING, "No batch of transactions completed!");
-            return new ExperimentStats(0, 0, 0, 0, 0, 0, 0, 0);
+            return new ExperimentStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
         }
 
         long endTs = workloadStats.initTs() + newRuntime;
@@ -84,11 +80,10 @@ public final class ExperimentUtils {
             break;
         }
 
-        // if none, consider the first batch as the warmup
+        // if none, consider the first batch as the warmup, unless warmup is 0
         if(prevBatchStats == null) {
             Long lowestKey = BATCH_TO_FINISHED_TS_MAP.keySet().stream().min(Long::compareTo).orElse(null);
             prevBatchStats = BATCH_TO_FINISHED_TS_MAP.get(lowestKey);
-            numCompletedDuringWarmUp = (int) prevBatchStats.lastTid - lastExperimentLastTID;
         }
 
         BatchStats firstBatchStats = prevBatchStats;
@@ -103,14 +98,18 @@ public final class ExperimentUtils {
 
         numCompletedWithWarmUp = (int) prevBatchStats.lastTid - lastExperimentLastTID;
         numCompleted = numCompletedWithWarmUp - numCompletedDuringWarmUp;
-        long actualRuntime = prevBatchStats.endTs - firstBatchStats.endTs;
+        long usefulRuntime = prevBatchStats.endTs - firstBatchStats.endTs;
 
         double average = allLatencies.stream().mapToLong(Long::longValue).average().orElse(0.0);
         allLatencies.sort(null);
         double percentile_50 = PercentileCalculator.calculatePercentile(allLatencies, 0.50);
         double percentile_75 = PercentileCalculator.calculatePercentile(allLatencies, 0.75);
         double percentile_90 = PercentileCalculator.calculatePercentile(allLatencies, 0.90);
-        double txPerSec = numCompleted / ((double) actualRuntime / 1000L);
+        double percentile_99 = PercentileCalculator.calculatePercentile(allLatencies, 0.99);
+        // considering fixed experiment time
+        double txPerSec = numCompleted / ((double) runTime / 1000L);
+        // considering first received batch result
+        double txPerSecUseful = numCompleted / ((double) usefulRuntime / 1000L);
 
         System.out.println("Average latency: "+ average);
         System.out.println("Latency at 50th percentile: "+ percentile_50);
@@ -119,17 +118,20 @@ public final class ExperimentUtils {
         System.out.println("Number of completed transactions (during warm up): "+ numCompletedDuringWarmUp);
         System.out.println("Number of completed transactions (after warm up): "+ numCompleted);
         System.out.println("Number of completed transactions (total): "+ numCompletedWithWarmUp);
+        System.out.println("Total runtime (ms): "+ runTime);
         System.out.println("Transactions per second: "+txPerSec);
+
+        // useful work: from first useful batch (the first after warm up)
+        System.out.println("Useful work runtime (ms): "+ usefulRuntime);
+        System.out.println("Transactions per second (useful work): "+txPerSecUseful);
         System.out.println();
 
-        return new ExperimentStats(workloadStats.initTs(), numCompletedWithWarmUp, numCompleted, txPerSec, average, percentile_50, percentile_75, percentile_90);
+        return new ExperimentStats(workloadStats.initTs(), runTime, usefulRuntime, numCompletedWithWarmUp, numCompleted, txPerSec, txPerSecUseful, average, percentile_50, percentile_75, percentile_90, percentile_99);
     }
 
-    public record ExperimentStats(long initTs, int numCompletedWithWarmUp, int numCompleted, double txPerSec, double average,
-                                   double percentile_50, double percentile_75, double percentile_90){}
+    public record ExperimentStats(long initTs, int runTime, long usefulRuntime, int numCompletedWithWarmUp, int numCompleted, double txPerSec, double txPerSecUseful, double average, double percentile_50, double percentile_75, double percentile_90, double percentile_99){}
 
-    public static void writeResultsToFile(int numWare, ExperimentStats expStats, int runTime, int warmUp,
-                                          int numTransactionWorkers, int batchWindow, int maxTransactionsPerBatch){
+    public static void writeResultsToFile(int numWare, ExperimentStats expStats, int runTime, int warmUp, int numTransactionWorkers, int batchWindow, int maxTransactionsPerBatch, Tuple<Integer, String>[] txRatio){
         LocalDateTime time = LocalDateTime.ofInstant(
                 Instant.ofEpochMilli(expStats.initTs),
                 ZoneId.systemDefault()
@@ -141,11 +143,13 @@ public final class ExperimentUtils {
         try (BufferedWriter writer = new BufferedWriter(new FileWriter(fileName))) {
             writer.write("======= TPC-C in vMODB =======");
             writer.newLine();
-            writer.write("Experiment start: " + formattedDate);
+            writer.write("Start: " + formattedDate);
             writer.newLine();
-            writer.write("Experiment duration (ms): " + runTime);
+            writer.write("Duration (ms): " + runTime);
             writer.newLine();
-            writer.write("Experiment warm up (ms): " + warmUp);
+            writer.write("Warm up (ms): " + warmUp);
+            writer.newLine();
+            writer.write("Useful work (ms): " + expStats.usefulRuntime);
             writer.newLine();
             writer.write("Batch window (ms): " + batchWindow);
             writer.newLine();
@@ -155,6 +159,12 @@ public final class ExperimentUtils {
             writer.newLine();
             writer.write("Number of warehouses: " + numWare);
             writer.newLine();
+            writer.write("Transaction ratio: ");
+            writer.newLine();
+            for(Tuple<Integer, String> tx : txRatio){
+                writer.write("  "+tx.t2+"=" + tx.t1);
+                writer.newLine();
+            }
             writer.newLine();
             writer.write("Average latency: "+ expStats.average);
             writer.newLine();
@@ -164,11 +174,17 @@ public final class ExperimentUtils {
             writer.newLine();
             writer.write("Latency at 90th percentile: "+ expStats.percentile_90);
             writer.newLine();
-            writer.write("Number of completed transactions (with warm up): "+ expStats.numCompletedWithWarmUp);
+            writer.write("Latency at 99th percentile: "+ expStats.percentile_99);
             writer.newLine();
-            writer.write("Number of completed transactions: "+ expStats.numCompleted);
+            writer.write("Number of completed transactions (during warm up): "+ (expStats.numCompletedWithWarmUp - expStats.numCompleted));
+            writer.newLine();
+            writer.write("Number of completed transactions (after warm up): "+ expStats.numCompleted);
+            writer.newLine();
+            writer.write("Number of completed transactions (total): "+ expStats.numCompletedWithWarmUp);
             writer.newLine();
             writer.write("Throughput (tx/sec): "+expStats.txPerSec);
+            writer.newLine();
+            writer.write("Useful Throughput (tx/sec): "+expStats.txPerSecUseful);
             writer.newLine();
         } catch (IOException e) {
             throw new RuntimeException(e);
@@ -179,10 +195,21 @@ public final class ExperimentUtils {
 
     private record BatchStats(long batchId, long lastTid, long endTs){}
 
-    private static Function<NewOrderWareIn, Long> newOrderInputBuilder(final Coordinator coordinator) {
-        return newOrderWareIn -> {
-            TransactionInput.Event eventPayload = new TransactionInput.Event("new-order-ware-in", newOrderWareIn.toString());
-            TransactionInput txInput = new TransactionInput("new_order", eventPayload);
+    private static Function<Object, Long> tpccInputBuilder(final Coordinator coordinator) {
+        return input -> {
+            TransactionInput.Event eventPayload;
+            String txIdentifier;
+            if(input instanceof NewOrderWareIn newOrderInput){
+                txIdentifier = "new_order";
+                eventPayload = new TransactionInput.Event("new-order-ware-in", newOrderInput.toString());
+            } else if(input instanceof PaymentIn paymentInput){
+                txIdentifier = "payment";
+                eventPayload = new TransactionInput.Event("payment-in", paymentInput.toString());
+            } else {
+                txIdentifier = "order_status";
+                eventPayload = new TransactionInput.Event("order-status-in", input.toString());
+            }
+            TransactionInput txInput = new TransactionInput(txIdentifier, eventPayload);
             coordinator.queueTransactionInput(txInput);
             return (long) BATCH_TO_FINISHED_TS_MAP.size() + 1;
         };
@@ -190,12 +217,28 @@ public final class ExperimentUtils {
 
     public static Coordinator loadCoordinator(Properties properties) {
         Map<String, TransactionDAG> transactionMap = new HashMap<>();
+        // new order
         TransactionDAG newOrderDag = TransactionBootstrap.name("new_order")
                 .input("a", "warehouse", "new-order-ware-in")
                 .internal("b", "inventory", "new-order-ware-out", "a")
                 .terminal("c", "order", "b")
                 .build();
         transactionMap.put(newOrderDag.name, newOrderDag);
+
+        // payment
+        TransactionDAG paymentDag = TransactionBootstrap.name("payment")
+                .input("a", "warehouse", "payment-in")
+                .terminal("b", "order", "a")
+                .build();
+        transactionMap.put(paymentDag.name, paymentDag);
+
+        // order status
+        TransactionDAG orderStatusDag = TransactionBootstrap.name("order_status")
+                .input("a", "warehouse", "order-status-in")
+                .terminal("b", "order", "a")
+                .build();
+        transactionMap.put(orderStatusDag.name, orderStatusDag);
+
         Map<String, IdentifiableNode> starterVMSs = getVmsMap(properties);
         Coordinator coordinator = Coordinator.build(properties, starterVMSs, transactionMap, (ignored1) -> IHttpHandler.DEFAULT);
         Thread coordinatorThread = new Thread(coordinator);

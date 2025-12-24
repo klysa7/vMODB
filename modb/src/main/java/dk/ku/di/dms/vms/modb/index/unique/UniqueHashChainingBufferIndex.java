@@ -3,7 +3,7 @@ package dk.ku.di.dms.vms.modb.index.unique;
 import dk.ku.di.dms.vms.modb.definition.Header;
 import dk.ku.di.dms.vms.modb.definition.Schema;
 import dk.ku.di.dms.vms.modb.definition.key.IKey;
-import dk.ku.di.dms.vms.modb.storage.record.AppendOnlyBuffer;
+import dk.ku.di.dms.vms.modb.storage.record.AppendOnlyBoundedBuffer;
 import dk.ku.di.dms.vms.modb.storage.record.RecordBufferContext;
 import dk.ku.di.dms.vms.modb.utils.StorageUtils;
 
@@ -15,7 +15,7 @@ import static java.lang.System.Logger.Level.INFO;
 
 public final class UniqueHashChainingBufferIndex extends UniqueHashBufferIndex {
 
-    public final Map<Long, AppendOnlyBuffer> chainingMap;
+    public final Map<Long, AppendOnlyBoundedBuffer> chainingMap;
 
     public UniqueHashChainingBufferIndex(RecordBufferContext recordBufferContext, Schema schema, int[] columnsIndex, int capacity) {
         super(recordBufferContext, schema, columnsIndex, capacity);
@@ -27,12 +27,12 @@ public final class UniqueHashChainingBufferIndex extends UniqueHashBufferIndex {
         long pos = this.getFreePositionToInsert(key);
         if(pos == -1){
             long headPos = this.getPosition(key.hashCode());
-            AppendOnlyBuffer aob;
+            AppendOnlyBoundedBuffer aob;
             if(this.chainingMap.containsKey(headPos)){
                 aob = this.chainingMap.get(headPos);
             } else {
                 LOGGER.log(INFO, "Cannot find an empty entry for record object. Creating a new chaining.... \nKey: " + key+ " Hash: " + key.hashCode());
-                aob = StorageUtils.loadAppendOnlyBuffer(OPEN_ADDRESSING_ATTEMPTS, (int) this.recordSize, STR."\{this.recordBufferCtx.fileName}_\{headPos}", true);
+                aob = StorageUtils.loadAppendOnlyBoundedBuffer(OPEN_ADDRESSING_ATTEMPTS, (int) this.recordSize, STR."\{this.recordBufferCtx.fileName}_\{headPos}", true);
                 this.chainingMap.put(headPos, aob);
             }
             pos = aob.address;

@@ -1,58 +1,88 @@
 package dk.ku.di.dms.vms.tpcc.proxy.workload;
 
 import dk.ku.di.dms.vms.modb.common.constraint.ConstraintReference;
+import dk.ku.di.dms.vms.modb.common.data_structure.Tuple;
+import dk.ku.di.dms.vms.modb.common.memory.MemoryUtils;
 import dk.ku.di.dms.vms.modb.common.type.DataType;
 import dk.ku.di.dms.vms.modb.common.type.DataTypeUtils;
 import dk.ku.di.dms.vms.modb.definition.Schema;
-import dk.ku.di.dms.vms.modb.storage.record.AppendOnlyBuffer;
+import dk.ku.di.dms.vms.modb.storage.record.AppendOnlyBoundedBuffer;
+import dk.ku.di.dms.vms.modb.storage.record.AppendOnlyUnboundedBuffer;
 import dk.ku.di.dms.vms.modb.utils.StorageUtils;
 import dk.ku.di.dms.vms.tpcc.common.events.NewOrderWareIn;
+import dk.ku.di.dms.vms.tpcc.common.events.OrderStatusIn;
+import dk.ku.di.dms.vms.tpcc.common.events.PaymentIn;
+import dk.ku.di.dms.vms.tpcc.proxy.datagen.DataGenUtils;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.*;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Function;
 
 import static dk.ku.di.dms.vms.tpcc.proxy.datagen.DataGenUtils.nuRand;
 import static dk.ku.di.dms.vms.tpcc.proxy.datagen.DataGenUtils.randomNumber;
 import static dk.ku.di.dms.vms.tpcc.proxy.infra.TPCcConstants.*;
-import static java.lang.System.Logger.Level.ERROR;
-import static java.lang.System.Logger.Level.INFO;
+import static java.lang.System.Logger.Level.*;
 
 public final class WorkloadUtils {
 
     private static final System.Logger LOGGER = System.getLogger(WorkloadUtils.class.getName());
 
-    private static final String BASE_WORKLOAD_FILE_NAME = "new_order_input_";
+    private static final String NEW_ORDER_INPUT_BASE_FILE_NAME = "new_order_input_";
 
-    private static final Schema SCHEMA = new Schema(
+    private static final String PAYMENT_INPUT_BASE_FILE_NAME = "payment_input_";
+
+    private static final String ORDER_STATUS_INPUT_BASE_FILE_NAME = "order_status_input_";
+
+    private static final Schema NEW_ORDER_SCHEMA = new Schema(
             new String[]{ "w_id", "d_id", "c_id", "itemIds", "supWares", "qty", "allLocal" },
             new DataType[]{
-                    DataType.INT, DataType.INT, DataType.INT, DataType.INT_ARRAY,
-                    DataType.INT_ARRAY, DataType.INT_ARRAY, DataType.BOOL
+                    DataType.INT, DataType.INT, DataType.INT, DataType.INT_ARRAY, DataType.INT_ARRAY, DataType.INT_ARRAY, DataType.BOOL
             },
             new int[]{},
             new ConstraintReference[]{},
             false
     );
 
-    private static void write(long pos, Object[] record) {
+    private static final Schema PAYMENT_SCHEMA = new Schema(
+            new String[]{ "w_id", "d_id", "c_id", "c_w_id", "c_d_id", "amount", "c_last", "by_name" },
+            new DataType[]{
+                    DataType.INT, DataType.INT, DataType.INT, DataType.INT, DataType.INT, DataType.FLOAT, DataType.STRING, DataType.BOOL
+            },
+            new int[]{},
+            new ConstraintReference[]{},
+            false
+    );
+
+    private static final Schema ORDER_STATUS_SCHEMA = new Schema(
+            new String[]{ "w_id", "d_id", "c_id", "c_last", "by_name" },
+            new DataType[]{
+                    DataType.INT, DataType.INT, DataType.INT, DataType.STRING, DataType.BOOL
+            },
+            new int[]{},
+            new ConstraintReference[]{},
+            false
+    );
+
+    private static void writeRecordInMemoryPos(long pos, Object[] record, Schema schema) {
         long currAddress = pos;
-        for (int index = 0; index < SCHEMA.columnOffset().length; index++) {
-            DataType dt = SCHEMA.columnDataType(index);
+        for (int index = 0; index < schema.columnOffset().length; index++) {
+            DataType dt = schema.columnDataType(index);
             DataTypeUtils.callWriteFunction(currAddress, dt, record[index]);
             currAddress += dt.value;
         }
     }
 
-    private static Object[] read(long address){
-        Object[] record = new Object[SCHEMA.columnOffset().length];
+    private static Object[] readRecordFromMemoryPos(long address, Schema schema){
+        Object[] record = new Object[schema.columnOffset().length];
         long currAddress = address;
-        for(int i = 0; i < SCHEMA.columnOffset().length; i++) {
-            DataType dt = SCHEMA.columnDataType(i);
+        for(int i = 0; i < schema.columnOffset().length; i++) {
+            DataType dt = schema.columnDataType(i);
             record[i] = DataTypeUtils.getValue(dt, currAddress);
             currAddress += dt.value;
         }
@@ -66,7 +96,7 @@ public final class WorkloadUtils {
     public record WorkloadStats(long initTs, Map<Long, List<Long>>[] submitted){}
 
     @SuppressWarnings("unchecked")
-    public static WorkloadStats submitWorkload(List<Iterator<NewOrderWareIn>> input, Function<NewOrderWareIn, Long> func) {
+    public static WorkloadStats submitWorkload(Tuple<Integer, String>[] txRatio, List<Map<String, Iterator<Object>>> input, Function<Object, Long> func, int runtime) {
         int numWorkers = input.size();
         LOGGER.log(INFO, "Submitting transactions through "+numWorkers+" worker(s)");
         CountDownLatch allThreadsStart = new CountDownLatch(numWorkers+1);
@@ -74,14 +104,15 @@ public final class WorkloadUtils {
         Map<Long, List<Long>>[] submittedArray = new Map[numWorkers];
 
         for(int i = 0; i < numWorkers; i++) {
-            final Iterator<NewOrderWareIn> workerInput = input.get(i);
+            final Map<String, Iterator<Object>> workerInput = input.get(i);
             int finalI = i;
             Thread thread = new Thread(()-> submittedArray[finalI] =
-                            Worker.run(allThreadsStart, allThreadsAreDone, workerInput, func));
+                            Worker.run(allThreadsStart, allThreadsAreDone, txRatio, workerInput, func, runtime));
             thread.start();
         }
 
         allThreadsStart.countDown();
+        long initTs = System.currentTimeMillis();
         try {
             allThreadsStart.await();
             LOGGER.log(INFO,"Experiment main going to wait for the workers to finish.");
@@ -91,16 +122,20 @@ public final class WorkloadUtils {
             throw new RuntimeException(e);
         }
 
-        return new WorkloadStats(System.currentTimeMillis(), submittedArray);
+        return new WorkloadStats(initTs, submittedArray);
     }
 
     private static final class Worker {
 
-        public static Map<Long, List<Long>> run(CountDownLatch allThreadsStart, CountDownLatch allThreadsAreDone,
-                                                Iterator<NewOrderWareIn> input, Function<NewOrderWareIn, Long> func) {
-            Map<Long,List<Long>> startTsMap = new HashMap<>();
+        public static Map<Long, List<Long>> run(CountDownLatch allThreadsStart, CountDownLatch allThreadsAreDone, Tuple<Integer, String>[] txRatio, Map<String, Iterator<Object>> input, Function<Object, Long> func, int runTime) {
+            Map<Long, List<Long>> startTsMap = new HashMap<>();
+            Map<String, Integer> histogram = new HashMap<>(txRatio.length);
+            for (Tuple<Integer, String> integerStringTuple : txRatio) {
+                histogram.put(integerStringTuple.t2, 0);
+            }
+            ThreadLocalRandom random = ThreadLocalRandom.current();
             long threadId = Thread.currentThread().threadId();
-            LOGGER.log(INFO,"Thread ID " + threadId + " started");
+            LOGGER.log(INFO,"Worker run (Thread ID) " + threadId + " started");
             allThreadsStart.countDown();
             try {
                 allThreadsStart.await();
@@ -108,41 +143,127 @@ public final class WorkloadUtils {
                 LOGGER.log(ERROR, "Thread ID "+threadId+" failed to await start");
                 throw new RuntimeException(e);
             }
-            long currentTs;
-            while (input.hasNext()){
+            String tx = null;
+            int ratio;
+            final long initTs = System.currentTimeMillis();
+            long currentTs = initTs;
+            do {
+
+                ratio = random.nextInt(1,101);
+                for(int i = 0; i < txRatio.length; i++){
+                    if(ratio <= txRatio[i].t1){
+                        tx = txRatio[i].t2;
+                        break;
+                    }
+                }
+
                 try {
-                    long batchId = func.apply(input.next());
-                    currentTs = System.currentTimeMillis();
+                    if(!input.get(tx).hasNext()){
+                        LOGGER.log(WARNING,"Not enough transaction inputs for: "+tx+"\nClosing submission loop earlier...");
+                        break;
+                    }
+                    long batchId = func.apply(input.get(tx).next());
                     if(!startTsMap.containsKey(batchId)){
                         startTsMap.put(batchId, new ArrayList<>());
                     }
                     startTsMap.get(batchId).add(currentTs);
+                    histogram.computeIfPresent(tx, (_, v)-> v+1);
                 } catch (Exception e) {
                     LOGGER.log(ERROR,"Exception in Thread ID: " + (e.getMessage() == null ? "No message" : e.getMessage()));
                     throw new RuntimeException(e);
                 }
+                currentTs = System.currentTimeMillis();
+                tx = null;
+            } while (currentTs - initTs < runTime);
+            LOGGER.log(INFO,"Worker run (Thread ID) " + threadId + " finished");
+
+            boolean sent = false;
+            StringBuilder output = new StringBuilder("Worker run (Thread ID) " + threadId + " histogram:\n");
+            for(var e : histogram.entrySet()){
+                if(e.getValue() > 0) sent = true;
+                output.append(e.getKey()).append(": ").append(e.getValue()).append("\n");
             }
+            System.out.println(output);
+
+            // wait for experiment finish
+            if(sent){
+                try {
+                    LOGGER.log(INFO,"Worker run (Thread ID) " + threadId + " will wait for the end of the experiment duration.");
+                    Thread.sleep(runTime - (System.currentTimeMillis() - initTs));
+                } catch (InterruptedException _) { }
+            }
+
             allThreadsAreDone.countDown();
             return startTsMap;
         }
     }
 
-    public static List<Iterator<NewOrderWareIn>> mapWorkloadInputFiles(int numWare){
+    public static List<Map<String,Iterator<Object>>> mapWorkloadInputFiles(int numWare){
         LOGGER.log(INFO, "Mapping "+numWare+" warehouse input files from disk...");
         long initTs = System.currentTimeMillis();
-        List<Iterator<NewOrderWareIn>> input = new ArrayList<>(numWare);
+        List<Map<String, Iterator<Object>>> input = new ArrayList<>(numWare);
         for(int i = 0; i < numWare; i++){
-            AppendOnlyBuffer buffer = StorageUtils.loadAppendOnlyBufferUnknownSize(BASE_WORKLOAD_FILE_NAME+(i+1));
+
+            Map<String, Iterator<Object>> wareInput = new HashMap<>(3);
+
+            // new order
+            AppendOnlyBoundedBuffer newOrderBuffer = StorageUtils.loadAppendOnlyBuffer(NEW_ORDER_INPUT_BASE_FILE_NAME +(i+1));
             // calculate number of entries (i.e., transaction requests)
-            int numTransactions = (int) buffer.size() / SCHEMA.getRecordSize();
-            input.add( createWorkloadInputIterator(buffer, numTransactions) );
+            int numTransactions = (int) newOrderBuffer.size() / NEW_ORDER_SCHEMA.getRecordSize();
+            wareInput.put("new_order", createNewOrderInputIterator(newOrderBuffer, numTransactions) );
+
+            // payment
+            AppendOnlyBoundedBuffer paymentBuffer = StorageUtils.loadAppendOnlyBuffer(PAYMENT_INPUT_BASE_FILE_NAME +(i+1));
+            numTransactions = (int) paymentBuffer.size() / PAYMENT_SCHEMA.getRecordSize();
+            wareInput.put("payment", createPaymentInputIterator(paymentBuffer, numTransactions) );
+
+            // order status
+            AppendOnlyBoundedBuffer orderStatusBuffer = StorageUtils.loadAppendOnlyBuffer(ORDER_STATUS_INPUT_BASE_FILE_NAME +(i+1));
+            numTransactions = (int) orderStatusBuffer.size() / ORDER_STATUS_SCHEMA.getRecordSize();
+            wareInput.put("order_status", createOrderStatusInputIterator(orderStatusBuffer, numTransactions) );
+
+            input.add(wareInput);
         }
         long endTs = System.currentTimeMillis();
-        LOGGER.log(INFO, "Mapped "+numWare+" warehouse input files from disk in "+(endTs-initTs)+" ms");
+        LOGGER.log(INFO, "Mapped input files for "+numWare+" warehouse(s) from disk in "+(endTs-initTs)+" ms");
         return input;
     }
 
-    private static Iterator<NewOrderWareIn> createWorkloadInputIterator(AppendOnlyBuffer buffer, int numTransactions){
+    private static Iterator<Object> createPaymentInputIterator(AppendOnlyBoundedBuffer buffer, int numTransactions){
+        return new Iterator<>() {
+            int txIdx = 1;
+            @Override
+            public boolean hasNext() {
+                return this.txIdx <= numTransactions;
+            }
+            @Override
+            public PaymentIn next() {
+                Object[] paymentInput = readRecordFromMemoryPos(buffer.nextOffset(), PAYMENT_SCHEMA);
+                buffer.forwardOffset(PAYMENT_SCHEMA.getRecordSize());
+                this.txIdx++;
+                return parsePaymentRecordIntoEntity(paymentInput);
+            }
+        };
+    }
+
+    private static Iterator<Object> createOrderStatusInputIterator(AppendOnlyBoundedBuffer buffer, int numTransactions){
+        return new Iterator<>() {
+            int txIdx = 1;
+            @Override
+            public boolean hasNext() {
+                return this.txIdx <= numTransactions;
+            }
+            @Override
+            public OrderStatusIn next() {
+                Object[] orderStatusInput = readRecordFromMemoryPos(buffer.nextOffset(), ORDER_STATUS_SCHEMA);
+                buffer.forwardOffset(ORDER_STATUS_SCHEMA.getRecordSize());
+                this.txIdx++;
+                return parseOrderStatusRecordIntoEntity(orderStatusInput);
+            }
+        };
+    }
+
+    private static Iterator<Object> createNewOrderInputIterator(AppendOnlyBoundedBuffer buffer, int numTransactions){
         return new Iterator<>() {
             int txIdx = 1;
             @Override
@@ -151,39 +272,87 @@ public final class WorkloadUtils {
             }
             @Override
             public NewOrderWareIn next() {
-                Object[] newOrderInput = read(buffer.nextOffset());
-                buffer.forwardOffset(SCHEMA.getRecordSize());
+                Object[] newOrderInput = readRecordFromMemoryPos(buffer.nextOffset(), NEW_ORDER_SCHEMA);
+                buffer.forwardOffset(NEW_ORDER_SCHEMA.getRecordSize());
                 this.txIdx++;
-                return parseRecordIntoEntity(newOrderInput);
+                return parseNewOrderRecordIntoEntity(newOrderInput);
             }
         };
     }
 
-    public static void createWorkload(int numWare, int numTransactions, boolean allowMultiWarehouses){
+    public static void createWorkload(int numWare, boolean allowMultiWarehouses, Map<String, Integer> numTxPerType) throws IOException {
         deleteWorkloadInputFiles();
-        LOGGER.log(INFO, "Generating "+(numTransactions * numWare)+" transactions ("+numTransactions+" per warehouse/worker)");
+        LOGGER.log(INFO, "Starting transaction generation per warehouse/worker");
         long initTs = System.currentTimeMillis();
-        for(int ware = 1; ware <= numWare; ware++) {
-            LOGGER.log(INFO, "Generating "+numTransactions+" transactions for warehouse "+ware);
-            String fileName = BASE_WORKLOAD_FILE_NAME+ware;
-            AppendOnlyBuffer buffer = StorageUtils.loadAppendOnlyBuffer(numTransactions, SCHEMA.getRecordSize(), fileName, true);
-            for (int txIdx = 1; txIdx <= numTransactions; txIdx++) {
-                Object[] newOrderInput = generateNewOrder(ware, numWare, allowMultiWarehouses);
-                write(buffer.nextOffset(), newOrderInput);
-                buffer.forwardOffset(SCHEMA.getRecordSize());
+
+        ByteBuffer newOrderNativeBuffer = ByteBuffer.allocateDirect(NEW_ORDER_SCHEMA.getRecordSize());
+        long newOrderBufferAddress = MemoryUtils.getByteBufferAddress(newOrderNativeBuffer);
+
+        ByteBuffer paymentNativeBuffer = ByteBuffer.allocateDirect(PAYMENT_SCHEMA.getRecordSize());
+        long paymentBufferAddress = MemoryUtils.getByteBufferAddress(paymentNativeBuffer);
+
+        ByteBuffer orderStatusNativeBuffer = ByteBuffer.allocateDirect(ORDER_STATUS_SCHEMA.getRecordSize());
+        long orderStatusBufferAddress = MemoryUtils.getByteBufferAddress(orderStatusNativeBuffer);
+
+        for (int ware = 1; ware <= numWare; ware++) {
+
+            LOGGER.log(INFO, "Warehouse "+ware+" started");
+
+            String newOrderInputFileName = NEW_ORDER_INPUT_BASE_FILE_NAME + ware;
+            AppendOnlyUnboundedBuffer newOrderBuffer = StorageUtils.loadAppendOnlyUnboundedBuffer(newOrderInputFileName);
+
+            String paymentInputFileName = PAYMENT_INPUT_BASE_FILE_NAME + ware;
+            AppendOnlyUnboundedBuffer paymentBuffer = StorageUtils.loadAppendOnlyUnboundedBuffer(paymentInputFileName);
+
+            String orderStatusInputFileName = ORDER_STATUS_INPUT_BASE_FILE_NAME + ware;
+            AppendOnlyUnboundedBuffer orderStatusBuffer = StorageUtils.loadAppendOnlyUnboundedBuffer(orderStatusInputFileName);
+
+            for(var entry : numTxPerType.entrySet()) {
+                switch (entry.getKey()){
+                    case "new_order" -> {
+                        for (int i = 1; i <= entry.getValue(); i++) {
+                            Object[] newOrderInput = generateNewOrder(ware, numWare, allowMultiWarehouses);
+                            writeRecordInMemoryPos(newOrderBufferAddress, newOrderInput, NEW_ORDER_SCHEMA);
+                            newOrderBuffer.append(newOrderNativeBuffer);
+                            newOrderNativeBuffer.clear();
+                        }
+                        newOrderBuffer.force();
+                        LOGGER.log(INFO, "Generated "+entry.getValue()+" new order inputs");
+                    }
+                    case "payment" -> {
+                        for (int i = 1; i <= entry.getValue(); i++) {
+                            Object[] paymentInput = generatePayment(ware, numWare);
+                            writeRecordInMemoryPos(paymentBufferAddress, paymentInput, PAYMENT_SCHEMA);
+                            paymentBuffer.append(paymentNativeBuffer);
+                            paymentNativeBuffer.clear();
+                        }
+                        paymentBuffer.force();
+                        LOGGER.log(INFO, "Generated "+entry.getValue()+" payment inputs");
+                    }
+                    case "order_status" -> {
+                        for (int i = 1; i <= entry.getValue(); i++) {
+                            Object[] orderStatusInput = generateOrderStatus(ware);
+                            writeRecordInMemoryPos(orderStatusBufferAddress, orderStatusInput, ORDER_STATUS_SCHEMA);
+                            orderStatusBuffer.append(orderStatusNativeBuffer);
+                            orderStatusNativeBuffer.clear();
+                        }
+                        orderStatusBuffer.force();
+                        LOGGER.log(INFO, "Generated "+entry.getValue()+" order status inputs");
+                    }
+                }
             }
-            buffer.force();
+            LOGGER.log(INFO, "Warehouse "+ware+" done");
         }
         long endTs = System.currentTimeMillis();
-        LOGGER.log(INFO, "Generated "+(numTransactions * numWare)+" transactions in "+(endTs-initTs)+" ms");
+        LOGGER.log(INFO, "Transaction generation finished in "+(endTs-initTs)+" ms");
     }
     
     public static void deleteWorkloadInputFiles(){
         String basePathStr = StorageUtils.getBasePath();
         Path basePath = Paths.get(basePathStr);
         try(var paths = Files.walk(basePath)){
-            var workloadInputFiles = paths.filter(path -> path.toString().contains(BASE_WORKLOAD_FILE_NAME)).toList();
-            for (var path : workloadInputFiles){
+            var newOrderInputFiles = paths.filter(path -> path.toString().contains(NEW_ORDER_INPUT_BASE_FILE_NAME) || path.toString().contains(ORDER_STATUS_INPUT_BASE_FILE_NAME)).toList();
+            for (var path : newOrderInputFiles){
                 if(!path.toFile().delete()){
                     LOGGER.log(ERROR, "Could not dele file path: \n"+path);
                 }
@@ -197,7 +366,7 @@ public final class WorkloadUtils {
         String basePathStr = StorageUtils.getBasePath();
         Path basePath = Paths.get(basePathStr);
         try(var paths = Files.walk(basePath)){
-            var workloadInputFiles = paths.filter(path -> path.toString().contains(BASE_WORKLOAD_FILE_NAME)).toList();
+            var workloadInputFiles = paths.filter(path -> path.toString().contains(NEW_ORDER_INPUT_BASE_FILE_NAME)).toList();
             return workloadInputFiles.size();
         } catch (IOException e){
             LOGGER.log(ERROR, "Error captured while trying to access base path: \n"+e);
@@ -205,7 +374,7 @@ public final class WorkloadUtils {
         }
     }
 
-    private static NewOrderWareIn parseRecordIntoEntity(Object[] newOrderInput) {
+    private static NewOrderWareIn parseNewOrderRecordIntoEntity(Object[] newOrderInput) {
         return new NewOrderWareIn(
                 (int) newOrderInput[0],
                 (int) newOrderInput[1],
@@ -214,6 +383,29 @@ public final class WorkloadUtils {
                 (int[]) newOrderInput[4],
                 (int[]) newOrderInput[5],
                 (boolean) newOrderInput[6]
+        );
+    }
+
+    private static PaymentIn parsePaymentRecordIntoEntity(Object[] paymentInput) {
+        return new PaymentIn(
+                (int) paymentInput[0],
+                (int) paymentInput[1],
+                (int) paymentInput[2],
+                (int) paymentInput[3],
+                (int) paymentInput[4],
+                (float) paymentInput[5],
+                (String) paymentInput[6],
+                (boolean) paymentInput[7]
+        );
+    }
+
+    private static OrderStatusIn parseOrderStatusRecordIntoEntity(Object[] orderStatusInput) {
+        return new OrderStatusIn(
+                (int) orderStatusInput[0],
+                (int) orderStatusInput[1],
+                (int) orderStatusInput[2],
+                (String) orderStatusInput[3],
+                (boolean) orderStatusInput[4]
         );
     }
 
@@ -226,7 +418,7 @@ public final class WorkloadUtils {
         int rbk;
 
         d_id = randomNumber(1, NUM_DIST_PER_WARE);
-        c_id = nuRand(1023, 1, NUM_CUST_PER_DIST);
+        c_id = nuRand(1023, 259, 1, NUM_CUST_PER_DIST);
 
         ol_cnt = randomNumber(MIN_NUM_ITEMS_PER_ORDER, MAX_NUM_ITEMS_PER_ORDER);
         rbk = randomNumber(1, 100);
@@ -236,11 +428,11 @@ public final class WorkloadUtils {
         int[] qty = new int[ol_cnt];
 
         for (int i = 0; i < ol_cnt; i++) {
-            int item_ = nuRand(8191, 1, NUM_ITEMS);
+            int item_ = nuRand(8191, 7911, 1, NUM_ITEMS);
 
             // avoid duplicate items
             while(foundItem(itemIds, i, item_)){
-                item_ = nuRand(8191, 1, NUM_ITEMS);
+                item_ = nuRand(8191, 7911, 1, NUM_ITEMS);
             }
             itemIds[i] = item_;
 
@@ -285,6 +477,29 @@ public final class WorkloadUtils {
             tmp = randomNumber(1, num_ware);
         } while (tmp == home_ware);
         return tmp;
+    }
+
+    private static Object[] generateOrderStatus(int w_id){
+        int d_id = randomNumber(1, NUM_DIST_PER_WARE);
+        int c_id = nuRand(1023, 259, 1, NUM_CUST_PER_DIST);
+        String c_last = DataGenUtils.lastName(nuRand(255, 223, 0,999));
+        boolean by_name = randomNumber(1, 100) <= 60;
+        return new Object[]{ w_id, d_id, c_id, c_last, by_name };
+    }
+
+    private static Object[] generatePayment(int w_id, int num_ware){
+        int d_id = randomNumber(1, NUM_DIST_PER_WARE);
+        int c_id = nuRand(1023, 259, 1, NUM_CUST_PER_DIST);
+        float amount = (float) (randomNumber(100, 500000) / 100.0);
+        int c_d_id = d_id;
+        int c_w_id = w_id;
+        if (randomNumber(1, 100) > 85) {
+            c_d_id = randomNumber(1, NUM_DIST_PER_WARE);
+            c_w_id = otherWare(num_ware, w_id);
+        }
+        String c_last = DataGenUtils.lastName(nuRand(255, 223, 0,999));
+        boolean by_name = randomNumber(1, 100) <= 60;
+        return new Object[]{ w_id, d_id, c_id, c_w_id, c_d_id, amount, c_last, by_name };
     }
 
 }

@@ -47,21 +47,22 @@ public final class SelectStatement extends AbstractStatement {
         this.whereClause.addAll(whereClause);
     }
 
-    public SelectStatement(List<String> selectClause, String table, List<WhereClauseElement> whereClause, List<OrderByClauseElement> orderByClause) {
+    public SelectStatement(StringBuilder sql, List<String> selectClause, List<String> fromClause, List<WhereClauseElement> whereClause, List<OrderByClauseElement> orderByClause) {
+        super(sql);
         this.selectClause = selectClause;
-        this.fromClause = List.of(table);;
+        this.fromClause = fromClause;
         this.whereClause.addAll(whereClause);
         this.orderByClause = orderByClause;
     }
 
-    public SelectStatement(StringBuilder sql, List<String> selectClause, List<GroupBySelectElement> groupBySelectClause,
-                           List<String> fromClause, List<WhereClauseElement> whereClause, List<String> groupByClause) {
+    public SelectStatement(StringBuilder sql, List<String> selectClause, List<GroupBySelectElement> groupBySelectClause, List<String> fromClause, List<WhereClauseElement> whereClause, List<String> groupByClause, List<OrderByClauseElement> orderByClause) {
         super(sql);
         this.selectClause = selectClause;
         this.groupBySelectClause = groupBySelectClause;
         this.fromClause = fromClause;
         this.whereClause.addAll(whereClause);
         this.groupByClause = groupByClause;
+        this.orderByClause = orderByClause;
     }
 
     @Override
@@ -75,18 +76,15 @@ public final class SelectStatement extends AbstractStatement {
     }
 
     public SelectStatement clone(List<WhereClauseElement> whereClause){
-        return new SelectStatement(this.SQL, this.selectClause, this.fromClause, whereClause);
+        return new SelectStatement(this.SQL, this.selectClause, this.fromClause, whereClause, this.orderByClause);
     }
 
     public SelectStatement setParam(Object... params) {
         List<WhereClauseElement> whereClause_ = new ArrayList<>(this.whereClause.size());
         for (int i = 0; i < this.whereClause.size(); i++) {
-            whereClause_.add(
-                    this.whereClause.get(i).overwriteValue(params[i])
-            );
+            whereClause_.add(this.whereClause.get(i).overwriteValue(params[i]));
         }
-        return new SelectStatement(this.SQL, this.selectClause, this.groupBySelectClause,
-                this.fromClause, whereClause_, this.groupByClause);
+        return new SelectStatement(this.SQL, this.selectClause, this.groupBySelectClause, this.fromClause, whereClause_, this.groupByClause, this.orderByClause);
     }
 
 }

@@ -92,9 +92,18 @@ public final class QueryTree {
             pos = ((end + start) / 2);
             if(this.wherePredicates.get(pos-1).columnReference.columnPosition >
                     wherePredicate.columnReference.columnPosition){
-                end = pos; // it guarantees "end" is within bounds
+                if(end == pos){
+                    end = end - 1;
+                } else {
+                    // it guarantees "end" is within bounds
+                    end = pos;
+                }
             } else {
-                start = pos;// it guarantees "start" is within bounds
+                if(pos == start){
+                    start = pos + 1;
+                } else {
+                    start = pos;// it guarantees "start" is within bounds
+                }
             }
         } while(start != end);
         pos = start - 1;
@@ -111,6 +120,10 @@ public final class QueryTree {
      */
     public boolean isSimpleScan(){
         return this.isSingleTable() && this.joinPredicates.isEmpty() && this.groupByProjections.isEmpty() && this.orderByPredicates.isEmpty();
+    }
+
+    public boolean isSimpleScanWithOrder(){
+        return this.isSingleTable() && this.joinPredicates.isEmpty() && this.groupByProjections.isEmpty() && !this.orderByPredicates.isEmpty();
     }
 
     public boolean isSimpleAggregate(){

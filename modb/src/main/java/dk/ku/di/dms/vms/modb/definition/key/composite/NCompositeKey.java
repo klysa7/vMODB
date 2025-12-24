@@ -44,4 +44,9 @@ public final class NCompositeKey extends BaseComposite implements IKey, IIndexKe
                 + "}";
     }
 
+    @Override
+    public int size(){
+        return this.values.length;
+    }
+
 }

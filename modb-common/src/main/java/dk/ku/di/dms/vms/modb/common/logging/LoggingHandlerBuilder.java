@@ -8,16 +8,18 @@ import java.nio.channels.FileChannel;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
-import java.util.Date;
 
 public final class LoggingHandlerBuilder {
 
     public static ILoggingHandler build(String identifier) {
-        String fileName = identifier + "_" + new Date().getTime() +".llog";
+        String fileName = identifier + "_" + System.currentTimeMillis() +".llog";
         String userHome = ConfigUtils.getUserHome();
         String basePath = userHome + "/vms";
-        File theDir = new File(basePath);
-        assert theDir.exists() || theDir.mkdirs();
+        File file = new File(basePath);
+        boolean fileExists = file.exists() || file.mkdirs();
+        if(!fileExists){
+            throw new RuntimeException("It was not possible to create the file "+file);
+        }
         String filePath = basePath + "/" + fileName;
         Path path = Paths.get(filePath);
         FileChannel fileChannel;

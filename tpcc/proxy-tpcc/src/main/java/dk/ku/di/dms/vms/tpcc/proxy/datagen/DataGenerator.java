@@ -5,6 +5,7 @@ import dk.ku.di.dms.vms.tpcc.proxy.infra.TPCcConstants;
 
 import java.util.Date;
 import java.util.HashMap;
+import java.util.Map;
 
 import static dk.ku.di.dms.vms.tpcc.proxy.datagen.DataGenUtils.*;
 
@@ -20,39 +21,39 @@ public final class DataGenerator {
 
     public static Warehouse generateWarehouse(int W_ID)
     {
-        var W_NAME = makeAlphaString(6, 10);
-        var W_STREET_1 = makeAlphaString(10, 20);
-        var W_STREET_2 = makeAlphaString(10, 20);
-        var W_CITY = makeAlphaString(10, 20);
-        var W_STATE = makeAlphaString(2, 2);
-        var W_ZIP = makeAlphaString(9, 9);
-        var W_TAX = (float)((float) randomNumber(10, 20) / 100.0);
-        var W_YTD = 3000000.00;
+        String W_NAME = makeAlphaString(6, 10);
+        String W_STREET_1 = makeAlphaString(10, 20);
+        String W_STREET_2 = makeAlphaString(10, 20);
+        String W_CITY = makeAlphaString(10, 20);
+        String W_STATE = makeAlphaString(2, 2);
+        String W_ZIP = makeAlphaString(9, 9);
+        float W_TAX = (float)((float) randomNumber(10, 20) / 100.0);
+        float W_YTD = 3000000;
         return new Warehouse(W_ID, W_NAME, W_STREET_1, W_STREET_2, W_CITY, W_STATE, W_ZIP, W_TAX, W_YTD);
     }
 
     public static District generateDistrict(int D_ID, int D_W_ID)
     {
         String D_NAME = makeAlphaString(6, 10);
-        var D_STREET_1 = makeAlphaString(10, 20);
-        var D_STREET_2 = makeAlphaString(10, 20);
-        var D_CITY = makeAlphaString(10, 20);
-        var D_STATE = makeAlphaString(2, 2);
-        var D_ZIP = makeAlphaString(9, 9);
-        var D_TAX = (float) (((float) randomNumber(10, 20)) / 100.0);
-        var D_YTD = (float) 30000.0;
-        var D_NEXT_O_ID = 3001;
+        String D_STREET_1 = makeAlphaString(10, 20);
+        String D_STREET_2 = makeAlphaString(10, 20);
+        String D_CITY = makeAlphaString(10, 20);
+        String D_STATE = makeAlphaString(2, 2);
+        String D_ZIP = makeAlphaString(9, 9);
+        float D_TAX = (float) (((float) randomNumber(10, 20)) / 100.0);
+        float D_YTD = (float) 30000.0;
+        int D_NEXT_O_ID = 3001;
         return new District(D_ID, D_W_ID, D_NAME, D_STREET_1, D_STREET_2, D_CITY, D_STATE, D_ZIP, D_TAX, D_YTD, D_NEXT_O_ID);
     }
 
     public static Customer generateCustomer(int c_id, int c_d_id, int c_w_id) {
         String C_FIRST = makeAlphaString(8, 16);
-        String C_MIDDLE = "O" + "E";
+        String C_MIDDLE = "OE";
         String C_LAST;
         if (c_id <= 1000) {
             C_LAST = lastName(c_id - 1);
         } else {
-            C_LAST = lastName(nuRand(255, 0, 999));
+            C_LAST = lastName(nuRand(255, 157, 0, 999));
         }
 
         String C_STREET_1 = makeAlphaString(10, 20);
@@ -65,32 +66,30 @@ public final class DataGenerator {
 
         String C_CREDIT;
         if (randomNumber(0, 1) == 1)
-            C_CREDIT = "G";
+            C_CREDIT = "GC";
         else
-            C_CREDIT = "B";
-        C_CREDIT += "C";
+            C_CREDIT = "BC";
 
         int C_CREDIT_LIM = 50000;
         float C_DISCOUNT = (float) (((float) randomNumber(0, 50)) / 100.0);
-        float C_BALANCE =  (float) -10.0;
+        float C_BALANCE = (float) -10.0;
 
         int C_YTD_PAYMENT = 10;
         int C_PAYMENT_CNT = 1;
         int C_DELIVERY_CNT = 0;
         String C_DATA = makeAlphaString(300, 500);
 
-        return new Customer(c_id, c_d_id, c_w_id, C_FIRST, C_MIDDLE, C_LAST, C_STREET_1, C_STREET_2, C_CITY, C_STATE, C_ZIP,
-                C_PHONE, C_SINCE, C_CREDIT, C_CREDIT_LIM, C_DISCOUNT, C_BALANCE, C_YTD_PAYMENT, C_PAYMENT_CNT, C_DELIVERY_CNT, C_DATA);
+        return new Customer(c_id, c_d_id, c_w_id, C_FIRST, C_MIDDLE, C_LAST, C_STREET_1, C_STREET_2, C_CITY, C_STATE, C_ZIP, C_PHONE, C_SINCE, C_CREDIT, C_CREDIT_LIM, C_DISCOUNT, C_BALANCE, C_YTD_PAYMENT, C_PAYMENT_CNT, C_DELIVERY_CNT, C_DATA);
     }
 
     public static Stock generateStockItem(int w_id, int S_I_ID) {
-        var S_QUANTITY = randomNumber(10, 100);
-        var S_DIST = new HashMap<Integer, String>();
+        int S_QUANTITY = randomNumber(10, 100);
+        Map<Integer, String> S_DIST = new HashMap<>();
         for (int d = 1; d <= TPCcConstants.NUM_DIST_PER_WARE; d++) S_DIST.put(d, makeAlphaString(24, 24));
         int S_YTD = 0;
         int S_ORDER_CNT = 0;
         int S_REMOTE_CNT = 0;
-        var S_DATA = makeAlphaString(26, 50);
+        String S_DATA = makeAlphaString(26, 50);
         return new Stock(S_I_ID, w_id, S_QUANTITY, S_DIST, S_YTD, S_ORDER_CNT, S_REMOTE_CNT, S_DATA);
     }
 

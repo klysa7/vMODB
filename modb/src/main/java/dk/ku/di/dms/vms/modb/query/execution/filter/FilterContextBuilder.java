@@ -139,7 +139,7 @@ public class FilterContextBuilder {
         FilterContext filterContext = new FilterContext();
         filterContext.filterColumns = new ArrayList<>(size);
         filterContext.filterTypes = new ArrayList<>(size);
-        // bipredicates usually dominate the workload
+        // bi-predicates usually dominate the workload
         filterContext.biPredicates = new ArrayList<>(size);
         filterContext.biPredicateParams = new ArrayList<>(size);
         filterContext.predicates = new ArrayList<>();

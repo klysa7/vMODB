@@ -46,4 +46,9 @@ public final class QuadrupleCompositeKey extends BaseComposite implements IKey {
                 + "}";
     }
 
+    @Override
+    public int size(){
+        return 4;
+    }
+
 }

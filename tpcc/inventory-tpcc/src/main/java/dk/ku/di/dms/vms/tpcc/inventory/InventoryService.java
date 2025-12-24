@@ -44,6 +44,11 @@ public final class InventoryService {
             } else {
                 stock.s_quantity = stock.s_quantity - ol_quantity + 91;
             }
+            stock.s_ytd = stock.s_ytd + ol_quantity;
+            stock.s_order_cnt++;
+            if(stock.s_w_id != in.w_id){
+                stock.s_remote_cnt++;
+            }
             stockItemsToUpdate.add(i, stock);
         }
 

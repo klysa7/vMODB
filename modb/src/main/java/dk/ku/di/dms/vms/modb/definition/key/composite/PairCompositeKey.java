@@ -36,4 +36,9 @@ public final class PairCompositeKey extends BaseComposite implements IKey {
                 + "}";
     }
 
+    @Override
+    public int size(){
+        return 2;
+    }
+
 }

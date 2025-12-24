@@ -12,10 +12,6 @@ public final class DataGenUtils {
     private static final int arrmax = 61;  /* index of last array element */
     private static final Random generate = new Random();
 
-    private static final int C_255 = randomNumber(0, 255);
-    private static final int C_1023 = randomNumber(0, 1023);
-    private static final int C_8191 = randomNumber(0, 8191);
-
     /**
      * Based on <a href="https://github.com/AgilData/tpcc/blob/master/src/main/java/com/codefutures/tpcc/Util.java#L147">AgilData</a>
      * @param x Min length
@@ -46,32 +42,18 @@ public final class DataGenUtils {
         return min + div;
     }
 
+    private static final String[] n = {"BAR", "OUGHT", "ABLE", "PRI", "PRES", "ESE", "ANTI", "CALLY", "ATION", "EING"};
+
     /**
      * Based on <a href="https://github.com/AgilData/tpcc/blob/master/src/main/java/com/codefutures/tpcc/Util.java#L224">AgilData</a>
      * @param num Base number
      * @return A last name
      */
-    static String lastName(int num) {
-        String name;
-        String[] n =
-                {"BAR", "OUGHT", "ABLE", "PRI", "PRES",
-                        "ESE", "ANTI", "CALLY", "ATION", "EING"};
-        name = n[num / 100];
-        name = name + n[(num / 10) % 10];
-        name = name + n[num % 10];
-        return name;
+    public static String lastName(int num) {
+        return n[num / 100] + n[(num / 10) % 10] + n[num % 10];
     }
 
-    /**
-     * Based on <a href="https://github.com/AgilData/tpcc/blob/master/src/main/java/com/codefutures/tpcc/Util.java#L120">AgilData</a>
-     */
-    public static int nuRand(int A, int x, int y) {
-        int C = switch (A) {
-            case 255 -> C_255;
-            case 1023 -> C_1023;
-            case 8191 -> C_8191;
-            default -> throw new RuntimeException("NURand: unexpected value (%d) of A used\n" + A);
-        };
+    public static int nuRand(int A, int C, int x, int y) {
         return ((((randomNumber(0, A) | randomNumber(x, y)) + C) % (y - x + 1)) + x);
     }
 

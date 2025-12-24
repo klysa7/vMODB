@@ -52,7 +52,7 @@ public class EntityHandler<PK extends Serializable, T extends IEntity<PK>> {
                     entry.getValue().set(entity, object[i]);
                 } catch (ClassCastException e){
                     // has the entry come from raw index?
-                    if(this.schema.columnDataType(i) == DataType.ENUM && object[i] instanceof String objStr && !objStr.isEmpty() && !objStr.isBlank()){
+                    if(this.schema.columnDataType(i) == DataType.ENUM && object[i] instanceof String objStr && !objStr.isBlank()){
                         entry.getValue().set(entity, Enum.valueOf((Class)entry.getValue().varType(), objStr));
                     } else {
                         LOGGER.severe("Cannot cast column "+this.schema.columnName(i)+" for value "+object[i]);

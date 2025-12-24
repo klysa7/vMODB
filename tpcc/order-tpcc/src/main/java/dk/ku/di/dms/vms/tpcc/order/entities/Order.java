@@ -20,9 +20,9 @@ public final class Order implements IEntity<Order.OrderId> {
         public int o_d_id;
         public int o_w_id;
         public OrderId(int o_id, int o_d_id, int o_w_id) {
-            this.o_w_id = o_w_id;
-            this.o_d_id = o_d_id;
             this.o_id = o_id;
+            this.o_d_id = o_d_id;
+            this.o_w_id = o_w_id;
         }
     }
 
@@ -30,14 +30,12 @@ public final class Order implements IEntity<Order.OrderId> {
     public int o_id;
 
     @Id
-    //@VmsForeignKey(table= Customer.class, column = "c_d_id")
     public int o_d_id;
 
     @Id
-    //@VmsForeignKey(table=Customer.class, column = "c_w_id")
     public int o_w_id;
 
-    //@VmsForeignKey(table=Customer.class, column = "c_id")
+    @Column
     public int o_c_id;
 
     @Column
