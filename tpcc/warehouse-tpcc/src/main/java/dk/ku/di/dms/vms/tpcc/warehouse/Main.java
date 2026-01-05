@@ -22,12 +22,14 @@ public final class Main {
                         "dk.ku.di.dms.vms.tpcc.warehouse",
                         "dk.ku.di.dms.vms.tpcc.common"
                 });
-        return VmsApplication.build(options,
+        VmsApplication vmsApplication = VmsApplication.build(options,
                 (x,y) -> new WarehouseHttpHandler(x,
                         (IWarehouseRepository) y.apply("warehouse"),
                         (IDistrictRepository) y.apply("district"),
                         (ICustomerRepository) y.apply("customer")
                 ));
+        System.out.println(vmsApplication.internalChannels());
+        return vmsApplication;
     }
 
 }

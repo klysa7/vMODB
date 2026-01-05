@@ -20,6 +20,9 @@ public final class Main {
                         "dk.ku.di.dms.vms.tpcc.order",
                         "dk.ku.di.dms.vms.tpcc.common"
                 });
-        return VmsApplication.build(options, (x,y) -> new OrderHttpHandler(x, (IOrderRepository) y.apply("order")));
+        VmsApplication vmsApplication = VmsApplication.build(options, (x,y) -> new OrderHttpHandler(x, (IOrderRepository) y.apply("order")));
+
+        System.out.println(vmsApplication.internalChannels());
+        return vmsApplication;
     }
 }
