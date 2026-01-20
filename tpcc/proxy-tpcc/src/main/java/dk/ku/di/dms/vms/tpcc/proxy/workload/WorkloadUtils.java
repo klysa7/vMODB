@@ -189,7 +189,8 @@ public final class WorkloadUtils {
             if(sent){
                 try {
                     LOGGER.log(INFO,"Worker run (Thread ID) " + threadId + " will wait for the end of the experiment duration.");
-                    Thread.sleep(runTime - (System.currentTimeMillis() - initTs));
+                    long remaining = runTime - (System.currentTimeMillis() - initTs);
+                    if (remaining > 0) Thread.sleep(remaining);
                 } catch (InterruptedException _) { }
             }
 

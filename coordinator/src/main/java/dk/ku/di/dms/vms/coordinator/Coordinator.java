@@ -3,6 +3,9 @@ package dk.ku.di.dms.vms.coordinator;
 import dk.ku.di.dms.vms.coordinator.batch.BatchAlgo;
 import dk.ku.di.dms.vms.coordinator.batch.BatchContext;
 import dk.ku.di.dms.vms.coordinator.election.schema.LeaderRequest;
+import dk.ku.di.dms.vms.coordinator.internal.CoordinatorInternalApi;
+import dk.ku.di.dms.vms.coordinator.olap.queryPlanner.catalog.CoordinatorCatalog;
+import dk.ku.di.dms.vms.coordinator.olap.queryPlanner.catalog.CoordinatorCatalogBuilder;
 import dk.ku.di.dms.vms.coordinator.options.CoordinatorOptions;
 import dk.ku.di.dms.vms.coordinator.options.VmsWorkerOptions;
 import dk.ku.di.dms.vms.coordinator.transaction.TransactionDAG;
@@ -60,7 +63,9 @@ import static java.lang.System.Logger.Level.*;
 public final class Coordinator extends ModbHttpServer {
 
     private static final System.Logger LOGGER = System.getLogger(Coordinator.class.getName());
-    
+
+    private volatile CoordinatorCatalog catalog;
+
     private final CoordinatorOptions options;
 
     // this server socket
@@ -126,6 +131,7 @@ public final class Coordinator extends ModbHttpServer {
     public static Coordinator build(Properties properties, Map<String, IdentifiableNode> startersVMSs,
                                     Map<String, TransactionDAG> transactionMap, Function<Coordinator, IHttpHandler> httpHandlerSupplier){
 
+        System.out.println("COORDINATOR_BUILD_A543543BC123");
         int tcpPort = Integer.parseInt( properties.getProperty("tcp_port") );
         ServerNode serverIdentifier = new ServerNode( "0.0.0.0", tcpPort );
 
@@ -294,12 +300,20 @@ public final class Coordinator extends ModbHttpServer {
      */
     @Override
     public void run() {
+        System.out.println("allasdjf  here are the vmses? values" + vmsMetadataMap.size());
+        //todo
         // setup asynchronous listener for new connections
         this.serverSocket.accept(null, new AcceptCompletionHandler());
         // connect to all virtual microservices
         this.setupStarterVMSs();
         this.preprocessDAGs();
         this.setUpTransactionWorkers();
+        try {
+            this.coordinatorInternalApi();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+
 
         // event loop
         try {
@@ -316,6 +330,10 @@ public final class Coordinator extends ModbHttpServer {
 
         this.close();
         LOGGER.log(INFO,"Leader: Finished execution.");
+    }
+
+    private void coordinatorInternalApi() throws Exception {
+        CoordinatorInternalApi.start(this.catalog, "0.0.0.0", 8079);
     }
 
     private Map<String, TransactionWorker.PrecedenceInfo> buildStarterPrecedenceMap() {
@@ -477,7 +495,7 @@ public final class Coordinator extends ModbHttpServer {
      * No need to track the thread created because they will be
      * later mapped to the respective vms identifier by the thread
      */
-    private void setupStarterVMSs() {
+    private void setupStarterVMSs(){
         var inputsVMSs = new HashSet<String>();
         for(var entry : this.transactionMap.entrySet()){
             for(var input : entry.getValue().inputEvents.entrySet()){
@@ -515,7 +533,9 @@ public final class Coordinator extends ModbHttpServer {
             throw new RuntimeException(e);
         }
         this.waitForAllStarterVMSs();
+        this.catalog = new CoordinatorCatalogBuilder().buildFromVmsMetadata(this.vmsMetadataMap);
     }
+
 
     /**
      * Match output of a vms with the input of another
@@ -532,6 +552,9 @@ public final class Coordinator extends ModbHttpServer {
         }
         // assumed to be terminal? maybe yes.
         // vms is already connected to leader, no need to return coordinator
+        System.out.println("first " + list.getFirst());
+        System.out.println("last" + list.getLast());
+//        System.out.println("third" + list.get(2));
         return list;
     }
 
@@ -858,6 +881,8 @@ public final class Coordinator extends ModbHttpServer {
      * Only send to non-terminals
      */
     private void sendCommitCommandToVMSs(BatchContext batchContext){
+        Long snapshotId = batchContext.batchOffset;
+        System.out.println("the snapfdgdgshotId is " + snapshotId);
         for(VmsNode vms : this.vmsMetadataMap.values()){
             if(batchContext.terminalVMSs.contains(vms.identifier)) {
                 LOGGER.log(DEBUG,"Leader: Batch ("+batchContext.batchOffset+") commit command not sent to "+ vms.identifier + " (terminal)");
@@ -884,9 +909,12 @@ public final class Coordinator extends ModbHttpServer {
             }
              */
         }
+        this.catalog.setSnapshotId(batchContext.batchOffset);
         //TODO here i can take the snapshotId probably from the coordinator
         //just to make sure that the git works fine
-        Long snapshotId = batchContext.batchOffset;
+        Long snapshotId2 = batchContext.batchOffset;
+        System.out.println("the snapshfgfgotId is from catalog : " + catalog.getSnapshotId());
+        System.out.println("the snapshfgfgotId is from teh variable: " + snapshotId2);
     }
 
     public long getNumTIDsCommitted() {

@@ -20,6 +20,7 @@
     <maven.compiler.source>21</maven.compiler.source>
     <maven.compiler.target>21</maven.compiler.target>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <calcite.version>1.37.0</calcite.version>
   </properties>
 
   <dependencies>
@@ -28,6 +29,11 @@
       <groupId>dk.ku.di.dms.vms</groupId>
       <artifactId>web_common</artifactId>
       <version>1.0-SNAPSHOT</version>
+    </dependency>
+    <dependency>
+      <groupId>dk.ku.di.dms.vms</groupId>
+      <artifactId>calcite</artifactId>
+      <version>${project.version}</version>
     </dependency>
 
   </dependencies>

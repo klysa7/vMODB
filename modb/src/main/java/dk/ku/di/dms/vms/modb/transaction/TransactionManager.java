@@ -41,7 +41,7 @@ import static java.lang.System.Logger.Level.WARNING;
  * Repository facade parses the request. Transaction facade deals with low-level operations
  * Batch-commit aware. That means when a batch comes, must make data durable.
  * in order to accommodate two or more VMSs in the same resource,
- *  it would need to make this class an instance (no static methods) and put it into modb modules
+ * it would need to make this class an instance (no static methods) and put it into modb modules
  */
 public final class TransactionManager implements OperationalAPI, ITransactionManager {
 
@@ -63,7 +63,7 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
 
     private final boolean checkpointing;
 
-    public TransactionManager(Map<String, Table> catalog, boolean checkpointing){
+    public TransactionManager(Map<String, Table> catalog, boolean checkpointing) {
         this.planner = new SimplePlanner();
         this.analyzer = new Analyzer(catalog);
         this.catalog = catalog;
@@ -72,9 +72,9 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
         this.txCtxMap = new ConcurrentHashMap<>();
     }
 
-    private boolean fkConstraintViolation(TransactionContext txCtx, Table table, Object[] values){
-        for(Map.Entry<PrimaryIndex, int[]> entry : table.foreignKeys().entrySet()){
-            IKey fk = KeyUtils.buildRecordKey( entry.getValue(), values );
+    private boolean fkConstraintViolation(TransactionContext txCtx, Table table, Object[] values) {
+        for (Map.Entry<PrimaryIndex, int[]> entry : table.foreignKeys().entrySet()) {
+            IKey fk = KeyUtils.buildRecordKey(entry.getValue(), values);
             // have some previous TID deleted it? or simply not exists
             return !entry.getKey().exists(txCtx, fk);
         }
@@ -82,69 +82,197 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
     }
 
     @Override
-    public List<Object[]> fetch(final Table table, final SelectStatement selectStatement){
+    public List<Object[]> fetch(final Table table, final SelectStatement selectStatement) {
+        LOGGER.log(INFO, "I ENTERED THE BEGIN TRANSACTION WITH IDENTIFIER " + selectStatement.SQL.toString() + " and the table is " + table.name);
         String sqlAsKey = selectStatement.SQL.toString();
         AbstractSimpleOperator scanOperator = this.queryPlanCacheMap.computeIfAbsent(sqlAsKey,
                 (ignored) -> {
                     QueryTree queryTree = this.analyzer.analyze(selectStatement);
+                    LOGGER.log(INFO, "I ENTERED THE queryTree WITH IDENTIFIER " + queryTree.toString());
                     return this.planner.plan(queryTree);
                 });
+        LOGGER.log(INFO, "I ENTERED THE scanOperator WITH IDENTIFIER " + scanOperator.toString());
         List<WherePredicate> wherePredicates;
-        if(!selectStatement.whereClause.isEmpty()) {
+        if (!selectStatement.whereClause.isEmpty()) {
             wherePredicates = this.analyzer.analyzeWhere(table, selectStatement.whereClause);
         } else {
             wherePredicates = Collections.emptyList();
         }
-        if(scanOperator.isIndexScan()){
-            if(wherePredicates.get(0).expression == ExpressionTypeEnum.EQUALS) {
-                IKey key = this.getIndexedKeysFromWhereClause(wherePredicates, scanOperator.asIndexScan().index());
-                if(wherePredicates.size() == key.size()) {
-                    return scanOperator.asIndexScan().runAsEmbedded(this.txCtxMap.get(Thread.currentThread().threadId()), key);
+        LOGGER.log(INFO,
+                """
+                        BEGIN TRANSACTION
+                          SQL              = %s
+                          TABLE            = %s
+                          THREAD_ID        = %d
+                          WHERE_PRED_COUNT = %d
+                          WHERE_PREDICATES = %s
+                        """.formatted(
+                        selectStatement.SQL.toString(),
+                        table.name,
+                        Thread.currentThread().threadId(),
+                        wherePredicates == null ? -1 : wherePredicates.size(),
+                        wherePredicates
+                )
+        );
+        if (scanOperator.isIndexScan()) {
+
+            LOGGER.log(INFO, "BRANCH: isIndexScan == true");
+
+            ExpressionTypeEnum expr = wherePredicates.get(0).expression;
+            LOGGER.log(INFO,
+                    """
+                            IndexScan details:
+                              firstExpression      = %s
+                              wherePredicates.size = %d
+                            """.formatted(expr, wherePredicates.size())
+            );
+
+            if (expr == ExpressionTypeEnum.EQUALS) {
+
+                LOGGER.log(INFO, "IndexScan: expression == EQUALS");
+
+                IKey key = this.getIndexedKeysFromWhereClause(
+                        wherePredicates,
+                        scanOperator.asIndexScan().index()
+                );
+
+                LOGGER.log(INFO,
+                        """
+                                IndexScan EQUALS:
+                                  key.size            = %d
+                                  wherePredicates.size= %d
+                                  key                 = %s
+                                """.formatted(
+                                key.size(),
+                                wherePredicates.size(),
+                                key
+                        )
+                );
+
+                if (wherePredicates.size() == key.size()) {
+                    LOGGER.log(INFO, "IndexScan path: FULL INDEX HIT");
+                    return scanOperator.asIndexScan()
+                            .runAsEmbedded(this.txCtxMap.get(Thread.currentThread().threadId()), key);
                 } else {
-                    List<WherePredicate> nonIdxClause = this.getNonIndexedColumnsWhereClause(wherePredicates, scanOperator.asIndexScan().index());
+                    LOGGER.log(INFO, "IndexScan path: PARTIAL INDEX + FILTER");
+
+                    List<WherePredicate> nonIdxClause =
+                            this.getNonIndexedColumnsWhereClause(
+                                    wherePredicates,
+                                    scanOperator.asIndexScan().index()
+                            );
+
+                    LOGGER.log(INFO, "Non-index predicates = " + nonIdxClause);
+
                     FilterContext filterContext = FilterContextBuilder.build(nonIdxClause);
-                    return scanOperator.asIndexScan().runAsEmbedded(this.txCtxMap.get(Thread.currentThread().threadId()), key, filterContext);
+
+                    return scanOperator.asIndexScan()
+                            .runAsEmbedded(
+                                    this.txCtxMap.get(Thread.currentThread().threadId()),
+                                    key,
+                                    filterContext
+                            );
                 }
+
             } else {
-                // can only be IN
+                LOGGER.log(INFO, "IndexScan: expression != EQUALS (assumed IN)");
+
                 IKey[] keys = this.getMultiKeysFromWhereClause(wherePredicates.get(0));
-                return scanOperator.asIndexScan().runAsEmbedded(this.txCtxMap.get(Thread.currentThread().threadId()), keys);
+
+                LOGGER.log(INFO,
+                        """
+                                IndexScan IN:
+                                  keys.length = %d
+                                  keys        = %s
+                                """.formatted(keys.length, Arrays.toString(keys))
+                );
+
+                return scanOperator.asIndexScan()
+                        .runAsEmbedded(this.txCtxMap.get(Thread.currentThread().threadId()), keys);
             }
-        } else if(scanOperator.isIndexScanWithOrder()) {
-            IKey key = this.getIndexedKeysFromWhereClause(wherePredicates, scanOperator.asIndexScanWithOrder().index());
-            if(wherePredicates.size() == key.size()) {
-                return scanOperator.asIndexScanWithOrder().runAsEmbedded(this.txCtxMap.get(Thread.currentThread().threadId()), key);
+        } else if (scanOperator.isIndexScanWithOrder()) {
+            LOGGER.log(INFO, "BRANCH: isIndexScanWithOrder == true");
+
+            IKey key = this.getIndexedKeysFromWhereClause(
+                    wherePredicates,
+                    scanOperator.asIndexScanWithOrder().index()
+            );
+
+            LOGGER.log(INFO,
+                    "IndexScanWithOrder: key.size=%d wherePredicates.size=%d"
+                            .formatted(key.size(), wherePredicates.size())
+            );
+
+            if (wherePredicates.size() == key.size()) {
+                LOGGER.log(INFO, "IndexScanWithOrder: FULL INDEX");
+                return scanOperator.asIndexScanWithOrder()
+                        .runAsEmbedded(this.txCtxMap.get(Thread.currentThread().threadId()), key);
             } else {
-                List<WherePredicate> nonIdxClause = this.getNonIndexedColumnsWhereClause(wherePredicates, scanOperator.asIndexScanWithOrder().index());
+                LOGGER.log(INFO, "IndexScanWithOrder: PARTIAL INDEX + FILTER");
+                List<WherePredicate> nonIdxClause =
+                        this.getNonIndexedColumnsWhereClause(
+                                wherePredicates,
+                                scanOperator.asIndexScanWithOrder().index()
+                        );
+
+                LOGGER.log(INFO, "Non-index predicates = " + nonIdxClause);
+
                 FilterContext filterContext = FilterContextBuilder.build(nonIdxClause);
-                return scanOperator.asIndexScanWithOrder().runAsEmbedded(this.txCtxMap.get(Thread.currentThread().threadId()), key, filterContext);
+                return scanOperator.asIndexScanWithOrder()
+                        .runAsEmbedded(
+                                this.txCtxMap.get(Thread.currentThread().threadId()),
+                                key,
+                                filterContext
+                        );
             }
-        } else if(scanOperator.isFullScanWithOrder()){
+        } else if (scanOperator.isFullScanWithOrder()) {
+            LOGGER.log(INFO, "BRANCH: isFullScanWithOrder == true");
+
             FilterContext filterContext = FilterContextBuilder.build(wherePredicates);
-            return scanOperator.asFullScanWithOrder().runAsEmbedded(this.txCtxMap.get(Thread.currentThread().threadId()), filterContext);
-        } else if(scanOperator.isIndexAggregationScan()){
-            return scanOperator.asIndexAggregationScan().runAsEmbedded(this.txCtxMap.get(Thread.currentThread().threadId()));
-        } else if(scanOperator.isIndexMultiAggregationScan()){
-            IKey key = this.getIndexedKeysFromWhereClause(wherePredicates, scanOperator.asIndexMultiAggregationScan().index());
-            return scanOperator.asIndexMultiAggregationScan().runAsEmbedded(this.txCtxMap.get(Thread.currentThread().threadId()), key);
+            LOGGER.log(INFO, "FullScanWithOrder filterContext=" + filterContext);
+
+            return scanOperator.asFullScanWithOrder()
+                    .runAsEmbedded(this.txCtxMap.get(Thread.currentThread().threadId()), filterContext);
+        } else if (scanOperator.isIndexAggregationScan()) {
+            LOGGER.log(INFO, "BRANCH: isIndexAggregationScan == true");
+
+            return scanOperator.asIndexAggregationScan()
+                    .runAsEmbedded(this.txCtxMap.get(Thread.currentThread().threadId()));
+        } else if (scanOperator.isIndexMultiAggregationScan()) {
+            LOGGER.log(INFO, "BRANCH: isIndexMultiAggregationScan == true");
+
+            IKey key = this.getIndexedKeysFromWhereClause(
+                    wherePredicates,
+                    scanOperator.asIndexMultiAggregationScan().index()
+            );
+
+            LOGGER.log(INFO, "IndexMultiAggregationScan key=" + key);
+
+            return scanOperator.asIndexMultiAggregationScan()
+                    .runAsEmbedded(this.txCtxMap.get(Thread.currentThread().threadId()), key);
         } else {
-            // future optimization is filter not including the columns of partial or non-unique index
+            LOGGER.log(INFO, "BRANCH: FULL SCAN (fallback)");
+
             FilterContext filterContext = FilterContextBuilder.build(wherePredicates);
-            return scanOperator.asFullScan().runAsEmbedded(this.txCtxMap.get(Thread.currentThread().threadId()), filterContext);
+            LOGGER.log(INFO, "FullScan filterContext=" + filterContext);
+
+            return scanOperator.asFullScan()
+                    .runAsEmbedded(this.txCtxMap.get(Thread.currentThread().threadId()), filterContext);
         }
     }
 
     /**
      * Best guess return type. Differently from the parameter type received.
+     *
      * @param selectStatement a select statement
      * @return the query result in a memory space
      */
     @Override
     public MemoryRefNode fetchMemoryReference(Table table, SelectStatement selectStatement) {
         String sqlAsKey = selectStatement.SQL.toString();
-        AbstractSimpleOperator scanOperator = this.queryPlanCacheMap.getOrDefault( sqlAsKey, null );
+        AbstractSimpleOperator scanOperator = this.queryPlanCacheMap.getOrDefault(sqlAsKey, null);
         List<WherePredicate> wherePredicates;
-        if(scanOperator == null){
+        if (scanOperator == null) {
             QueryTree queryTree = this.analyzer.analyze(selectStatement);
             wherePredicates = queryTree.wherePredicates;
             scanOperator = this.planner.plan(queryTree);
@@ -156,10 +284,10 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
         MemoryRefNode memRes;
         // complete for all types or migrate the choice to transaction facade
         // make an enum, it is easier
-        if(scanOperator.isIndexScan()){
+        if (scanOperator.isIndexScan()) {
             // build keys and filters
             memRes = this.run(wherePredicates, scanOperator.asIndexScan());
-        } else if(scanOperator.isIndexAggregationScan()){
+        } else if (scanOperator.isIndexAggregationScan()) {
             memRes = this.run(wherePredicates, scanOperator.asIndexAggregationScan());
         } else {
             // build only filters
@@ -172,7 +300,7 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
      * finish at some point. can we extract the column values and make a special api for the facade? only if it is a single key
      */
     public void issue(Table table, IStatement statement) throws AnalyzerException {
-        switch (statement.getType()){
+        switch (statement.getType()) {
             case UPDATE -> {
                 List<WherePredicate> wherePredicates = this.analyzer.analyzeWhere(
                         table, statement.asUpdateStatement().whereClause);
@@ -183,7 +311,8 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
             case INSERT -> {
                 // TODO get columns, put object array in order and submit to entity api
             }
-            case DELETE -> { }
+            case DELETE -> {
+            }
             default -> throw new IllegalStateException("Statement type cannot be identified.");
         }
     }
@@ -191,20 +320,20 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
     /****** ENTITY *******/
 
     @Override
-    public List<Object[]> getAll(Table table){
+    public List<Object[]> getAll(Table table) {
         List<Object[]> res = new ArrayList<>();
         Iterator<Object[]> iterator = table.primaryKeyIndex().iterator(this.txCtxMap.get(Thread.currentThread().threadId()));
-        while(iterator.hasNext()){
+        while (iterator.hasNext()) {
             res.add(iterator.next());
         }
         return res;
     }
 
     @Override
-    public void insertAll(Table table, List<Object[]> objects){
+    public void insertAll(Table table, List<Object[]> objects) {
         // get tid, do all the checks, etc
         TransactionContext txCtx = this.txCtxMap.get(Thread.currentThread().threadId());
-        for(Object[] entry : objects) {
+        for (Object[] entry : objects) {
             this.doInsert(txCtx, table, entry);
         }
     }
@@ -212,7 +341,7 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
     @Override
     public void deleteAll(Table table, List<Object[]> objects) {
         TransactionContext txCtx = this.txCtxMap.get(Thread.currentThread().threadId());
-        for(Object[] entry : objects) {
+        for (Object[] entry : objects) {
             IKey pk = KeyUtils.buildRecordKey(table.schema().getPrimaryKeyColumns(), entry);
             this.deleteByKey(txCtx, table, pk);
         }
@@ -221,7 +350,7 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
     @Override
     public void updateAll(Table table, List<Object[]> objects) {
         TransactionContext txCtx = this.txCtxMap.get(Thread.currentThread().threadId());
-        for(Object[] entry : objects) {
+        for (Object[] entry : objects) {
             this.update(txCtx, table, entry);
         }
     }
@@ -244,20 +373,20 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
 
     /**
      * @param table The corresponding table
-     * @param pk The primary key
+     * @param pk    The primary key
      */
-    private void deleteByKey(TransactionContext txCtx, Table table, IKey pk){
+    private void deleteByKey(TransactionContext txCtx, Table table, IKey pk) {
         Optional<Object[]> opt = table.primaryKeyIndex().removeOpt(txCtx, pk);
-        if(opt.isPresent()){
+        if (opt.isPresent()) {
             txCtx.indexes.add(table.primaryKeyIndex());
             for (NonUniqueSecondaryIndex secIndex : table.secondaryIndexMap.values()) {
                 txCtx.indexes.add(secIndex);
                 secIndex.remove(txCtx, pk, opt.get());
             }
-            for(var entry : table.partialIndexMap.entrySet()){
+            for (var entry : table.partialIndexMap.entrySet()) {
                 // does the record "fits" the partial index?
-                Tuple<Integer, Object> check = table.partialIndexMetaMap.get( entry.getKey() );
-                if (table.primaryKeyIndex().meetPartialIndex(opt.get(), check.t1(), check.t2() )){
+                Tuple<Integer, Object> check = table.partialIndexMetaMap.get(entry.getKey());
+                if (table.primaryKeyIndex().meetPartialIndex(opt.get(), check.t1(), check.t2())) {
                     txCtx.indexes.add(entry.getValue());
                     entry.getValue().remove(txCtx, pk);
                 }
@@ -266,34 +395,34 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
     }
 
     @Override
-    public boolean exists(PrimaryIndex index, Object[] valuesOfKey){
+    public boolean exists(PrimaryIndex index, Object[] valuesOfKey) {
         IKey pk = KeyUtils.buildRecordKey(index.underlyingIndex().schema().getPrimaryKeyColumns(), valuesOfKey);
         return index.exists(this.txCtxMap.get(Thread.currentThread().threadId()), pk);
     }
 
     @Override
-    public Object[] lookupByKey(PrimaryIndex index, Object[] valuesOfKey){
+    public Object[] lookupByKey(PrimaryIndex index, Object[] valuesOfKey) {
         IKey pk = KeyUtils.buildRecordKey(index.underlyingIndex().schema().getPrimaryKeyColumns(), valuesOfKey);
         return index.lookupByKey(this.txCtxMap.get(Thread.currentThread().threadId()), pk);
     }
 
     /**
-     * @param table The corresponding database table
+     * @param table  The corresponding database table
      * @param values The fields extracted from the entity
      */
     @Override
-    public void insert(Table table, Object[] values){
+    public void insert(Table table, Object[] values) {
         this.doInsert(this.txCtxMap.get(Thread.currentThread().threadId()), table, values);
     }
 
     private Object[] doInsert(TransactionContext txCtx, Table table, Object[] values) {
         PrimaryIndex primaryIndex = table.primaryKeyIndex();
-        if(this.fkConstraintViolation(txCtx, table, values)){
+        if (this.fkConstraintViolation(txCtx, table, values)) {
             this.undoTransactionWrites(txCtx);
             throw new RuntimeException("Foreign key constraint violation in table " + table.getName());
         }
         IKey pk = primaryIndex.insertAndGetKey(txCtx, values);
-        if(pk == null) {
+        if (pk == null) {
             this.undoTransactionWrites(txCtx);
             throw new RuntimeException("Constraint violation in table " + table.getName() + ". Record:\n" + Arrays.stream(values).toList());
         }
@@ -309,10 +438,10 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
             txCtx.indexes.add(secIndex);
             secIndex.insert(txCtx, pk, values);
         }
-        for(var entry : table.partialIndexMap.entrySet()){
+        for (var entry : table.partialIndexMap.entrySet()) {
             // does the record "fits" the partial index?
-            Tuple<Integer, Object> check = table.partialIndexMetaMap.get( entry.getKey() );
-            if (primaryIndex.meetPartialIndex(values, check.t1(), check.t2() )){
+            Tuple<Integer, Object> check = table.partialIndexMetaMap.get(entry.getKey());
+            if (primaryIndex.meetPartialIndex(values, check.t1(), check.t2())) {
                 txCtx.indexes.add(entry.getValue());
                 entry.getValue().insert(txCtx, pk, values);
             }
@@ -320,16 +449,16 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
     }
 
     @Override
-    public Object[] insertAndGet(Table table, Object[] values){
+    public Object[] insertAndGet(Table table, Object[] values) {
         return this.doInsert(this.txCtxMap.get(Thread.currentThread().threadId()), table, values);
     }
 
     @Override
-    public void upsert(Table table, Object[] values){
+    public void upsert(Table table, Object[] values) {
         PrimaryIndex primaryIndex = table.primaryKeyIndex();
         IKey pk = KeyUtils.buildRecordKey(primaryIndex.underlyingIndex().schema().getPrimaryKeyColumns(), values);
         TransactionContext txCtx = this.txCtxMap.get(Thread.currentThread().threadId());
-        if(primaryIndex.upsert(txCtx, pk, values)) {
+        if (primaryIndex.upsert(txCtx, pk, values)) {
             // FIXME must check if it is insert to insert in the secondary indexes
             //  update may also lead to changes in the secondary index (e.g., a column that requires readdressing)
             trackIndexes(txCtx, table, values, primaryIndex, pk);
@@ -348,16 +477,16 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
      * Iterate over all indexes, get the corresponding writes of this tid and remove them
      * This method can be called in parallel by transaction facade without any risk
      */
-    private void update(TransactionContext txCtx, Table table, Object[] values){
+    private void update(TransactionContext txCtx, Table table, Object[] values) {
         PrimaryIndex index = table.primaryKeyIndex();
         IKey pk = KeyUtils.buildRecordKey(index.underlyingIndex().schema().getPrimaryKeyColumns(), values);
-        if(!index.update(txCtx, pk, values)){
+        if (!index.update(txCtx, pk, values)) {
             this.undoTransactionWrites(txCtx);
-            throw new RuntimeException("Primary key constraint violation. Table: "+table.getName()+" Key: "+pk);
+            throw new RuntimeException("Primary key constraint violation. Table: " + table.getName() + " Key: " + pk);
         }
-        if(this.fkConstraintViolation(txCtx, table, values)){
+        if (this.fkConstraintViolation(txCtx, table, values)) {
             this.undoTransactionWrites(txCtx);
-            throw new RuntimeException("Foreign key constraint violation. Table: "+table.getName()+" Key: "+pk);
+            throw new RuntimeException("Foreign key constraint violation. Table: " + table.getName() + " Key: " + pk);
         }
         txCtx.indexes.add(index);
     }
@@ -366,8 +495,8 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
      * how can I do that more optimized? creating another interface so secondary indexes also have the #undoTransactionWrites ?
      * INDEX_WRITES can have primary indexes and secondary indexes...
      */
-    private void undoTransactionWrites(TransactionContext txCtx){
-        for(IMultiVersionIndex index : txCtx.indexes) {
+    private void undoTransactionWrites(TransactionContext txCtx) {
+        for (IMultiVersionIndex index : txCtx.indexes) {
             index.undoTransactionWrites(txCtx);
         }
     }
@@ -379,24 +508,24 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
      * disaggregate the index choice, limit, aka query details, from the operator
      */
     public MemoryRefNode run(List<WherePredicate> wherePredicates,
-                             IndexAggregateScan operator){
+                             IndexAggregateScan operator) {
         return null; // operator.run();
     }
 
-    private IKey[] getMultiKeysFromWhereClause(WherePredicate wherePredicate){
-        if(wherePredicate.value instanceof int[] intArray){
+    private IKey[] getMultiKeysFromWhereClause(WherePredicate wherePredicate) {
+        if (wherePredicate.value instanceof int[] intArray) {
             SimpleKey[] keysToRet = new SimpleKey[intArray.length];
             int idx = 0;
-            for(var key : intArray){
-               keysToRet[idx] = SimpleKey.of(key);
-               idx++;
+            for (var key : intArray) {
+                keysToRet[idx] = SimpleKey.of(key);
+                idx++;
             }
             return keysToRet;
         }
         throw new RuntimeException("Do not support IN clause of types other than INT");
     }
 
-    private IKey getIndexedKeysFromWhereClause(List<WherePredicate> wherePredicates, IMultiVersionIndex index){
+    private IKey getIndexedKeysFromWhereClause(List<WherePredicate> wherePredicates, IMultiVersionIndex index) {
         int i = 0;
         Object[] keyList = new Object[index.indexColumns().length];
         // build index key for only those columns in the selected index
@@ -409,7 +538,7 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
         return KeyUtils.buildRecordKey(keyList);
     }
 
-    private List<WherePredicate> getNonIndexedColumnsWhereClause(List<WherePredicate> wherePredicates, IMultiVersionIndex index){
+    private List<WherePredicate> getNonIndexedColumnsWhereClause(List<WherePredicate> wherePredicates, IMultiVersionIndex index) {
         List<WherePredicate> nonIdxWhereClause = new ArrayList<>();
         // build filters for only those columns not in selected index
         for (WherePredicate wherePredicate : wherePredicates) {
@@ -423,7 +552,7 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
     }
 
     public MemoryRefNode run(List<WherePredicate> wherePredicates,
-                             IndexScan operator){
+                             IndexScan operator) {
         /* COMMENTED FOR NOW
         int i = 0;
         Object[] keyList = new Object[operator.index.columns().length];
@@ -455,7 +584,7 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
 
     public MemoryRefNode run(Table table,
                              List<WherePredicate> wherePredicates,
-                             FullScan operator){
+                             FullScan operator) {
         FilterContext filterContext = FilterContextBuilder.build(wherePredicates);
         return null; //operator.run( table.underlyingPrimaryKeyIndex(), filterContext );
     }
@@ -466,25 +595,25 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
      * TIDs are not necessarily a sequence.
      */
     @Override
-    public void checkpoint(long maxTid){
-        LOGGER.log(INFO, "Checkpoint for max TID "+maxTid+" started at "+System.currentTimeMillis());
-        if(this.checkpointing) {
+    public void checkpoint(long maxTid) {
+        LOGGER.log(INFO, "Checkpoint for max TID " + maxTid + " started at " + System.currentTimeMillis());
+        if (this.checkpointing) {
             for (Table table : this.catalog.values()) {
-                LOGGER.log(INFO, "Checkpointing table "+table.getName());
+                LOGGER.log(INFO, "Checkpointing table " + table.getName());
                 int numRecords = table.primaryKeyIndex().checkpoint(maxTid);
-                if(numRecords > 0) {
-                    LOGGER.log(INFO, "Persisted "+numRecords+" records in table "+table.getName());
+                if (numRecords > 0) {
+                    LOGGER.log(INFO, "Persisted " + numRecords + " records in table " + table.getName());
                 } else {
-                    LOGGER.log(WARNING, "No records have been flushed to table "+table.getName());
+                    LOGGER.log(WARNING, "No records have been flushed to table " + table.getName());
                 }
             }
         } else {
-            LOGGER.log(INFO, "Checkpoint disabled. Starting only garbage collection for max TID "+maxTid);
+            LOGGER.log(INFO, "Checkpoint disabled. Starting only garbage collection for max TID " + maxTid);
             for (Table table : this.catalog.values()) {
                 table.primaryKeyIndex().garbageCollection(maxTid);
             }
         }
-        LOGGER.log(INFO, "Checkpoint for max TID "+maxTid+" finished at "+System.currentTimeMillis());
+        LOGGER.log(INFO, "Checkpoint for max TID " + maxTid + " finished at " + System.currentTimeMillis());
     }
 
     /**
@@ -493,17 +622,18 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
      * it already tracks individual operations on keys through its own cache.
      */
     @Override
-    public void commit(){
+    public void commit() {
         TransactionContext txCtx = this.txCtxMap.get(Thread.currentThread().threadId());
-        for(IMultiVersionIndex index : txCtx.indexes){
+        for (IMultiVersionIndex index : txCtx.indexes) {
             index.installWrites(txCtx);
         }
     }
 
     @Override
     public ITransactionContext beginTransaction(long tid, int identifier, long lastTid, boolean readOnly) {
+        LOGGER.log(INFO, "I ENTERED THE BEGIN TRANSACTION WITH IDENTIFIER " + identifier);
         return this.txCtxMap.compute(Thread.currentThread().threadId(),
-                (ignored,v) -> {
+                (ignored, v) -> {
                     if (v != null && tid == 0 && v.tid == 0)
                         return v;
                     return new TransactionContext(tid, lastTid, readOnly);
@@ -512,18 +642,18 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
 
     @Override
     public void reset() {
-        LOGGER.log(INFO, "Reset triggered at "+System.currentTimeMillis());
+        LOGGER.log(INFO, "Reset triggered at " + System.currentTimeMillis());
         for (Table table : this.catalog.values()) {
-            LOGGER.log(INFO, "Resetting "+table.name);
+            LOGGER.log(INFO, "Resetting " + table.name);
             table.primaryKeyIndex().reset();
-            for(var secIdx : table.secondaryIndexMap.values()){
+            for (var secIdx : table.secondaryIndexMap.values()) {
                 secIdx.reset();
             }
-            for(var uniqueIdx : table.partialIndexMap.values()){
+            for (var uniqueIdx : table.partialIndexMap.values()) {
                 uniqueIdx.reset();
             }
         }
-        LOGGER.log(INFO, "Reset finished at "+System.currentTimeMillis());
+        LOGGER.log(INFO, "Reset finished at " + System.currentTimeMillis());
         LOGGER.log(INFO, "GC triggered.");
         System.gc();
         LOGGER.log(INFO, "GC finished.");

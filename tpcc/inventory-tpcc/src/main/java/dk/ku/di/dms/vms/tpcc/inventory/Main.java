@@ -21,9 +21,12 @@ public final class Main {
                         "dk.ku.di.dms.vms.tpcc.inventory",
                         "dk.ku.di.dms.vms.tpcc.common"
                 });
-        return VmsApplication.build(options, (x,y) -> new InventoryHttpHandler(x,
+        VmsApplication vmsApplication = VmsApplication.build(options, (x,y) -> new InventoryHttpHandler(x,
                 (IItemRepository) y.apply("item"),
                 (IStockRepository) y.apply("stock")
         ));
+
+        System.out.println(vmsApplication.internalChannels());
+        return vmsApplication;
     }
 }

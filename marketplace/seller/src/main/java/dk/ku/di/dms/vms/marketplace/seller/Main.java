@@ -35,9 +35,9 @@ public final class Main {
                 properties,
                 "0.0.0.0",
                 Constants.SELLER_VMS_PORT, new String[]{
-                "dk.ku.di.dms.vms.marketplace.seller",
-                "dk.ku.di.dms.vms.marketplace.common"
-        });
+                        "dk.ku.di.dms.vms.marketplace.seller",
+                        "dk.ku.di.dms.vms.marketplace.common"
+                });
         return VmsApplication.build(options, (x,z) -> new SellerHttpHandler(x, (IOrderEntryRepository) z.apply("order_entries")));
     }
 

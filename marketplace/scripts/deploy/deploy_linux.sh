@@ -15,122 +15,103 @@ if [ "$param1" = "$help_" ]; then
     exit 1
 fi
 
-var1=1
 current_dir=$(pwd)
 echo "Current dir is" $current_dir
-
 echo ""
 
-if [ $# -eq 0 ];
-then
+if [ $# -eq 0 ]; then
   echo "ERROR: No arguments passed"
   exit 1
 fi
 
-if test -d `echo $(pwd)/proxy`; then
+if test -d "$(pwd)/proxy"; then
   echo "Initializing deploy of microservices..."
 else
   echo "ERROR: Run the script in the marketplace project's root folder!"
   exit 1
 fi
 
-if `echo "$*" | grep -q cart`; then
-    s=`ps | grep -c cart`
-    if [ $s = $var1 ]
-    then
-        echo "Cart already running"
-    else
-        echo "Initializing Cart..."
-        java --enable-preview --add-exports java.base/jdk.internal.misc=ALL-UNNAMED --add-opens java.base/jdk.internal.util=ALL-UNNAMED -jar $current_dir/cart/target/cart-1.0-SNAPSHOT-jar-with-dependencies.jar
-    fi
+# ---- NEW: logs folder + helper to start in background ----
+log_dir="$current_dir/logs"
+mkdir -p "$log_dir"
+
+start_bg () {
+  name="$1"
+  jar_rel="$2"
+
+  # If jar path doesn't exist, fail fast with a good message
+  if [ ! -f "$current_dir/$jar_rel" ]; then
+    echo "ERROR: Missing jar for $name at: $current_dir/$jar_rel"
+    return 1
+  fi
+
+  # Better "already running" detection (matches the jar name)
+  if pgrep -f "$jar_rel" >/dev/null; then
+    echo "$name already running"
+  else
+    echo "Initializing $name..."
+    java --enable-preview \
+      --add-exports java.base/jdk.internal.misc=ALL-UNNAMED \
+      --add-opens java.base/jdk.internal.util=ALL-UNNAMED \
+      -jar "$current_dir/$jar_rel" \
+      > "$log_dir/$name.log" 2>&1 &
+  fi
+}
+# ---------------------------------------------------------
+if echo "$*" | grep -q gw; then
+  start_bg "Gateway" "calcite/target/calcite-1.0-SNAPSHOT.jar"
 fi
 
-if `echo "$*" | grep -q product`; then
-    p=`ps | grep -c product`
-    if [ $p = $var1 ]
-    then
-        echo "Product already running"
-    else
-        echo "Initializing Product..."
-        java --enable-preview --add-exports java.base/jdk.internal.misc=ALL-UNNAMED --add-opens java.base/jdk.internal.util=ALL-UNNAMED -jar $current_dir/product/target/product-1.0-SNAPSHOT-jar-with-dependencies.jar
-    fi
+if echo "$*" | grep -q cart; then
+  start_bg "Cart" "cart/target/cart-1.0-SNAPSHOT-jar-with-dependencies.jar"
 fi
 
-if `echo "$*" | grep -q stock`; then
-    s=`ps | grep -c stock`
-    if [ $s = $var1 ]
-    then
-        echo "Stock already running"
-    else
-        echo "Initializing Stock..."
-        java --enable-preview --add-exports java.base/jdk.internal.misc=ALL-UNNAMED --add-opens java.base/jdk.internal.util=ALL-UNNAMED -jar $current_dir/stock/target/stock-1.0-SNAPSHOT-jar-with-dependencies.jar
-    fi
+if echo "$*" | grep -q product; then
+  start_bg "Product" "product/target/product-1.0-SNAPSHOT-jar-with-dependencies.jar"
 fi
 
-if `echo "$*" | grep -q order`; then
-    s=`ps | grep -c order`
-    if [ $s = $var1 ]
-    then
-        echo "Order already running"
-    else
-        echo "Initializing Order..."
-        java --enable-preview --add-exports java.base/jdk.internal.misc=ALL-UNNAMED --add-opens java.base/jdk.internal.util=ALL-UNNAMED -jar $current_dir/order/target/order-1.0-SNAPSHOT-jar-with-dependencies.jar
-    fi
+if echo "$*" | grep -q stock; then
+  start_bg "Stock" "stock/target/stock-1.0-SNAPSHOT-jar-with-dependencies.jar"
 fi
 
-if `echo "$*" | grep -q payment`; then
-    s=`ps | grep -c payment`
-    if [ $s = $var1 ]
-    then
-        echo "Payment already running"
-    else
-        echo "Initializing Payment..."
-        java --enable-preview --add-exports java.base/jdk.internal.misc=ALL-UNNAMED --add-opens java.base/jdk.internal.util=ALL-UNNAMED -jar $current_dir/payment/target/payment-1.0-SNAPSHOT-jar-with-dependencies.jar
-    fi
+if echo "$*" | grep -q order; then
+  start_bg "Order" "order/target/order-1.0-SNAPSHOT-jar-with-dependencies.jar"
 fi
 
-if `echo "$*" | grep -q shipment`; then
-    s=`ps | grep -c shipment`
-    if [ $s = $var1 ]
-    then
-        echo "Shipment already running"
-    else
-        echo "Initializing Shipment..."
-        java --enable-preview --add-exports java.base/jdk.internal.misc=ALL-UNNAMED --add-opens java.base/jdk.internal.util=ALL-UNNAMED -jar $current_dir/shipment/target/shipment-1.0-SNAPSHOT-jar-with-dependencies.jar
-    fi
+if echo "$*" | grep -q payment; then
+  start_bg "Payment" "payment/target/payment-1.0-SNAPSHOT-jar-with-dependencies.jar"
 fi
 
-if `echo "$*" | grep -q seller`; then
-    s=`ps | grep -c seller`
-    if [ $s = $var1 ]
-    then
-        echo "Seller already running"
-    else
-        echo "Initializing Seller..."
-        java --enable-preview --add-exports java.base/jdk.internal.misc=ALL-UNNAMED --add-opens java.base/jdk.internal.util=ALL-UNNAMED -jar $current_dir/seller/target/seller-1.0-SNAPSHOT-jar-with-dependencies.jar
-    fi
+if echo "$*" | grep -q shipment; then
+  start_bg "Shipment" "shipment/target/shipment-1.0-SNAPSHOT-jar-with-dependencies.jar"
 fi
 
-if `echo "$*" | grep -q customer`; then
-    s=`ps | grep -c customer`
-    if [ $s = $var1 ]
-    then
-        echo "Customer already running"
-    else
-        echo "Initializing Customer..."
-        java --enable-preview --add-exports java.base/jdk.internal.misc=ALL-UNNAMED --add-opens java.base/jdk.internal.util=ALL-UNNAMED -jar $current_dir/customer/target/customer-1.0-SNAPSHOT-jar-with-dependencies.jar
-    fi
+if echo "$*" | grep -q seller; then
+  start_bg "Seller" "seller/target/seller-1.0-SNAPSHOT-jar-with-dependencies.jar"
 fi
 
-if `echo "$*" | grep -q proxy`; then
-    p=`ps | grep -c proxy`
-    if [ $p = $var1 ]
-    then
-        echo "Proxy already running"
-    else
-        echo "Waiting 2 sec for microservices before setting up the proxy (coordinator)..."
-        sleep 2
-        echo "Initializing Proxy..."
-        java --enable-preview --add-exports java.base/jdk.internal.misc=ALL-UNNAMED --add-opens java.base/jdk.internal.util=ALL-UNNAMED -jar $current_dir/proxy/target/proxy-1.0-SNAPSHOT-jar-with-dependencies.jar
-    fi
+if echo "$*" | grep -q customer; then
+  start_bg "Customer" "customer/target/customer-1.0-SNAPSHOT-jar-with-dependencies.jar"
 fi
+
+if echo "$*" | grep -q proxy; then
+  # IMPORTANT: proxy should start after VMSes, and usually in foreground so you see logs
+  if pgrep -f "proxy/target/proxy-1.0-SNAPSHOT-jar-with-dependencies.jar" >/dev/null; then
+    echo "Proxy already running"
+  else
+    echo "Waiting 2 sec for microservices before setting up the proxy (coordinator)..."
+    sleep 2
+    echo "Initializing Proxy..."
+    java --enable-preview \
+      --add-exports java.base/jdk.internal.misc=ALL-UNNAMED \
+      --add-opens java.base/jdk.internal.util=ALL-UNNAMED \
+      -jar "$current_dir/proxy/target/proxy-1.0-SNAPSHOT-jar-with-dependencies.jar" \
+      2>&1 | tee "$log_dir/proxy.log"
+  fi
+fi
+
+echo ""
+echo "Done. Logs are in: $log_dir"
+echo "Examples:"
+echo "  tail -f $log_dir/cart.log"
+echo "  tail -f $log_dir/proxy.log"
