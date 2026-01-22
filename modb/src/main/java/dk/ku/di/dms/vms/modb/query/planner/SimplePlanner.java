@@ -28,6 +28,8 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.stream.IntStream;
 
+import static java.lang.System.Logger.Level.INFO;
+
 /**
  * Planner that only takes into consideration simple read and write queries.
  * Those involving single tables and filters, and no
@@ -35,7 +37,10 @@ import java.util.stream.IntStream;
  */
 public final class SimplePlanner {
 
-    public SimplePlanner(){}
+    public SimplePlanner() {
+    }
+
+    private static final System.Logger LOGGER = System.getLogger(SimplePlanner.class.getName());
 
     /**
      * @param columnsToFilter additional columns to be filtered, but not on index
@@ -331,17 +336,33 @@ public final class SimplePlanner {
                 , filterColumns);
     }
 
-    private ReadWriteIndex<IKey> getOptimalIndex(Table table, int[] filterColumns){
-        // no index apply so far, perhaps a subset then?
+    private ReadWriteIndex<IKey> getOptimalIndex(Table table, int[] filterColumns) {
+
+        LOGGER.log(INFO, "subset getOptimalIndex: filterColumns.length=" + filterColumns.length
+                + " filterColumns=" + Arrays.toString(filterColumns));
+
+        if (filterColumns.length == 0) {
+            LOGGER.log(INFO, "subset getOptimalIndex: empty filterColumns -> returning null (no subset index search)");
+            return null;
+        }
+
         List<int[]> combinations = Combinatorics.getAllPossibleColumnCombinations(filterColumns);
         // heuristic: return the one that embraces more columns
         ReadWriteIndex<IKey> bestSoFar = null;
         int maxLength = 0;
-        for(int[] arr : combinations) {
+
+        int i = 0;
+        for (int[] arr : combinations) {
             IKey indexKey = KeyUtils.buildIndexKey(arr);
-            if(table.secondaryIndexMap.get(indexKey) != null){
-                if(arr.length > maxLength){
-                    bestSoFar = table.secondaryIndexMap.get(indexKey).getUnderlyingIndex();
+
+            var mvIdx = table.secondaryIndexMap.get(indexKey);
+            if (mvIdx != null) {
+                LOGGER.log(INFO,
+                        "FOUND secondary index candidate: key=%s arr=%s arr.length=%d"
+                                .formatted(indexKey, Arrays.toString(arr), arr.length));
+
+                if (arr.length > maxLength) {
+                    bestSoFar = mvIdx.getUnderlyingIndex();
                     maxLength = arr.length;
                 }
             }
