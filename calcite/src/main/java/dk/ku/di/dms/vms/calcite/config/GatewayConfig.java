@@ -7,12 +7,14 @@ public final class GatewayConfig {
 
     private final String bindHost;
     private final int port;
-    private final String coordinatorUrl;
+    private final String coordinatorHttpUrl; // For Catalog (8079)
+    private final String coordinatorSseUrl;  // For Snapshots (8091)
 
-    private GatewayConfig(String bindHost, int port, String coordinatorUrl) {
+    private GatewayConfig(String bindHost, int port, String coordinatorHttpUrl, String coordinatorSseUrl) {
         this.bindHost = Objects.requireNonNull(bindHost, "bindHost");
         this.port = port;
-        this.coordinatorUrl = Objects.requireNonNull(coordinatorUrl, "coordinatorUrl");
+        this.coordinatorHttpUrl = Objects.requireNonNull(coordinatorHttpUrl, "coordinatorHttpUrl");
+        this.coordinatorSseUrl = Objects.requireNonNull(coordinatorSseUrl, "coordinatorSseUrl");
     }
 
     public static GatewayConfig fromEnv() {
@@ -20,30 +22,25 @@ public final class GatewayConfig {
 
         String bindHost = env.getOrDefault("BIND_HOST", "0.0.0.0");
         int port = parseInt(env.get("GATEWAY_PORT"), 8095);
-        String coordinatorUrl = env.getOrDefault("COORDINATOR_URL", "http://localhost:8079");
 
-        return new GatewayConfig(bindHost, port, coordinatorUrl);
+        // 1. HTTP API (Catalog) defaults to 8079
+        String httpUrl = env.getOrDefault("COORDINATOR_HTTP_URL", "http://localhost:8079");
+
+        // 2. SSE STREAM (Snapshots) defaults to 8091
+        String sseUrl = env.getOrDefault("COORDINATOR_SSE_URL", "http://localhost:8091");
+
+        return new GatewayConfig(bindHost, port, httpUrl, sseUrl);
     }
 
-    public String getBindHost() {
-        return bindHost;
-    }
+    public String getBindHost() { return bindHost; }
+    public int getPort() { return port; }
 
-    public int getPort() {
-        return port;
-    }
-
-    public String getCoordinatorUrl() {
-        return coordinatorUrl;
-    }
+    public String getCoordinatorHttpUrl() { return coordinatorHttpUrl; }
+    public String getCoordinatorSseUrl() { return coordinatorSseUrl; }
 
     private static int parseInt(String v, int def) {
         if (v == null || v.isBlank()) return def;
-        try {
-            return Integer.parseInt(v.trim());
-        } catch (Exception e) {
-            return def;
-        }
+        try { return Integer.parseInt(v.trim()); } catch (Exception e) { return def; }
     }
 
     @Override
@@ -51,7 +48,8 @@ public final class GatewayConfig {
         return "GatewayConfig{" +
                 "bindHost='" + bindHost + '\'' +
                 ", port=" + port +
-                ", coordinatorUrl='" + coordinatorUrl + '\'' +
+                ", httpUrl='" + coordinatorHttpUrl + '\'' +
+                ", sseUrl='" + coordinatorSseUrl + '\'' +
                 '}';
     }
 }
