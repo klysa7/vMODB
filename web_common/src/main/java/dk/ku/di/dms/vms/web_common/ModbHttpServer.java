@@ -14,8 +14,7 @@ import java.util.Set;
 import java.util.concurrent.*;
 import java.util.function.BiConsumer;
 
-import static java.lang.System.Logger.Level.ERROR;
-import static java.lang.System.Logger.Level.WARNING;
+import static java.lang.System.Logger.Level.*;
 
 public abstract class ModbHttpServer extends StoppableRunnable {
 
@@ -34,6 +33,7 @@ public abstract class ModbHttpServer extends StoppableRunnable {
         // register client as a batch commit consumer
         BATCH_COMMIT_CONSUMERS.add( (_, numTIDsCommitted) -> {
             for (var sseClient : SSE_CLIENTS){
+                LOGGER.log(INFO, "I entered the SSE clients here "+numTIDsCommitted);
                 sseClient.sendToSseClient(numTIDsCommitted);
             }
         });
@@ -325,6 +325,8 @@ public abstract class ModbHttpServer extends StoppableRunnable {
             do {
                 this.connectionMetadata.channel.write(this.writeBuffer).get();
             } while(this.writeBuffer.hasRemaining());
+
+            SSE_CLIENTS.add(this);
             // need to set up read before adding this connection to sse client
             this.writeBuffer.clear();
             this.readBuffer.clear();

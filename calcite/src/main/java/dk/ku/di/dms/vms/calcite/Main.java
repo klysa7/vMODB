@@ -9,9 +9,14 @@ public final class Main {
 
     public static void main(String[] args) throws IOException {
 
-        GatewayConfig gatewayConfig = GatewayConfig.fromEnv();
+        GatewayConfig config = GatewayConfig.fromEnv();
         GatewayApp gatewayApp = new GatewayApp(CoordinatorClient::new);
-        gatewayApp.start(gatewayConfig.getBindHost(), gatewayConfig.getPort(),
-                gatewayConfig.getCoordinatorUrl());
+
+        gatewayApp.start(
+                config.getBindHost(),
+                config.getPort(),
+                config.getCoordinatorHttpUrl(),
+                config.getCoordinatorSseUrl()
+        );
     }
 }

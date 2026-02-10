@@ -292,6 +292,16 @@ public final class SimplePlanner {
 
         final int[] columnsForIndexSelection = intStream.toArray();
 
+        // --------------------------------------------------------------------
+        // CHANGE HERE: Short-Circuit for Empty Filters (Scan All)
+        // --------------------------------------------------------------------
+        if (columnsForIndexSelection.length == 0) {
+            // If there are no filters, we MUST do a Full Scan.
+            // Returning false for indexIsUsed triggers FullScan in planSimpleScan.
+            return new IndexSelectionVerdict(false, table.primaryKeyIndex(), columnsForIndexSelection);
+        }
+        // --------------------------------------------------------------------
+
         final IIndexKey indexKey = KeyUtils.buildIndexKey(columnsForIndexSelection);
 
         // fast path (1): all columns are part of the primary index

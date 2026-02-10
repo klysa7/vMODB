@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.Properties;
 
 import static java.lang.System.Logger.Level.DEBUG;
+import static java.lang.System.Logger.Level.INFO;
 
 public final class Main {
 
@@ -69,6 +70,7 @@ public final class Main {
             if (snapshot > lastFinished) {
                 snapshot = lastFinished;
             }
+            LOGGER.log(INFO,"I the Order VMS here with snapshot ", snapshot);
             this.transactionManager.beginTransaction(snapshot, 0, snapshot, true);
             List<Order> view = this.orderRepository.fetchMany(OrderService.ORDERS_ALL, Order.class);
             return ordersToJson(view);

@@ -2,90 +2,83 @@ package dk.ku.di.dms.vms.calcite.olap.orchestrator.runtime;
 
 import dk.ku.di.dms.vms.calcite.olap.orchestrator.planning.DistributedPlan;
 import dk.ku.di.dms.vms.calcite.olap.orchestrator.planning.VmsSubplan;
-import dk.ku.di.dms.vms.calcite.olap.orchestrator.planning.ops.CoordinatorHashJoinOperation;
-import dk.ku.di.dms.vms.calcite.olap.orchestrator.planning.ops.CoordinatorOperation;
-import dk.ku.di.dms.vms.calcite.olap.orchestrator.planning.ops.CoordinatorProjectOperation;
-import dk.ku.di.dms.vms.calcite.olap.orchestrator.planning.ops.ScanAllOperation;
 import dk.ku.di.dms.vms.calcite.olap.orchestrator.rpc.VmsHttpClient;
+import dk.ku.di.dms.vms.calcite.olap.orchestrator.planning.ops.*;
+import dk.ku.di.dms.vms.calcite.olap.orchestrator.runtime.ops.*;
 
-import java.util.HashMap;
-import java.util.Map;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+
+import static java.lang.System.Logger.Level.INFO;
 
 public final class DistributedExecutor {
 
-    private static final System.Logger LOGGER =
-            System.getLogger(DistributedExecutor.class.getName());
+    private static final System.Logger LOGGER = System.getLogger(DistributedExecutor.class.getName());
+    private final VmsHttpClient vmsHttpClient;
 
-    private final VmsHttpClient http;
-    private final CoordinatorHashJoin hashJoin;
-    private final CoordinatorProject project;
-
-    public DistributedExecutor(VmsHttpClient http) {
-        this.http = http;
-        this.hashJoin = new CoordinatorHashJoin();
-        this.project = new CoordinatorProject();
+    public DistributedExecutor(VmsHttpClient vmsHttpClient) {
+        this.vmsHttpClient = vmsHttpClient;
     }
 
     public PushdownResponse execute(DistributedPlan distributedPlan) {
+        long start = System.currentTimeMillis();
+        LOGGER.log(INFO, ">>> STH LIKE A TRINO DRIVER STARTING DRIVER LOOP FFOR SNAPSHOT #" + distributedPlan.snapshot);
 
-        Map<String, PushdownResponse> byExchange = new HashMap<>();
+        CoordinatorOperator root = buildOperatorTree(distributedPlan.root, distributedPlan);
+        LOGGER.log(INFO, "--> [DRIVER] OPENING PIPELINE THE ROOT OPENS< ITS STARTING");
+        root.open();
 
-        for (VmsSubplan vmsSubplan : distributedPlan.subPlans) {
+        List<List<Object>> allRows = new ArrayList<>();
+        List<Object[]> batch;
+        int batchCount = 0;
 
-            if (!(vmsSubplan.operation instanceof ScanAllOperation)) {
-                throw new IllegalArgumentException("we support only scan yet: " + vmsSubplan.operation.getClass().getName());
+        LOGGER.log(INFO, "--> [DRIVER] ENTERING PROCESSING LOOP...");
+        try {
+            // This is the tight loop. In Trino, this checks isBlocked
+            // but nextBatch() returns immediately if data is in the buffer
+            while ((batch = root.nextBatch()) != null) {
+                batchCount++;
+                if (!batch.isEmpty()) {
+                    System.out.println(" RESULT ROW: " + java.util.Arrays.toString(batch.get(0)));
+                }
+                for (Object[] row : batch) {
+                    allRows.add(Arrays.asList(row));
+                }
+//                if (batchCount % 10 == 0) LOGGER.log(INFO, ">>> [DRIVER] Processed batch #" + batchCount);
             }
-
-            PushdownResponse resp = http.executeScanAll(vmsSubplan, distributedPlan.snapshot);
-
-            byExchange.put(vmsSubplan.exchangeId, resp);
+        } finally {
+            LOGGER.log(INFO, ">>> [DRIVER] CLOSING PIPELINE");
+            root.close();
         }
 
-        if (distributedPlan.join == null) {
-            throw new IllegalStateException("Plan missing join operation");
-        }
-
-        CoordinatorHashJoinOperation joinOperator = distributedPlan.join;
-
-        PushdownResponse left = byExchange.get(joinOperator.leftExchangeId);
-        PushdownResponse right = byExchange.get(joinOperator.rightExchangeId);
-
-        if (left == null || right == null) {
-            throw new IllegalStateException("Missing gathered results for join");
-        }
-
-        PushdownResponse joined = hashJoin.join(left, right, joinOperator.leftKeyIndex, joinOperator.rightKeyIndex);
-
-        byExchange.put(joinOperator.outExchangeId, joined);
-
-        PushdownResponse result = evalCoordinatorOp(distributedPlan.root, byExchange);
-        return result;
+        LOGGER.log(INFO, "DRIVER] FINISHED. Total Rows: " + allRows.size() + " Time: " + (System.currentTimeMillis() - start) + "ms");
+        return new PushdownResponse("gateway", distributedPlan.snapshot, null, allRows);
     }
 
-    private PushdownResponse evalCoordinatorOp(CoordinatorOperation operation, Map<String, PushdownResponse> byExchange) {
-        if (operation instanceof CoordinatorProjectOperation p) {
+    private CoordinatorOperator buildOperatorTree(CoordinatorOperatorDefinition coordinatorOperatorDefinition,
+                                                  DistributedPlan distributedPlan) {
 
-            PushdownResponse in = byExchange.get(p.inputExchangeId);
-            if (in == null) throw new IllegalStateException("Missing input exchange: " + p.inputExchangeId);
-
-            PushdownResponse result = project.project(in, p.projectedIndices);
-            byExchange.put(p.outExchangeId, result);
-            return result;
+        if (coordinatorOperatorDefinition instanceof ScanDefinition scanDef) {
+            VmsSubplan subplan = distributedPlan.subPlans.stream()
+                    .filter(s -> s.exchangeId.equals(scanDef.exchangeId()))
+                    .findFirst().orElseThrow();
+            //do it asychronously
+            return new AsyncExchangeReadOperator(vmsHttpClient, subplan, distributedPlan.snapshot);
         }
-
-        if (operation instanceof CoordinatorHashJoinOperation j) {
-
-            PushdownResponse left = byExchange.get(j.leftExchangeId);
-            PushdownResponse right = byExchange.get(j.rightExchangeId);
-
-            if (left == null || right == null)
-                throw new IllegalStateException("Missing join inputs: " + j.leftExchangeId + ", " + j.rightExchangeId);
-
-            PushdownResponse result = hashJoin.join(left, right, j.leftKeyIndex, j.rightKeyIndex);
-            byExchange.put(j.outExchangeId, result);
-            return result;
+        if (coordinatorOperatorDefinition instanceof JoinDefinition joinDefinition) {
+            return new LocalJoinOperator(
+                    buildOperatorTree(joinDefinition.left(), distributedPlan),
+                    buildOperatorTree(joinDefinition.right(), distributedPlan),
+                    joinDefinition.leftKeyIndex(), joinDefinition.rightKeyIndex()
+            );
         }
-
-        throw new IllegalArgumentException("Unknown Operation ");
+        if (coordinatorOperatorDefinition instanceof ProjectDefinition projectDefinition) {
+            return new LocalProjectOperator(
+                    buildOperatorTree(projectDefinition.input(), distributedPlan),
+                    projectDefinition.projectedIndices()
+            );
+        }
+        throw new IllegalArgumentException("Unknown Op: " + coordinatorOperatorDefinition);
     }
 }

@@ -1,12 +1,9 @@
 package dk.ku.di.dms.vms.calcite.olap.orchestrator.planning;
 
-import dk.ku.di.dms.vms.calcite.modb.rel.VModbJoin;
 import dk.ku.di.dms.vms.calcite.modb.rel.VModbTableAccess;
-import dk.ku.di.dms.vms.calcite.modb.rel.VModbProject;
+import dk.ku.di.dms.vms.calcite.olap.orchestrator.Orchestrator;
 import dk.ku.di.dms.vms.calcite.olap.orchestrator.placement.PlacementResolver;
-import dk.ku.di.dms.vms.calcite.olap.orchestrator.planning.ops.CoordinatorHashJoinOperation;
-import dk.ku.di.dms.vms.calcite.olap.orchestrator.planning.ops.CoordinatorProjectOperation;
-import dk.ku.di.dms.vms.calcite.olap.orchestrator.planning.ops.ScanAllOperation;
+import dk.ku.di.dms.vms.calcite.olap.orchestrator.planning.ops.*;
 
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.Join;
@@ -16,99 +13,100 @@ import org.apache.calcite.rex.RexInputRef;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.sql.SqlKind;
 
+import java.util.ArrayList;
 import java.util.List;
+
+import static java.lang.System.Logger.Level.INFO;
 
 
 public final class DistributedPlanner {
 
-    private static final System.Logger LOGGER =
-            System.getLogger(DistributedPlanner.class.getName());
+    private static final System.Logger LOGGER = System.getLogger(Orchestrator.class.getName());
 
     private final PlacementResolver placement;
     private final ColumnsResolver columnsResolver;
+    private List<VmsSubplan> subplansAccumulator;
+    private int exchangeCounter;
 
     public DistributedPlanner(PlacementResolver placement, ColumnsResolver columnsResolver) {
         this.placement = placement;
         this.columnsResolver = columnsResolver;
     }
 
-    public DistributedPlan distribute(Object physicalPlan, Long snapshot) {
+    public DistributedPlan create(RelNode physicalPlan, Long snapshot) {
+        this.subplansAccumulator = new ArrayList<>();
+        this.exchangeCounter = 0;
 
-        if (physicalPlan instanceof RelNode rel) {
+        CoordinatorOperatorDefinition rootOperation = relNodeToOperatorTree(physicalPlan);
 
-            if (!(rel instanceof Project project)) {
-                throw new IllegalArgumentException("Expected Project EnumerableProject but instead" + rel.getClass().getName());
-            }
-            if (!(project.getInput() instanceof Join join)) {
-                throw new IllegalArgumentException("Expected Project(Join) but instead" + project.getInput().getClass().getName());
-            }
+        LOGGER.log(INFO,"I entered create DistributedPlanner " + rootOperation);
 
-            VModbTableAccess leftAcc = unwrapToTableAccess(join.getLeft());
-            VModbTableAccess rightAcc = unwrapToTableAccess(join.getRight());
+        return new DistributedPlan(snapshot, new ArrayList<>(subplansAccumulator), rootOperation);
+    }
 
-            String leftSchema = leftAcc.getSchemaName();
-            String leftTable  = leftAcc.getTableName();
+    //create the tree operator recursing from the RelNode
+    private CoordinatorOperatorDefinition relNodeToOperatorTree(RelNode node) {
 
-            String rightSchema = rightAcc.getSchemaName();
-            String rightTable  = rightAcc.getTableName();
-
-            VmsSubplan left = new VmsSubplan(
-                    placement.ownerVms(leftSchema, leftTable),
-                    placement.endpointUrl(leftSchema, leftTable),
-                    "ex_left",
-                    new ScanAllOperation(leftSchema, leftTable),
-                    columnsResolver.columnsInOrder(leftSchema, leftTable)
-            );
-
-            VmsSubplan right = new VmsSubplan(
-                    placement.ownerVms(rightSchema, rightTable),
-                    placement.endpointUrl(rightSchema, rightTable),
-                    "ex_right",
-                    new ScanAllOperation(rightSchema, rightTable),
-                    columnsResolver.columnsInOrder(rightSchema, rightTable)
-            );
-
-            int[] joinKeys = extractJoinKeys(join);
-            int leftKey = joinKeys[0];
-            int rightKey = joinKeys[1];
-
-            CoordinatorHashJoinOperation joinOperation =
-                    new CoordinatorHashJoinOperation(left.exchangeId, right.exchangeId, leftKey, rightKey, "ex_joined");
-
-            int[] projects = extractProjectIndices(project);
-
-            CoordinatorProjectOperation projectOperation =
-                    new CoordinatorProjectOperation(joinOperation.outExchangeId, projects, "ex_final");
-
-            return new DistributedPlan(snapshot, List.of(left, right), joinOperation, projectOperation);
+        if (node instanceof Project project) {
+            CoordinatorOperatorDefinition inputOperation = relNodeToOperatorTree(project.getInput());
+            return new ProjectDefinition(inputOperation, extractProjectIndices(project));
         }
-        else {
-            throw new IllegalArgumentException("Unsupported plan");
+
+        if (node instanceof Join join) {
+            CoordinatorOperatorDefinition leftOperation = relNodeToOperatorTree(join.getLeft());
+            CoordinatorOperatorDefinition rightOperation = relNodeToOperatorTree(join.getRight());
+            int[] keys = extractJoinKeys(join);
+            return new JoinDefinition(leftOperation, rightOperation, keys[0], keys[1]);
         }
+
+        if (isTableAccess(node)) {
+            VModbTableAccess scan = unwrapToTableAccess(node);
+            return createScanSubplan(scan);
+        }
+
+        if (node.getInputs().size() == 1) {
+            return relNodeToOperatorTree(node.getInput(0));
+        }
+
+        throw new IllegalArgumentException("Unsupported Operator: " + node.getClass().getSimpleName());
+    }
+
+    private ScanDefinition createScanSubplan(VModbTableAccess scan) {
+        String schema = scan.getSchemaName();
+        String table = scan.getTableName();
+        String exchangeId = "exchange_" + (exchangeCounter++);
+
+        List<String> columns = columnsResolver.columnsInOrder(schema, table);
+        VmsSubplan subplan = new VmsSubplan(
+                placement.ownerVms(schema, table),
+                placement.endpointUrl(schema, table),
+                exchangeId,
+                new ScanAllOperation(schema, table),
+                columns
+        );
+        subplansAccumulator.add(subplan);
+
+        return new ScanDefinition(exchangeId, columns);
+    }
+
+
+    //for if we  find converters
+    private boolean isTableAccess(RelNode node) {
+        if(node instanceof VModbTableAccess) return true;
+        if(node.getInputs().size() == 1) return isTableAccess(node.getInput(0));
+        return false;
     }
 
     private VModbTableAccess unwrapToTableAccess(RelNode node) {
-        RelNode relNode = node;
-
-        while (!(relNode instanceof VModbTableAccess)) {
-            if (relNode.getInputs() == null || relNode.getInputs().size() != 1) {
-                throw new IllegalArgumentException("Expected a single input converter that has VModbTableAccess ");
-            }
-            relNode = relNode.getInput(0);
-        }
-        return (VModbTableAccess) relNode;
+        if (node instanceof VModbTableAccess access) return access;
+        return unwrapToTableAccess(node.getInput(0));
     }
 
     private int[] extractProjectIndices(Project project) {
         List<RexNode> expressions = project.getProjects();
         int[] idx = new int[expressions.size()];
-
         for (int i = 0; i < expressions.size(); i++) {
-            RexNode e = expressions.get(i);
-            if (!(e instanceof RexInputRef ref)) {
-                throw new IllegalArgumentException("only rexinputref supportwd ");
-            }
-            idx[i] = ref.getIndex();
+            idx[i] = ((RexInputRef) expressions.get(i)).getIndex();
         }
         return idx;
     }

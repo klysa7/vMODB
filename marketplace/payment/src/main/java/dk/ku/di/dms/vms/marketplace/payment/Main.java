@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.Properties;
 
 import static java.lang.System.Logger.Level.DEBUG;
+import static java.lang.System.Logger.Level.INFO;
 
 public final class Main {
 
@@ -67,6 +68,7 @@ public final class Main {
             if (snapshot > lastFinished) snapshot = lastFinished;
             this.transactionManager.beginTransaction(snapshot, 0, snapshot, true);
 
+            LOGGER.log(INFO,"I the Payment VMS here with snapshot ", snapshot);
             List<OrderPayment> payments =
                     this.orderPaymentRepository.fetchMany(PaymentService.ORDER_PAYMENTS_ALL, OrderPayment.class);
 

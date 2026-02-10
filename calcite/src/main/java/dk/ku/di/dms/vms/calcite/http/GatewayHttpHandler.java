@@ -8,10 +8,15 @@ import dk.ku.di.dms.vms.calcite.service.OlapGatewayService;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import static java.lang.System.Logger.Level.INFO;
+import static java.lang.System.Logger.Level.ERROR;
 
 public final class GatewayHttpHandler implements HttpHandler {
 
+    private static final System.Logger LOGGER = System.getLogger(GatewayHttpHandler.class.getName());
+
     static final String PATH_ORDERS = "/olap/orders";
+
     static final String SQL = """
         SELECT o.customer_id, o.order_id, pc.sequential
         FROM "order".orders o
@@ -30,6 +35,8 @@ public final class GatewayHttpHandler implements HttpHandler {
         String method = exchange.getRequestMethod();
         String path = exchange.getRequestURI().getPath();
 
+        LOGGER.log(INFO, "Received Request: " + method + " " + path);
+
         if (!"GET".equalsIgnoreCase(method)) {
             send(exchange, 405, jsonError("Method not allowed. Use GET."));
             return;
@@ -44,6 +51,7 @@ public final class GatewayHttpHandler implements HttpHandler {
             String responseJson = service.execute(SQL);
             send(exchange, 200, responseJson);
         } catch (Exception e) {
+            LOGGER.log(ERROR, "Gateway Error", e);
             send(exchange, 500, jsonError("Gateway error: " + e.getMessage()));
         }
     }
@@ -60,18 +68,7 @@ public final class GatewayHttpHandler implements HttpHandler {
     private static String jsonError(String msg) {
         return "{"
                 + "\"status\":\"error\","
-                + "\"message\":" + jsonString(msg)
+                + "\"message\":" + "\"" + msg.replace("\"", "\\\"") + "\""
                 + "}";
-    }
-
-    private static String jsonString(String s) {
-        if (s == null) return "null";
-        return "\"" + s
-                .replace("\\", "\\\\")
-                .replace("\"", "\\\"")
-                .replace("\n", "\\n")
-                .replace("\r", "\\r")
-                .replace("\t", "\\t")
-                + "\"";
     }
 }
