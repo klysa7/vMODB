@@ -3,132 +3,86 @@ package dk.ku.di.dms.vms.tpcc.proxy;
 import dk.ku.di.dms.vms.coordinator.Coordinator;
 import dk.ku.di.dms.vms.modb.common.data_structure.Tuple;
 import dk.ku.di.dms.vms.modb.common.utils.ConfigUtils;
-import dk.ku.di.dms.vms.modb.index.unique.UniqueHashBufferIndex;
 import dk.ku.di.dms.vms.tpcc.proxy.dataload.DataLoadUtils;
-import dk.ku.di.dms.vms.tpcc.proxy.dataload.QueueTableIterator;
 import dk.ku.di.dms.vms.tpcc.proxy.experiment.ExperimentUtils;
 import dk.ku.di.dms.vms.tpcc.proxy.infra.MinimalHttpClient;
-import dk.ku.di.dms.vms.tpcc.proxy.infra.TPCcConstants;
-import dk.ku.di.dms.vms.tpcc.proxy.storage.StorageUtils;
 import dk.ku.di.dms.vms.tpcc.proxy.workload.WorkloadUtils;
 
 import java.io.IOException;
 import java.util.*;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.Future;
 
 public final class Main {
 
     private static final Properties PROPERTIES = ConfigUtils.loadProperties();
 
-    private static int NUM_INGESTION_WORKERS;
-
-    public static void main(String[] ignoredArgs) throws Exception {
-        System.out.println("Select your deployment scheme: \n1 - Distributed \n2 - Local \nq - Quit");
-        String choice = new Scanner(System.in).nextLine();
-        switch (choice){
-            case "1" -> {
-                // TODO find a way to ignore the 'app.properties' files outside the proxy project
-//                PROPERTIES.setProperty("logging", "true");
-                NUM_INGESTION_WORKERS = Runtime.getRuntime().availableProcessors();
-                loadMenu("Distributed Deployment Menu");
-            }
-            case "2" -> {
-//                PROPERTIES.setProperty("logging", "true");
-                NUM_INGESTION_WORKERS = Runtime.getRuntime().availableProcessors() / 2;
-                loadLocalDeploymentMenu();
-            }
+    public static void main(String[] args) throws Exception {
+        String option;
+        if(args.length == 0) {
+            System.out.println("Select your deployment scheme: \n1 - Distributed \n2 - Local \nq - Quit\n\nYou can also set this automatically by passing 1 or 2 as an argument to the CLI.");
+            option = new Scanner(System.in).nextLine();
+        } else {
+            option = args[0];
+        }
+        switch (option){
+            case "1" -> loadMenu("Distributed Deployment Menu");
+            case "2" -> loadLocalDeploymentMenu();
             default -> System.exit(0);
         }
     }
 
     private static void loadLocalDeploymentMenu() throws Exception {
-        // set default values to override for all in-process VMSes
-        PROPERTIES.setProperty("vms_thread_pool_size", "0");
-        PROPERTIES.setProperty("network_thread_pool_size", "0");
-
-        // if persistence is required, uncomment below lines
-        // PROPERTIES.setProperty("logging", "true");
-        // PROPERTIES.setProperty("checkpointing", "true");
-
         dk.ku.di.dms.vms.tpcc.warehouse.Main.main(null);
         dk.ku.di.dms.vms.tpcc.inventory.Main.main(null);
         dk.ku.di.dms.vms.tpcc.order.Main.main(null);
-
         loadMenu("Local Deployment Menu");
     }
 
-    private static void loadMenu(String menuType) throws NoSuchFieldException, IllegalAccessException {
+    private static void loadMenu(String menuType) {
         Coordinator coordinator = null;
-        int numWare = 0;
-        Map<String, UniqueHashBufferIndex> tables = null;
+        final int numWare = Integer.parseInt(PROPERTIES.get("num_ware").toString());
+        final boolean truncate = Boolean.parseBoolean(PROPERTIES.getProperty("checkpointing_truncate"));
         List<Map<String,Iterator<Object>>> input;
-        StorageUtils.EntityMetadata metadata = StorageUtils.loadEntityMetadata();
-        Map<String, String> vmsToHostMap = DataLoadUtils.mapVmsToHost(PROPERTIES);
 
         Map<String, Integer> numTxInputPerType = new HashMap<>(3);
         numTxInputPerType.put("new_order", Integer.valueOf(PROPERTIES.get("new_order_input_size").toString()));
         numTxInputPerType.put("payment", Integer.valueOf(PROPERTIES.get("payment_input_size").toString()));
         numTxInputPerType.put("order_status", Integer.valueOf(PROPERTIES.get("order_status_input_size").toString()));
 
-        Tuple<Integer, String>[] txRatio = buildTransactionRatio();
+        Map<String, Integer> txRatioMap = buildTransactionRatioMap();
+        Tuple<Integer, String>[] txRatio = buildTransactionRatio(txRatioMap);
+
+        // data population
+        ForkJoinPool pool = ForkJoinPool.commonPool();
+        Future<?>[] futures = new Future[3];
 
         Scanner scanner = new Scanner(System.in);
         boolean running = true;
-        boolean dataLoaded = false;
         while (running) {
             printMenu(menuType);
             System.out.print("Enter your choice: ");
             String choice = scanner.nextLine();
-            System.out.println("You chose option: " + choice);
             switch (choice) {
-                case "1":
-                    System.out.println("Option 1: \"Create tables in disk\" selected.");
-                    System.out.println("Enter number of warehouses: ");
-                    numWare = Integer.parseInt(scanner.nextLine());
-                    System.out.println("Creating tables with "+numWare+" warehouses...");
-                    tables = StorageUtils.createTables(metadata, numWare);
-                    System.out.println("Tables created!");
-                    break;
-                case "2":
-                    System.out.println("Option 2: \"Load VMSes with tables in disk\" selected.");
-
-                    if(coordinator != null){
-                        long submitted = coordinator.getNumTIDsSubmitted();
-                        long committed = coordinator.getNumTIDsCommitted();
-                        if(submitted > committed) {
-                            System.out.println("Transactions are still executing: "+submitted+" > "+committed);
-                            System.out.println("Do you want to proceed? [y/n]");
-                            String resp = scanner.nextLine();
-                            if(resp.equalsIgnoreCase("n")){
-                                break;
-                            }
+                case "1": {
+                    futures[0] = pool.submit(() -> submitDataPopulationRequest("order", truncate));
+                    futures[1] = pool.submit(() -> submitDataPopulationRequest("warehouse", truncate));
+                    futures[2] = pool.submit(() -> submitDataPopulationRequest("inventory", truncate));
+                    try {
+                        for (int i = 2; i >= 0; i--) {
+                            futures[i].get();
                         }
+                    } catch(InterruptedException | ExecutionException e){
+                        System.out.println("Error on PUT endpoint of one or more of the endpoints!");
                     }
-
-                    if(tables == null) {
-                        System.out.println("Loading tables from disk...");
-                        // the number of warehouses must be exactly the same otherwise lead to errors in reading from files
-                        numWare = StorageUtils.getNumRecordsFromInDiskTable(metadata.entityToSchemaMap().get("warehouse"), "warehouse");
-                        tables = StorageUtils.mapTablesInDisk(metadata, numWare);
-                    }
-                    Map<String, QueueTableIterator> tablesInMem = DataLoadUtils.mapTablesFromDisk(tables, metadata.entityHandlerMap());
-                    DataLoadUtils.ingestData(tablesInMem, vmsToHostMap, NUM_INGESTION_WORKERS);
-                    dataLoaded = true;
                     break;
+                }
                 case "3":
                     System.out.println("Option 3: \"Create workload\" selected.");
-
-                    if(numWare == 0){
-                        numWare = StorageUtils.getNumRecordsFromInDiskTable(metadata.entityToSchemaMap().get("warehouse"), "warehouse");
-                    }
-                    if(numWare == 0) {
-                        System.out.println("Enter number of warehouses: ");
-                        numWare = Integer.parseInt(scanner.nextLine());
-                    }
-
                     System.out.println("Number of warehouses: "+numWare);
-
                     try {
-                        WorkloadUtils.createWorkload(numWare, Boolean.getBoolean( PROPERTIES.get("multi_warehouse").toString() ), numTxInputPerType);
+                        WorkloadUtils.createWorkload(numWare, Boolean.getBoolean( PROPERTIES.get("multi_ware").toString() ), numTxInputPerType);
                     } catch (IOException e){
                         System.out.println("ERROR:\n"+e);
                     }
@@ -136,21 +90,8 @@ public final class Main {
                 case "4":
                     System.out.println("Option 4: \"Submit workload\" selected.");
 
-                    if(!dataLoaded){
-                        System.out.println("Data has not been loaded!");
-                        System.out.println("Do you want to proceed? [y/n]");
-                        String resp = scanner.nextLine();
-                        if(resp.equalsIgnoreCase("n")){
-                            break;
-                        }
-                    }
-
                     // check if workload files exist
-                    int numFiles = WorkloadUtils.getNumWorkloadInputFiles();
-
-                    if(numWare == 0){
-                        numWare = StorageUtils.getNumRecordsFromInDiskTable(metadata.entityToSchemaMap().get("warehouse"), "warehouse");
-                    }
+                    int numFiles = WorkloadUtils.getNumWorkloadInputFiles(numTxInputPerType);
 
                     if(numWare != numFiles){
                         System.out.println("Number of warehouses ("+numWare+") != Number of input files ("+numFiles+")");
@@ -187,7 +128,7 @@ public final class Main {
                     }
 
                     // reload iterators
-                    input = WorkloadUtils.mapWorkloadInputFiles(numWare);
+                    input = WorkloadUtils.mapWorkloadInputFiles(numWare, txRatioMap);
 
                     // load coordinator
                     if(coordinator == null){
@@ -204,37 +145,22 @@ public final class Main {
 
                     ExperimentUtils.ExperimentStats expStats = ExperimentUtils.runExperiment(coordinator, txRatio, input, runTime, warmUp);
                     ExperimentUtils.writeResultsToFile(numWare, expStats, runTime, warmUp,
-                            coordinator.getOptions().getNumTransactionWorkers(), coordinator.getOptions().getBatchWindow(), coordinator.getOptions().getMaxTransactionsPerBatch(), txRatio);
+                            coordinator.getOptions().getNumTransactionWorkers(), coordinator.getOptions().getBatchWindow(), coordinator.getOptions().getMaxTransactionsPerBatch(), txRatio, PROPERTIES.getProperty("logging"), PROPERTIES.getProperty("checkpointing"));
                     break;
                 case "5":
+                    System.out.println("Option 5: \"Cleanup VMS states\" selected.");
+                    // has to wait for all submitted transactions to commit in order to send the reset
+                    if (checkCompleteness(coordinator, scanner)) break;
+                    // cleanup VMS states
+                    DataLoadUtils.cleanup(false);
+                    System.out.println("VMS states cleaned.");
+                    break;
+                case "6":
                     System.out.println("Option 5: \"Reset VMS states\" selected.");
                     // has to wait for all submitted transactions to commit in order to send the reset
-                    if(coordinator != null){
-                        long numTIDsCommitted = coordinator.getNumTIDsCommitted();
-                        long numTIDsSubmitted = coordinator.getNumTIDsSubmitted();
-                        if(numTIDsCommitted != numTIDsSubmitted){
-                            System.out.println("There are ongoing batches executing! Cannot reset states now. \n Number of TIDs committed: "+numTIDsCommitted+"\n Number of TIDs submitted: "+numTIDsSubmitted);
-                            System.out.println("Do you want to proceed? [y/n]");
-                            String resp = scanner.nextLine();
-                            if(resp.equalsIgnoreCase("n")){
-                                break;
-                            }
-                            break;
-                        }
-                    }
-                    // cleanup VMS states
-                    for(var vms : TPCcConstants.VMS_TO_PORT_MAP.entrySet()){
-                        String host = PROPERTIES.getProperty(vms.getKey() + "_host");
-                        try(var client = new MinimalHttpClient(host, vms.getValue())){
-                            if(client.sendRequest("PATCH", "", "reset") != 200){
-                                System.out.println("Error on resetting "+vms+" state!");
-                            }
-                        } catch (IOException e) {
-                            System.out.println("Exception on resetting "+vms+" state: \n"+e);
-                        }
-                    }
+                    if (checkCompleteness(coordinator, scanner)) break;
+                    DataLoadUtils.cleanup(true);
                     System.out.println("VMS states reset.");
-                    dataLoaded = false;
                     break;
                 case "q":
                     System.out.println("Exiting the application...");
@@ -248,24 +174,58 @@ public final class Main {
         System.exit(0);
     }
 
-    @SuppressWarnings("unchecked")
-    private static Tuple<Integer, String>[] buildTransactionRatio() {
+    private static void submitDataPopulationRequest(String vms, boolean truncate) {
+        MinimalHttpClient client = null;
+        String param = truncate ? "populate" : "load";
+        try {
+            client = DataLoadUtils.obtainHttpClient(vms);
+            if (client.sendRequest("PUT", "", param) != 200) {
+                System.out.println("Error on PUT endpoint of "+vms);
+            }
+        } catch (IOException e) {
+            System.out.println("Error on PUT endpoint of "+vms);
+        } finally {
+            if(client != null) DataLoadUtils.returnHttpClient(vms, client);
+        }
+    }
+
+    private static boolean checkCompleteness(Coordinator coordinator, Scanner scanner) {
+        if(coordinator != null){
+            long numTIDsCommitted = coordinator.getNumTIDsCommitted();
+            long numTIDsSubmitted = coordinator.getNumTIDsSubmitted();
+            if(numTIDsCommitted != numTIDsSubmitted){
+                System.out.println("There are ongoing batches executing! Cannot reset states now. \n Number of TIDs committed: "+numTIDsCommitted+"\n Number of TIDs submitted: "+numTIDsSubmitted);
+                System.out.println("Do you want to proceed? [y/n]");
+                String resp = scanner.nextLine();
+                return resp.equalsIgnoreCase("n");
+            }
+        }
+        return false;
+    }
+
+    public static Map<String, Integer> buildTransactionRatioMap(){
         Map<String, Integer> txRatioMap = new TreeMap<>();
-        int i = 0;
+        boolean seen_100 = false;
         if(!PROPERTIES.get("new_order").toString().equals("0")) {
             txRatioMap.put("new_order", Integer.valueOf(PROPERTIES.get("new_order").toString()));
-            i++;
+            if(txRatioMap.get("new_order") == 100) seen_100 = true;
         }
         if(!PROPERTIES.get("payment").toString().equals("0")) {
             txRatioMap.put("payment", Integer.valueOf(PROPERTIES.get("payment").toString()));
-            i++;
+            if(txRatioMap.get("payment") == 100) seen_100 = true;
         }
         if(!PROPERTIES.get("order_status").toString().equals("0")) {
             txRatioMap.put("order_status", Integer.valueOf(PROPERTIES.get("order_status").toString()));
-            i++;
+            if(txRatioMap.get("order_status") == 100) seen_100 = true;
         }
-        Tuple<Integer, String>[] txRatio = new Tuple[i];
-        i = 0;
+        if(!seen_100) throw new RuntimeException("No transaction defined as 100 in app.properties!");
+        return txRatioMap;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Tuple<Integer, String>[] buildTransactionRatio(Map<String, Integer> txRatioMap) {
+        Tuple<Integer, String>[] txRatio = new Tuple[txRatioMap.size()];
+        int i = 0;
         for(var entry : txRatioMap.entrySet()) {
             txRatio[i] = Tuple.of(entry.getValue(), entry.getKey());
             i++;
@@ -275,11 +235,12 @@ public final class Main {
 
     private static void printMenu(String menuType) {
         System.out.println("\n=== "+menuType+" ===");
-        System.out.println("1. Create tables in disk");
-        System.out.println("2. Load VMSes with tables in disk");
+        System.out.println("1. Populate VMS states");
+        System.out.println("2. Check VMS state correctness");
         System.out.println("3. Create workload");
         System.out.println("4. Submit workload");
-        System.out.println("5. Reset VMS states");
+        System.out.println("5. Cleanup VMS states");
+        System.out.println("6. Reset VMS states");
         System.out.println("q. Quit program");
     }
 

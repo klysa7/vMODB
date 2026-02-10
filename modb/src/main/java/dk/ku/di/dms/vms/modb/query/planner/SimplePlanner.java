@@ -28,8 +28,6 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.stream.IntStream;
 
-import static java.lang.System.Logger.Level.INFO;
-
 /**
  * Planner that only takes into consideration simple read and write queries.
  * Those involving single tables and filters, and no
@@ -37,10 +35,7 @@ import static java.lang.System.Logger.Level.INFO;
  */
 public final class SimplePlanner {
 
-    public SimplePlanner() {
-    }
-
-    private static final System.Logger LOGGER = System.getLogger(SimplePlanner.class.getName());
+    public SimplePlanner(){}
 
     /**
      * @param columnsToFilter additional columns to be filtered, but not on index
@@ -154,7 +149,7 @@ public final class SimplePlanner {
 
     private AbstractSimpleOperator planSimpleAggregate(QueryTree queryTree) {
         // then just one since it is simple
-        var op = queryTree.groupByProjections.getFirst().groupByOperation();
+        GroupByOperationEnum op = queryTree.groupByProjections.getFirst().groupByOperation();
         switch (op){
             case MIN, MAX -> {
                 Table tb = queryTree.groupByProjections.getFirst().columnReference().table;
@@ -169,7 +164,7 @@ public final class SimplePlanner {
 
                 final int[] projectionColumns = new int[queryTree.projections.size()+1];
                 int idxCol = 0;
-                for(var column : queryTree.projections){
+                for(ColumnReference column : queryTree.projections){
                     projectionColumns[idxCol] = column.getColumnPosition();
                     idxCol++;
                 }
@@ -232,35 +227,35 @@ public final class SimplePlanner {
     }
 
     private AbstractScan planSimpleScanWithOrder(QueryTree queryTree) {
-        Table tb = queryTree.projections.getFirst().table;
+        Table tb = queryTree.projections.get(0).table;
         IndexSelectionVerdict indexSelectionVerdict = this.getOptimalIndex(tb, queryTree.wherePredicates);
         int[] projectionColumns = new int[queryTree.projections.size()];
         int idxCol = 0;
-        for(var column : queryTree.projections){
+        for(ColumnReference column : queryTree.projections){
             projectionColumns[idxCol] = column.getColumnPosition();
             idxCol++;
         }
         int entrySize = calculateQueryResultEntrySize(tb.schema(), queryTree.projections.size(), projectionColumns);
         if(indexSelectionVerdict.indexIsUsedGivenWhereClause()) {
             return new IndexScanWithOrder(indexSelectionVerdict.index(), projectionColumns,
-                    queryTree.orderByPredicates.getFirst().columnReference.columnPosition,  entrySize);
+                    queryTree.orderByPredicates.getFirst().columnReference.columnPosition, entrySize, queryTree.limit.orElse(null));
         } else {
             return new FullScanWithOrder(tb.primaryKeyIndex(), projectionColumns,
-                    queryTree.orderByPredicates.getFirst().columnReference.columnPosition,  entrySize);
+                    queryTree.orderByPredicates.getFirst().columnReference.columnPosition, entrySize);
         }
-          }
+    }
 
     private AbstractScan planSimpleScan(QueryTree queryTree) {
         // given it is simple, pick the table from one of the columns
         // must always have at least one projected column
-        Table tb = queryTree.projections.getFirst().table;
+        Table tb = queryTree.projections.get(0).table;
         // avoid one of the columns to have expression different from EQUALS
         // to be picked by unique and non-unique index
         IndexSelectionVerdict indexSelectionVerdict = this.getOptimalIndex(tb, queryTree.wherePredicates);
         // build projection
         int[] projectionColumns = new int[queryTree.projections.size()];
         int idxCol = 0;
-        for(var column : queryTree.projections){
+        for(ColumnReference column : queryTree.projections){
             projectionColumns[idxCol] = column.getColumnPosition();
             idxCol++;
         }
@@ -336,33 +331,17 @@ public final class SimplePlanner {
                 , filterColumns);
     }
 
-    private ReadWriteIndex<IKey> getOptimalIndex(Table table, int[] filterColumns) {
-
-        LOGGER.log(INFO, "subset getOptimalIndex: filterColumns.length=" + filterColumns.length
-                + " filterColumns=" + Arrays.toString(filterColumns));
-
-        if (filterColumns.length == 0) {
-            LOGGER.log(INFO, "subset getOptimalIndex: empty filterColumns -> returning null (no subset index search)");
-            return null;
-        }
-
+    private ReadWriteIndex<IKey> getOptimalIndex(Table table, int[] filterColumns){
+        // no index apply so far, perhaps a subset then?
         List<int[]> combinations = Combinatorics.getAllPossibleColumnCombinations(filterColumns);
         // heuristic: return the one that embraces more columns
         ReadWriteIndex<IKey> bestSoFar = null;
         int maxLength = 0;
-
-        int i = 0;
-        for (int[] arr : combinations) {
+        for(int[] arr : combinations) {
             IKey indexKey = KeyUtils.buildIndexKey(arr);
-
-            var mvIdx = table.secondaryIndexMap.get(indexKey);
-            if (mvIdx != null) {
-                LOGGER.log(INFO,
-                        "FOUND secondary index candidate: key=%s arr=%s arr.length=%d"
-                                .formatted(indexKey, Arrays.toString(arr), arr.length));
-
-                if (arr.length > maxLength) {
-                    bestSoFar = mvIdx.getUnderlyingIndex();
+            if(table.secondaryIndexMap.get(indexKey) != null){
+                if(arr.length > maxLength){
+                    bestSoFar = table.secondaryIndexMap.get(indexKey).underlyingIndex();
                     maxLength = arr.length;
                 }
             }

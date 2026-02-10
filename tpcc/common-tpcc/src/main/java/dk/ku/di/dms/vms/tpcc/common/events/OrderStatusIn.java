@@ -1,7 +1,6 @@
 package dk.ku.di.dms.vms.tpcc.common.events;
 
 import dk.ku.di.dms.vms.modb.api.annotations.Event;
-import dk.ku.di.dms.vms.tpcc.common.etc.WareDistId;
 
 @Event
 public final class OrderStatusIn {
@@ -23,18 +22,13 @@ public final class OrderStatusIn {
         this.by_name = by_name;
     }
 
-    @SuppressWarnings("unused")
-    public WareDistId getId(){
-        return new WareDistId(this.w_id, this.d_id);
-    }
-
     @Override
     public String toString() {
         return "{"
                 + "\"w_id\":" + w_id
                 + ",\"d_id\":" + d_id
                 + ",\"c_id\":" + c_id
-                + ",\"c_last\":" + c_last + "\""
+                + ",\"c_last\":\"" + c_last + "\""
                 + ",\"by_name\":" + by_name
                 + "}";
     }

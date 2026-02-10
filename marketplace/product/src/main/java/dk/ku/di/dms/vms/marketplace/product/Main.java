@@ -7,16 +7,19 @@ import dk.ku.di.dms.vms.sdk.embed.client.DefaultHttpHandler;
 import dk.ku.di.dms.vms.sdk.embed.client.VmsApplication;
 import dk.ku.di.dms.vms.sdk.embed.client.VmsApplicationOptions;
 
+import java.util.List;
 import java.util.Properties;
 
 public final class Main {
 
     private static final System.Logger LOGGER = System.getLogger(Main.class.getName());
 
+    private static VmsApplication VMS;
+
     public static void main(String[] ignoredArgs) throws Exception {
         Properties properties = ConfigUtils.loadProperties();
-        VmsApplication vms = buildVms(properties);
-        vms.start();
+        VMS = buildVms(properties);
+        VMS.start();
     }
 
     public static VmsApplication buildVms(Properties properties) throws Exception {
@@ -55,11 +58,15 @@ public final class Main {
                 this.transactionManager.reset();
                 return;
             }
+            // path: /product/cleanup
+            long lastTid = VMS.lastTidFinished();
+            this.transactionManager.beginTransaction(lastTid, 0, lastTid, false);
+            List<Product> products = this.repository.getAll();
+            this.transactionManager.reset();
             this.transactionManager.beginTransaction(0, 0, 0,false);
-            var products = this.repository.getAll();
             for(Product product : products){
                 product.version = "0";
-                this.repository.upsert(product);
+                this.repository.insert(product);
             }
         }
 

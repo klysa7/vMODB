@@ -1,7 +1,6 @@
 package dk.ku.di.dms.vms.sdk.embed.client;
 
 import dk.ku.di.dms.vms.modb.api.annotations.Microservice;
-import dk.ku.di.dms.vms.modb.common.runnable.StoppableRunnable;
 import dk.ku.di.dms.vms.modb.common.schema.VmsDataModel;
 import dk.ku.di.dms.vms.modb.common.schema.network.node.VmsNode;
 import dk.ku.di.dms.vms.modb.common.serdes.IVmsSerdesProxy;
@@ -23,7 +22,6 @@ import org.reflections.Reflections;
 
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -42,7 +40,7 @@ public final class VmsApplication {
 
     private final ITransactionManager transactionManager;
 
-    private final StoppableRunnable transactionScheduler;
+    private final VmsTransactionScheduler transactionScheduler;
 
     private final IVmsInternalChannels internalChannels;
 
@@ -51,7 +49,7 @@ public final class VmsApplication {
                            Map<String, Table> catalog,
                            VmsEventHandler eventHandler,
                            ITransactionManager transactionManager,
-                           StoppableRunnable transactionScheduler,
+                           VmsTransactionScheduler transactionScheduler,
                            IVmsInternalChannels internalChannels) {
         this.name = name;
         this.vmsRuntimeMetadata = vmsRuntimeMetadata;
@@ -71,7 +69,6 @@ public final class VmsApplication {
         String packageName = ConfigUtils.getCallerPackage();
 
         if(packageName == null) throw new IllegalStateException("Cannot identify package.");
-        // else System.out.println( "PACKAGE: "+ packageName );
 
         Reflections reflections = VmsMetadataLoader.configureReflections(options.packages());
 
@@ -83,6 +80,7 @@ public final class VmsApplication {
                 .collect(Collectors.toSet());
 
         Map<Class<?>, String> entityToTableNameMap = VmsMetadataLoader.loadVmsTableNames(reflections);
+        entityToTableNameMap.entrySet().removeIf(entry -> !entry.getKey().getPackageName().contains(packageName));
         Map<Class<?>, String> entityToVirtualMicroservice = VmsMetadataLoader.mapEntitiesToVirtualMicroservice(filteredVmsClazz, entityToTableNameMap);
         Map<String, VmsDataModel> vmsDataModelMap = VmsMetadataLoader.buildVmsDataModel(entityToVirtualMicroservice, entityToTableNameMap);
 
@@ -95,11 +93,14 @@ public final class VmsApplication {
             }
         }
 
+        // just pick the first as vms identifier (to store data in disk folder)
+        String vmsName = filteredVmsClazz.stream().findFirst().get().getAnnotation(Microservice.class).value();
+
         // load catalog so we can pass the table instance to proxy repository
-        Map<String, Table> catalog = EmbedMetadataLoader.loadCatalog(vmsDataModelMap, entityToTableNameMap, isCheckpointing, isTruncating, options.getMaxRecords());
+        Map<String, Table> catalog = EmbedMetadataLoader.loadCatalog(vmsName, vmsDataModelMap, entityToTableNameMap, isCheckpointing, isTruncating, options.getMaxRecords());
 
         // operational API and checkpoint API
-        TransactionManager transactionManager = new TransactionManager(catalog, isCheckpointing);
+        TransactionManager transactionManager = new TransactionManager(catalog);
 
         Map<String, Object> tableToRepositoryMap = EmbedMetadataLoader.loadRepositoryClasses( filteredVmsClazz, entityToTableNameMap, catalog,  transactionManager );
         Map<String, List<Object>> vmsToRepositoriesMap = EmbedMetadataLoader.mapRepositoriesToVms(filteredVmsClazz, entityToTableNameMap, tableToRepositoryMap);
@@ -112,11 +113,6 @@ public final class VmsApplication {
                 vmsToRepositoriesMap,
                 tableToRepositoryMap
         );
-
-        // for now only giving support to one vms
-        Optional<Map.Entry<String, String>> entryOptional = vmsMetadata.clazzNameToVmsName().entrySet().stream().findFirst();
-        if(entryOptional.isEmpty()) throw new IllegalStateException("Cannot find a single instance of VMS");
-        String vmsName = entryOptional.get().getValue();
 
         IVmsSerdesProxy serdes = VmsSerdesProxyBuilder.build();
 
@@ -134,7 +130,7 @@ public final class VmsApplication {
 
         VmsEventHandler eventHandler = VmsEventHandler.build(vmsIdentifier, transactionManager, vmsInternalPubSubService, vmsMetadata, options, httpHandler, serdes);
 
-        StoppableRunnable transactionScheduler = VmsTransactionScheduler.build(
+        VmsTransactionScheduler transactionScheduler = VmsTransactionScheduler.build(
                 vmsName,
                 vmsInternalPubSubService.transactionInputQueue(),
                 vmsMetadata.queueToVmsTransactionMap(),
@@ -142,7 +138,7 @@ public final class VmsApplication {
                 eventHandler::processOutputEvent,
                 options.vmsThreadPoolSize());
 
-        return new VmsApplication( vmsName, vmsMetadata, catalog, eventHandler, transactionManager, transactionScheduler, vmsInternalPubSubService );
+        return new VmsApplication(vmsName, vmsMetadata, catalog, eventHandler, transactionManager, transactionScheduler, vmsInternalPubSubService);
     }
 
     /**
@@ -173,7 +169,7 @@ public final class VmsApplication {
     }
 
     public long lastTidFinished() {
-        return ((VmsTransactionScheduler)this.transactionScheduler).lastTidFinished();
+        return this.transactionScheduler.lastTidFinished();
     }
 
     @SuppressWarnings("unchecked")

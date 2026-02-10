@@ -4,18 +4,17 @@ import dk.ku.di.dms.vms.modb.definition.Schema;
 import dk.ku.di.dms.vms.modb.definition.key.IKey;
 import dk.ku.di.dms.vms.modb.index.IndexTypeEnum;
 import dk.ku.di.dms.vms.modb.index.interfaces.ReadWriteIndex;
+import dk.ku.di.dms.vms.modb.storage.iterator.IRecordIterator;
 
 import java.util.Iterator;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 
+/**
+ * This class is just a placeholder for obtaining schema information in main memory execution
+ */
 public final class UniqueHashMapIndex extends ReadWriteIndex<IKey> {
-
-    private final Map<IKey,Object[]> store;
 
     public UniqueHashMapIndex(Schema schema, int[] columns) {
         super(schema, columns);
-        this.store = new ConcurrentHashMap<>();
     }
 
     @Override
@@ -25,42 +24,55 @@ public final class UniqueHashMapIndex extends ReadWriteIndex<IKey> {
 
     @Override
     public int size() {
-        return this.store.size();
+        return 0;
     }
 
     @Override
     public boolean exists(IKey key) {
-        return this.store.containsKey(key);
+        return false;
     }
 
     @Override
-    public void insert(IKey key, Object[] record) {
-        this.store.put(key, record);
-    }
+    public void insert(IKey key, Object[] record) { }
 
     @Override
-    public void update(IKey key, Object[] record) {
-        this.store.put(key, record);
-    }
+    public void update(IKey key, Object[] record) { }
 
     @Override
-    public void delete(IKey key) {
-        this.store.remove(key);
-    }
+    public void upsert(IKey key, Object[] record) { }
+
+    @Override
+    public void delete(IKey key) { }
 
     @Override
     public Object[] lookupByKey(IKey key) {
-        return this.store.getOrDefault(key, null);
+        return null;
     }
 
     @Override
     public Object[] record(IKey key) {
-        return this.store.get(key);
+        // not ideal, but just to avoid unexpected exceptions
+        return null;
     }
 
     @Override
-    public Iterator<IKey> iterator() {
-        return this.store.keySet().iterator();
+    public void reset() { }
+
+    private static final IRecordIterator<IKey> IT = new IRecordIterator<>() {
+        @Override
+        public boolean hasNext() {
+            return false;
+        }
+
+        @Override
+        public IKey next() {
+            return null;
+        }
+    };
+
+    @Override
+    public IRecordIterator<IKey> iterator() {
+        return IT;
     }
 
 }

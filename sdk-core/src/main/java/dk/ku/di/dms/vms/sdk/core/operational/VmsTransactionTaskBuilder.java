@@ -65,22 +65,26 @@ public final class VmsTransactionTaskBuilder {
 
         @SuppressWarnings("unchecked")
         private static Set<Object> getPartitionKeys(VmsTransactionSignature signature, Object inputEvent) {
-            Set<Object> partitionIdAux;
-            try {
-                if (signature.executionMode() == ExecutionModeEnum.PARTITIONED) {
+            if (signature.executionMode() == ExecutionModeEnum.PARTITIONED) {
+                Set<Object> partitionIdAux;
+                try {
                     if (Set.class.isAssignableFrom(signature.partitionByMethod().getReturnType())) {
                         partitionIdAux = (Set<Object>) signature.partitionByMethod().invoke(inputEvent);
                     } else {
-                        partitionIdAux = Set.of(signature.partitionByMethod().invoke(inputEvent));
+                        Object partId = signature.partitionByMethod().invoke(inputEvent);
+                        if(partId != null) {
+                            partitionIdAux = Set.of(partId);
+                        } else {
+                            partitionIdAux = Set.of();
+                        }
                     }
-                } else {
+                } catch (InvocationTargetException | IllegalAccessException e){
+                    LOGGER.log(ERROR, "Failed to obtain partition key(s) from clazz "+signature.method().getDeclaringClass().getSimpleName()+" method "+ signature.method().getName() +" event "+inputEvent.getClass().getSimpleName());
                     partitionIdAux = Set.of();
                 }
-            } catch (InvocationTargetException | IllegalAccessException e){
-                LOGGER.log(ERROR, "Failed to obtain partition key(s) from method "+ signature.partitionByMethod().getName());
-                partitionIdAux = Set.of();
+                return partitionIdAux;
             }
-            return partitionIdAux;
+            return Set.of();
         }
 
         private void handleGenericError(Exception e, Object input) {
@@ -144,8 +148,8 @@ public final class VmsTransactionTaskBuilder {
             this.status = RUNNING;
         }
 
-        public boolean isScheduled(){
-            return this.status > NEW && this.status < FINISHED;
+        public boolean isNew(){
+            return this.status == NEW;
         }
 
         public boolean isFinished(){
@@ -167,9 +171,9 @@ public final class VmsTransactionTaskBuilder {
         @Override
         public String toString() {
             return "{"
-                    + "\"batch\":\"" + this.batch + "\""
-                    + ",\"lastTid\":\"" + this.lastTid + "\""
-                    + ",\"tid\":\"" + tid + "\""
+                    + "\"batch\":" + this.batch
+                    + ",\"lastTid\":" + this.lastTid
+                    + ",\"tid\":" + tid
                     + "}";
         }
 
@@ -182,8 +186,8 @@ public final class VmsTransactionTaskBuilder {
     }
 
     public VmsTransactionTask buildFinished(long tid){
-        var sig = new VmsTransactionSignature(null, null, null, ExecutionModeEnum.SINGLE_THREADED, null, null);
-        var deadTask = new VmsTransactionTask(tid, 0, 0, sig, null);
+        VmsTransactionSignature sig = new VmsTransactionSignature(null, null, null, ExecutionModeEnum.SINGLE_THREADED, null, null);
+        VmsTransactionTask deadTask = new VmsTransactionTask(tid, 0, 0, sig, null);
         deadTask.status = FINISHED;
         return deadTask;
     }

@@ -513,7 +513,7 @@ public final class VmsMetadataLoader {
                 String partitionMethodStr = ( (PartitionBy)optionalPartitionBy.get() ).method();
                 try {
                     Method partitionMethod = inputClazz.getMethod(partitionMethodStr);
-                    vmsTransactionSignature = new VmsTransactionSignature(obj, method, transactionType, executionMode, Optional.of(partitionMethod), inputQueues, outputQueue);
+                    vmsTransactionSignature = new VmsTransactionSignature(obj, method, transactionType, executionMode, partitionMethod, inputQueues, outputQueue);
                 } catch (NoSuchMethodException e) {
                     // leave as single threaded
                     vmsTransactionSignature = new VmsTransactionSignature(obj, method, transactionType, executionMode, inputQueues, outputQueue);
@@ -625,17 +625,11 @@ public final class VmsMetadataLoader {
             try {
                 Optional<Annotation> annotation = Arrays.stream(queryMethod.getAnnotations())
                         .filter( a -> a.annotationType() == Query.class).findFirst();
-
                 if(annotation.isEmpty()) continue;
-
                 String queryString = ((Query)annotation.get()).value();
-
                 // build the query now. simple parser only
                 SelectStatement selectStatement = Parser.parse(queryString);
-                selectStatement.SQL.append(queryString);
-
                 res.put(queryMethod.getName(), selectStatement);
-
             } catch(Exception e){
                 throw new RuntimeException("Error on processing the query annotation: "+e.getMessage());
             }

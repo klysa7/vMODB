@@ -25,12 +25,13 @@ import dk.ku.di.dms.vms.modb.query.planner.SimplePlanner;
 import dk.ku.di.dms.vms.modb.transaction.multiversion.index.IMultiVersionIndex;
 import dk.ku.di.dms.vms.modb.transaction.multiversion.index.NonUniqueSecondaryIndex;
 import dk.ku.di.dms.vms.modb.transaction.multiversion.index.PrimaryIndex;
+import dk.ku.di.dms.vms.modb.transaction.multiversion.index.UniqueSecondaryIndex;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
+import static java.lang.System.Logger.Level.DEBUG;
 import static java.lang.System.Logger.Level.INFO;
-import static java.lang.System.Logger.Level.WARNING;
 
 /**
  * A transaction management facade
@@ -61,15 +62,12 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
 
     private final Map<String, Table> catalog;
 
-    private final boolean checkpointing;
-
-    public TransactionManager(Map<String, Table> catalog, boolean checkpointing){
+    public TransactionManager(Map<String, Table> catalog){
         this.planner = new SimplePlanner();
         this.analyzer = new Analyzer(catalog);
         this.catalog = catalog;
         this.queryPlanCacheMap = new ConcurrentHashMap<>();
-        this.checkpointing = checkpointing;
-        this.txCtxMap = new ConcurrentHashMap<>();
+        this.txCtxMap = new ConcurrentHashMap<>(2048*10);
     }
 
     private boolean fkConstraintViolation(TransactionContext txCtx, Table table, Object[] values){
@@ -85,7 +83,7 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
     public List<Object[]> fetch(final Table table, final SelectStatement selectStatement){
         String sqlAsKey = selectStatement.SQL.toString();
         AbstractSimpleOperator scanOperator = this.queryPlanCacheMap.computeIfAbsent(sqlAsKey,
-                (ignored) -> {
+                (_) -> {
                     QueryTree queryTree = this.analyzer.analyze(selectStatement);
                     return this.planner.plan(queryTree);
                 });
@@ -309,10 +307,13 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
             txCtx.indexes.add(secIndex);
             secIndex.insert(txCtx, pk, values);
         }
-        for(var entry : table.partialIndexMap.entrySet()){
+        if(table.partialIndexMap.isEmpty()) {
+            return;
+        }
+        for (var entry : table.partialIndexMap.entrySet()) {
             // does the record "fits" the partial index?
-            Tuple<Integer, Object> check = table.partialIndexMetaMap.get( entry.getKey() );
-            if (primaryIndex.meetPartialIndex(values, check.t1(), check.t2() )){
+            Tuple<Integer, Object> check = table.partialIndexMetaMap.get(entry.getKey());
+            if (primaryIndex.meetPartialIndex(values, check.t1(), check.t2())) {
                 txCtx.indexes.add(entry.getValue());
                 entry.getValue().insert(txCtx, pk, values);
             }
@@ -330,7 +331,7 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
         IKey pk = KeyUtils.buildRecordKey(primaryIndex.underlyingIndex().schema().getPrimaryKeyColumns(), values);
         TransactionContext txCtx = this.txCtxMap.get(Thread.currentThread().threadId());
         if(primaryIndex.upsert(txCtx, pk, values)) {
-            // FIXME must check if it is insert to insert in the secondary indexes
+            // FIXME must check if it is insert in order to insert in the secondary indexes
             //  update may also lead to changes in the secondary index (e.g., a column that requires readdressing)
             trackIndexes(txCtx, table, values, primaryIndex, pk);
             return;
@@ -460,31 +461,28 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
         return null; //operator.run( table.underlyingPrimaryKeyIndex(), filterContext );
     }
 
-    /**
-     * Must log the updates in a separate file. no need for WAL, no need to store before and after
-     * Only log those data versions until the corresponding batch.
-     * TIDs are not necessarily a sequence.
-     */
     @Override
     public void checkpoint(long maxTid){
-        LOGGER.log(INFO, "Checkpoint for max TID "+maxTid+" started at "+System.currentTimeMillis());
-        if(this.checkpointing) {
-            for (Table table : this.catalog.values()) {
-                LOGGER.log(INFO, "Checkpointing table "+table.getName());
-                int numRecords = table.primaryKeyIndex().checkpoint(maxTid);
-                if(numRecords > 0) {
-                    LOGGER.log(INFO, "Persisted "+numRecords+" records in table "+table.getName());
-                } else {
-                    LOGGER.log(WARNING, "No records have been flushed to table "+table.getName());
-                }
-            }
-        } else {
-            LOGGER.log(INFO, "Checkpoint disabled. Starting only garbage collection for max TID "+maxTid);
-            for (Table table : this.catalog.values()) {
-                table.primaryKeyIndex().garbageCollection(maxTid);
+        LOGGER.log(DEBUG, "Checkpoint for max TID "+maxTid+" started at "+System.currentTimeMillis());
+        for (Table table : this.catalog.values()) {
+            // LOGGER.log(DEBUG, "Checkpointing table "+table.getName());
+            int numRecords = table.primaryKeyIndex().checkpoint(maxTid);
+            if(numRecords > 0) {
+                LOGGER.log(DEBUG, numRecords+" record(s) persisted to table "+table.getName());
+            } else {
+                LOGGER.log(DEBUG, "No records have been flushed to table "+table.getName());
             }
         }
-        LOGGER.log(INFO, "Checkpoint for max TID "+maxTid+" finished at "+System.currentTimeMillis());
+        LOGGER.log(DEBUG, "Checkpoint for max TID "+maxTid+" finished at "+System.currentTimeMillis());
+    }
+
+    @Override
+    public void cleanup(long maxTid){
+        LOGGER.log(DEBUG, "Garbage collection for max TID "+maxTid+" started at "+System.currentTimeMillis());
+        for (Table table : this.catalog.values()) {
+            table.primaryKeyIndex().cleanup(maxTid);
+        }
+        LOGGER.log(DEBUG, "Garbage collection for max TID "+maxTid+" finished at "+System.currentTimeMillis());
     }
 
     /**
@@ -493,8 +491,8 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
      * it already tracks individual operations on keys through its own cache.
      */
     @Override
-    public void commit(){
-        TransactionContext txCtx = this.txCtxMap.get(Thread.currentThread().threadId());
+    public void commit() {
+        TransactionContext txCtx = this.txCtxMap.remove(Thread.currentThread().threadId());
         for(IMultiVersionIndex index : txCtx.indexes){
             index.installWrites(txCtx);
         }
@@ -503,8 +501,8 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
     @Override
     public ITransactionContext beginTransaction(long tid, int identifier, long lastTid, boolean readOnly) {
         return this.txCtxMap.compute(Thread.currentThread().threadId(),
-                (ignored,v) -> {
-                    if (v != null && tid == 0 && v.tid == 0)
+                (_,v) -> {
+                    if (v != null && v.tid == 0 && tid == 0)
                         return v;
                     return new TransactionContext(tid, lastTid, readOnly);
                 });
@@ -512,21 +510,37 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
 
     @Override
     public void reset() {
-        LOGGER.log(INFO, "Reset triggered at "+System.currentTimeMillis());
+        LOGGER.log(DEBUG, "Reset triggered at "+System.currentTimeMillis());
         for (Table table : this.catalog.values()) {
-            LOGGER.log(INFO, "Resetting "+table.name);
+            LOGGER.log(DEBUG, "Resetting "+table.name);
             table.primaryKeyIndex().reset();
-            for(var secIdx : table.secondaryIndexMap.values()){
+            for(NonUniqueSecondaryIndex secIdx : table.secondaryIndexMap.values()){
                 secIdx.reset();
             }
-            for(var uniqueIdx : table.partialIndexMap.values()){
+            for(UniqueSecondaryIndex uniqueIdx : table.partialIndexMap.values()){
                 uniqueIdx.reset();
             }
         }
-        LOGGER.log(INFO, "Reset finished at "+System.currentTimeMillis());
-        LOGGER.log(INFO, "GC triggered.");
-        System.gc();
-        LOGGER.log(INFO, "GC finished.");
+        LOGGER.log(DEBUG, "Reset finished at "+System.currentTimeMillis());
+    }
+
+    @Override
+    public void rebuildIndexes() {
+        TransactionContext txCtx = (TransactionContext) beginTransaction(0, 0, 0, false);
+        for (Table table : this.catalog.values()) {
+            int count = 0;
+            Iterator<Object[]> it = table.primaryKeyIndex().iterator(txCtx);
+            while ((it.hasNext())) {
+                Object[] record = it.next();
+                IKey key = KeyUtils.buildRecordKey(table.schema().getPrimaryKeyColumns(), record);
+                table.primaryKeyIndex().doInsert(txCtx, key, record, null);
+                for (NonUniqueSecondaryIndex secIndex : table.secondaryIndexMap.values()) {
+                    secIndex.insert(txCtx, key, record);
+                }
+                count++;
+            }
+            LOGGER.log(INFO, "Table "+table.getName()+" with "+count+" entries scanned for index rebuilding.");
+        }
     }
 
 }

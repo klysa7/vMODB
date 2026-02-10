@@ -41,7 +41,7 @@ public final class NonUniqueSecondaryIndex implements IMultiVersionIndex {
         this.keyMap = new ConcurrentHashMap<>(1024*100);
     }
 
-    public ReadWriteIndex<IKey> getUnderlyingIndex(){
+    public ReadWriteIndex<IKey> underlyingIndex(){
         return this.underlyingIndex;
     }
 
@@ -56,8 +56,7 @@ public final class NonUniqueSecondaryIndex implements IMultiVersionIndex {
     public boolean insert(TransactionContext txCtx, IKey primaryKey, Object[] record){
         IKey secKey = KeyUtils.buildRecordKey( this.underlyingIndex.columns(), record );
         Set<IKey> set = this.keyMap.computeIfAbsent(secKey, (ignored) -> ConcurrentHashMap.newKeySet());
-        var txWriteSet = this.writeSet.computeIfAbsent(txCtx.tid, (ignored) ->
-                Objects.requireNonNullElseGet(WRITE_SET_BUFFER.poll(), HashMap::new));
+        Map<IKey, Tuple<Object[], WriteType>> txWriteSet = this.writeSet.computeIfAbsent(txCtx.tid, (ignored) -> Objects.requireNonNullElseGet(WRITE_SET_BUFFER.poll(), HashMap::new));
         txWriteSet.put(primaryKey, new Tuple<>(record, WriteType.INSERT));
         set.add(primaryKey);
         return true;
@@ -66,7 +65,6 @@ public final class NonUniqueSecondaryIndex implements IMultiVersionIndex {
     @Override
     public void undoTransactionWrites(TransactionContext txCtx){
         Map<IKey, Tuple<Object[], WriteType>> txWriteSet = this.writeSet.remove(txCtx.tid);
-        // var writes = WRITE_SET.get().entrySet().stream().filter(p->p.getValue().t2()==WriteType.INSERT).toList();
         for(Map.Entry<IKey, Tuple<Object[], WriteType>> entry : txWriteSet.entrySet()){
             if(entry.getValue().t2() != WriteType.INSERT) continue;
             IKey secKey = KeyUtils.buildRecordKey( this.underlyingIndex.columns(), entry.getValue().t1() );
@@ -139,7 +137,9 @@ public final class NonUniqueSecondaryIndex implements IMultiVersionIndex {
 
     @Override
     public Iterator<Object[]> iterator(TransactionContext txCtx, IKey key) {
-        if(!this.keyMap.containsKey(key)) return EMPTY_ITERATOR;
+        if(!this.keyMap.containsKey(key)) {
+            return EMPTY_ITERATOR;
+        }
         return new SecondaryIndexIterator(txCtx.readOnly ? txCtx.lastTid : txCtx.tid, this.keyMap.get(key).iterator(), this.primaryIndex::getRecord);
     }
 
@@ -162,7 +162,9 @@ public final class NonUniqueSecondaryIndex implements IMultiVersionIndex {
         public boolean hasNext() {
             while(this.iterator.hasNext()){
                 this.currRecord = this.getRecordFunc.apply(this.tid, this.iterator.next());
-                if(this.currRecord != null) return true;
+                if(this.currRecord != null) {
+                    return true;
+                }
             }
             return false;
         }
@@ -193,7 +195,9 @@ public final class NonUniqueSecondaryIndex implements IMultiVersionIndex {
         public boolean hasNext() {
             while(this.currentIterator.hasNext()){
                 this.currRecord = primaryIndex.getRecord(this.tid, this.currentIterator.next());
-                if(this.currRecord != null) return true;
+                if(this.currRecord != null) {
+                    return true;
+                }
             }
             if(this.idx < this.keys.length - 1){
                 this.idx++;

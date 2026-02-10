@@ -118,8 +118,7 @@ public final class VmsEventHandler extends ModbHttpServer {
     }
 
     /**
-     * It is necessary a way to store the tid received to a
-     * corresponding dependence map.
+     * It is necessary a way to store the tid received to a corresponding dependence map.
      */
     private final Map<Long, Map<String, Long>> tidToPrecedenceMap;
 
@@ -211,7 +210,7 @@ public final class VmsEventHandler extends ModbHttpServer {
     public void run() {
         // setup accept since we need to accept connections from the coordinator and other VMSs
         this.serverSocket.accept(null, new AcceptCompletionHandler());
-        LOGGER.log(INFO,this.me.identifier+": Accept handler setup");
+        LOGGER.log(DEBUG,this.me.identifier+": Accept handler setup");
     }
 
     public void processOutputEvent(IVmsTransactionResult txResult) {
@@ -233,8 +232,7 @@ public final class VmsEventHandler extends ModbHttpServer {
     }
 
     /**
-     * Many outputs from the same transaction may arrive here concurrently,
-     * but can only send the batch commit once
+     * Many outputs from the same transaction may arrive here concurrently, but can only send the batch commit once
      */
     private void updateBatchStats(OutboundEventResult outputEvent) {
         BatchMetadata batchMetadata = this.updateBatchMetadataAtomically(outputEvent);
@@ -253,9 +251,19 @@ public final class VmsEventHandler extends ModbHttpServer {
             this.leaderWorker.queueMessage(BatchComplete.of(thisBatch.batch, this.me.identifier));
         }
         if(this.options.checkpointing()){
-            LOGGER.log(INFO, this.me.identifier + ": Requesting checkpoint for batch " + thisBatch.batch);
-            submitBackgroundTask(()->checkpoint(thisBatch.batch, batchMetadata.maxTidExecuted));
+            LOGGER.log(DEBUG, this.me.identifier + ": Requesting checkpoint for batch " + thisBatch.batch);
+            thisBatch.setStatus(BatchContext.CHECKPOINTING);
+            submitBackgroundTask(()->this.checkpoint(thisBatch.batch, batchMetadata.maxTidExecuted));
+        } else {
+            submitBackgroundTask(()->transactionManager.cleanup(batchMetadata.maxTidExecuted));
         }
+        this.cleanUpBatchInfo(thisBatch.batch);
+    }
+
+    private void cleanUpBatchInfo(long batch) {
+        this.batchContextMap.remove(batch);
+        this.trackingBatchMap.remove(batch);
+        this.tidToPrecedenceMap.remove(batch);
     }
 
     private BatchMetadata updateBatchMetadataAtomically(OutboundEventResult outputEvent) {
@@ -292,14 +300,12 @@ public final class VmsEventHandler extends ModbHttpServer {
     private static final boolean INFORM_BATCH_ACK = false;
 
     private void checkpoint(long batch, long maxTid) {
-        //this.batchContextMap.get(batch).setStatus(BatchContext.CHECKPOINTING);
         // of course, I do not need to stop the scheduler on commit
         // I need to make access to the data versions data race free
         // so new transactions get data versions from the version map or the store
         //long initTs = System.currentTimeMillis();
         this.transactionManager.checkpoint(maxTid);
         //LOGGER.log(WARNING, me.identifier+": Checkpointing latency is "+(System.currentTimeMillis()-initTs));
-        this.batchContextMap.get(batch).setStatus(BatchContext.BATCH_COMMITTED);
         // it may not be necessary. the leader has already moved on at this point
         if(INFORM_BATCH_ACK) {
             this.leaderWorker.queueMessage(BatchCommitAck.of(batch, this.me.identifier));
@@ -481,7 +487,7 @@ public final class VmsEventHandler extends ModbHttpServer {
 
         private void processBatchOfEvents(ByteBuffer readBuffer) {
             List<InboundEvent> inboundEvents = LIST_BUFFER.poll();
-            if(inboundEvents == null) inboundEvents = new ArrayList<>(1024);
+            if(inboundEvents == null) inboundEvents = new ArrayList<>(1024*10);
             try {
                 int count = readBuffer.getInt();
                 LOGGER.log(DEBUG,me.identifier + ": Batch of [" + count + "] events received from " + node.identifier);
@@ -799,8 +805,7 @@ public final class VmsEventHandler extends ModbHttpServer {
             throw new IllegalStateException("Precedent tid of "+payload.tid()+" is unknown.");
         }
         this.tidToPrecedenceMap.put(payload.tid(), precedenceMap);
-        return new InboundEvent( payload.tid(), precedenceMap.get(this.me.identifier),
-                payload.batch(), payload.event(), clazz, input );
+        return new InboundEvent( payload.tid(), precedenceMap.get(this.me.identifier), payload.batch(), payload.event(), clazz, input );
     }
 
     private static final ConcurrentLinkedDeque<List<InboundEvent>> LIST_BUFFER = new ConcurrentLinkedDeque<>();
@@ -1018,8 +1023,7 @@ public final class VmsEventHandler extends ModbHttpServer {
         }
 
         /**
-         * Context of execution of this method:
-         * This is not a terminal node in this batch
+         * Context of execution of this method: This is not a terminal node in this batch
          */
         private void processNewBatchCommand(BatchCommitCommand.Payload batchCommitCommand){
             BatchContext batchContext = BatchContext.build(batchCommitCommand);
@@ -1036,9 +1040,13 @@ public final class VmsEventHandler extends ModbHttpServer {
             LOGGER.log(DEBUG, me.identifier + ": All TIDs for the batch " + batchCommitCommand.batch() + " have been executed");
             batchContext.setStatus(BatchContext.BATCH_COMPLETED);
             if(options.checkpointing()){
-                LOGGER.log(INFO, me.identifier + ": Requesting checkpoint for batch " + batchCommitCommand.batch());
+                LOGGER.log(DEBUG, me.identifier + ": Requesting checkpoint for batch " + batchCommitCommand.batch());
+                batchContext.setStatus(BatchContext.CHECKPOINTING);
                 submitBackgroundTask(()->checkpoint(batchCommitCommand.batch(), batchMetadata.maxTidExecuted));
+            } else {
+                submitBackgroundTask(()->transactionManager.cleanup(batchMetadata.maxTidExecuted));
             }
+            cleanUpBatchInfo(batchCommitCommand.batch());
         }
 
         @Override

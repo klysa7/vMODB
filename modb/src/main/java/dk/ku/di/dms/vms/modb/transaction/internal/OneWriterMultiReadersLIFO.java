@@ -28,7 +28,7 @@ public sealed class OneWriterMultiReadersLIFO<K extends Comparable<K>,V> permits
     @SuppressWarnings("UnnecessaryLocalVariable")
     public final void poll(){
         assert this.head != null;
-        var next = this.head.next;
+        Entry<K, V> next = this.head.next;
         this.head = next;
     }
 
@@ -38,7 +38,7 @@ public sealed class OneWriterMultiReadersLIFO<K extends Comparable<K>,V> permits
 
     /**
      * Gets the entry corresponding to the specified key; if no such entry
-     * exists, returns the entry for the greatest key less than the specified
+     * exists, returns the entry for the greatest key lower than the specified
      * key; if no such entry exists, returns {@code null}.
      */
     public final Entry<K,V> floorEntry(K key) {
@@ -55,44 +55,20 @@ public sealed class OneWriterMultiReadersLIFO<K extends Comparable<K>,V> permits
     }
 
     /**
-     * Gets the entry for the highest key equal or below the specified
-     * key; if no such entry exists, returns {@code null}.
-     * In other words, gets the immediate successor of key.
-     */
-    public final Entry<K,V> getHigherEntryUpToKey(K key) {
-        if(this.head == null) return null;
-        // is parameter key already higher than the highest entry? if so, just return it
-        if(key.compareTo(this.head.key) >= 0) return this.head;
-        Entry<K,V> next = this.head;
-        Entry<K,V> curr;
-        int cmp;
-        do {
-            curr = next;
-            next = next.next;
-            if(next == null) break;
-            cmp = curr.key.compareTo(key);
-        } while(cmp > 0); // curr node is higher than parameter key? if so, continue
-        // it means no entry key is below the parameter key
-        if(next == null && curr.key.compareTo(key) > 0) return null;
-        return curr;
-    }
-
-    /**
      * Remove all entries below the key
      * Method is used to remove TIDs that cannot be seen anymore
      * Not safe if there are concurrent writers and the entry returned is the head
      * @param key node identifier
      */
-    public final Entry<K,V> removeUpToEntry(K key){
-        final Entry<K,V> entryToReturn = this.getHigherEntryUpToKey(key);
+    public final void removeUpToEntry(K key){
+        final Entry<K,V> entryToReturn = this.floorEntry(key);
         this.removeChildren(entryToReturn);
-        return entryToReturn;
     }
 
     public final void removeChildren(final Entry<K,V> entry){
         Entry<K,V> currFloorEntry = entry;
         Entry<K,V> auxEntry;
-        while(currFloorEntry != null){
+        while(currFloorEntry.next != null){
             auxEntry = currFloorEntry.next;
             // set next to null to lose reference
             currFloorEntry.next = null;
@@ -113,7 +89,7 @@ public sealed class OneWriterMultiReadersLIFO<K extends Comparable<K>,V> permits
 
     @Override
     public final String toString(){
-        var current = this.head;
+        Entry<K, V> current = this.head;
         if(current == null) return "";
         String lineSeparator = System.lineSeparator();
         StringBuilder sb = new StringBuilder();

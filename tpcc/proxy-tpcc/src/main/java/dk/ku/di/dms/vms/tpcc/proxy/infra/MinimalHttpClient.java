@@ -94,7 +94,7 @@ public final class MinimalHttpClient implements Closeable {
 
         // headers
         boolean headersEnded = false;
-        while (!headersEnded && socketChannel.read(this.readBuffer) > 0) {
+        while (!headersEnded && this.socketChannel.read(this.readBuffer) > 0) {
             this.readBuffer.flip();
             byte[] bytes = new byte[this.readBuffer.remaining()];
             this.readBuffer.get(bytes);
@@ -119,14 +119,18 @@ public final class MinimalHttpClient implements Closeable {
         }
 
         // body
-        int remaining = contentLength;
+        int remaining;
+        if(status == 200){
+            remaining = contentLength;
+        } else {
+            remaining = contentLength - (responseBuilder.length() - responseBuilder.indexOf("\r\n\r\n") - 4);
+        }
         while (remaining > 0) {
             int read = this.socketChannel.read(this.readBuffer);
             if (read == -1) break;  // end of stream
             this.readBuffer.flip();
             byte[] bytes = new byte[this.readBuffer.remaining()];
             this.readBuffer.get(bytes);
-            //bodyBuilder.append(new String(bytes, StandardCharsets.UTF_8));
             remaining -= bytes.length;
             this.readBuffer.clear();
         }

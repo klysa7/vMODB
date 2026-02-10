@@ -31,28 +31,28 @@ public class StorageUtils {
 
     private static final boolean SEC_IDX_IN_MEMORY_STORAGE = true;
 
-    public static ReadWriteIndex<IKey> createUniqueIndex(Schema schema, int[] columnsIndex, String indexName){
+    public static ReadWriteIndex<IKey> createUniqueIndex(String prefix, Schema schema, int[] columnsIndex, String indexName){
         if(SEC_IDX_IN_MEMORY_STORAGE){
             return new UniqueHashMapIndex(schema, columnsIndex);
         }
-        RecordBufferContext recordBufferContext = StorageUtils.loadRecordBuffer(10, schema.getRecordSize(), indexName, true);
+        RecordBufferContext recordBufferContext = StorageUtils.loadRecordBuffer(prefix, 10, schema.getRecordSize(), indexName, true);
         return new UniqueHashBufferIndex(recordBufferContext, schema, columnsIndex, 10);
     }
 
-    public static ReadWriteIndex<IKey> createNonUniqueIndex(Schema schema, int[] columnsIndex, String indexName){
+    public static ReadWriteIndex<IKey> createNonUniqueIndex(String prefix, Schema schema, int[] columnsIndex, String indexName){
         if(SEC_IDX_IN_MEMORY_STORAGE){
             return new NonUniqueHashMapIndex(schema, columnsIndex);
         } else {
-            OrderedRecordBuffer[] buffers = loadOrderedBuffers(MemoryUtils.DEFAULT_NUM_BUCKETS, MemoryUtils.DEFAULT_PAGE_SIZE, indexName);
+            OrderedRecordBuffer[] buffers = loadOrderedBuffers(prefix, MemoryUtils.DEFAULT_NUM_BUCKETS, MemoryUtils.DEFAULT_PAGE_SIZE, indexName);
             return new NonUniqueHashBufferIndex(buffers, schema, columnsIndex);
         }
     }
 
-    private static OrderedRecordBuffer[] loadOrderedBuffers(int numBuckets, int bucketSize, String fileName){
+    private static OrderedRecordBuffer[] loadOrderedBuffers(String prefix, int numBuckets, int bucketSize, String fileName){
         long sizeInBytes = (long) numBuckets * bucketSize;
         MemorySegment segment;
         try {
-            segment = StorageUtils.mapFileIntoMemorySegment(sizeInBytes, fileName, true);
+            segment = StorageUtils.mapFileIntoMemorySegment(prefix, sizeInBytes, fileName, true);
         } catch (Exception e){
             e.printStackTrace(System.err);
             try (Arena arena = Arena.ofShared()) {
@@ -68,14 +68,14 @@ public class StorageUtils {
         return buffers;
     }
 
-    public static PrimaryIndex createPrimaryIndex(String tableName, Schema schema, boolean isCheckpointing, boolean isTruncating, boolean isChaining, int maxRecords) {
+    public static PrimaryIndex createPrimaryIndex(String prefix, String tableName, Schema schema, boolean isCheckpointing, boolean isTruncating, boolean isChaining, int maxRecords) {
         if(isCheckpointing){
             // map this to a file, so whenever a batch commit event arrives, it can trigger checkpointing the entire file
-            RecordBufferContext recordBufferContext = StorageUtils.loadRecordBuffer(maxRecords, schema.getRecordSizeWithHeader(), tableName, isTruncating);
+            RecordBufferContext recordBufferContext = StorageUtils.loadRecordBuffer(prefix, maxRecords, schema.getRecordSizeWithHeader(), tableName, isTruncating);
 
             UniqueHashBufferIndex pkIndex;
             if(isChaining){
-                pkIndex = new UniqueHashChainingBufferIndex(recordBufferContext, schema, schema.getPrimaryKeyColumns(), maxRecords);
+                pkIndex = UniqueHashChainingBufferIndex.build(prefix, recordBufferContext, schema, schema.getPrimaryKeyColumns(), maxRecords, isTruncating);
             } else {
                 pkIndex = new UniqueHashBufferIndex(recordBufferContext, schema, schema.getPrimaryKeyColumns(), maxRecords);
             }
@@ -101,20 +101,30 @@ public class StorageUtils {
     /**
      * Must consider the header in the record size
      */
-    public static RecordBufferContext loadRecordBuffer(int maxNumberOfRecords, int recordSize, String fileName, boolean truncate){
+    public static RecordBufferContext loadRecordBuffer(String prefix, int maxNumberOfRecords, int recordSize, String fileName, boolean truncate){
         long sizeInBytes = (long) maxNumberOfRecords * recordSize;
-        MemorySegment segment = mapFileIntoMemorySegment(sizeInBytes, fileName, truncate);
+        MemorySegment segment = mapFileIntoMemorySegment(prefix, sizeInBytes, fileName, truncate);
         return RecordBufferContext.build(segment, fileName);
     }
 
-    public static AppendOnlyBoundedBuffer loadAppendOnlyBoundedBuffer(int maxNumberOfRecords, int recordSize, String fileName, boolean truncate){
+    public static AppendOnlyBoundedBuffer loadAppendOnlyBoundedBuffer(String prefix, int maxNumberOfRecords, int recordSize, String fileName, boolean isTruncating){
         long sizeInBytes = (long) maxNumberOfRecords * recordSize;
-        MemorySegment segment = mapFileIntoMemorySegment(sizeInBytes, fileName, truncate);
+        MemorySegment segment = mapFileIntoMemorySegment(prefix, sizeInBytes, fileName,
+                isTruncating ? new StandardOpenOption[]{
+                                StandardOpenOption.CREATE,
+                                StandardOpenOption.TRUNCATE_EXISTING,
+                                StandardOpenOption.READ,
+                                StandardOpenOption.WRITE} :
+                        new StandardOpenOption[]{
+                                StandardOpenOption.CREATE,
+                                StandardOpenOption.READ,
+                                StandardOpenOption.WRITE}
+                );
         return new AppendOnlyBoundedBuffer(segment, fileName);
     }
 
-    public static AppendOnlyUnboundedBuffer loadAppendOnlyUnboundedBuffer(String fileName){
-        File file = buildFile(fileName);
+    public static AppendOnlyUnboundedBuffer loadAppendOnlyUnboundedBuffer(String prefix, String fileName){
+        File file = buildFile(prefix, fileName);
         if(file.delete()){
             LOGGER.log(INFO, "Old file in directory deleted successfully: " + file.getAbsolutePath());
         }
@@ -124,21 +134,20 @@ public class StorageUtils {
                 StandardOpenOption.WRITE};
         try {
             FileChannel fc = FileChannel.open(Path.of(file.toURI()), options);
-            LOGGER.log(INFO, "Attempt to open file in directory completed successfully: " + file.getAbsolutePath());
+            LOGGER.log(DEBUG, "Attempt to open file in directory completed successfully: " + file.getAbsolutePath());
             return new AppendOnlyUnboundedBuffer(fc, fileName);
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
     }
 
-    // file size is unknown
-    public static AppendOnlyBoundedBuffer loadAppendOnlyBuffer(String fileName){
-        MemorySegment segment = mapFileIntoMemorySegment(fileName);
+    public static AppendOnlyBoundedBuffer loadAppendOnlyBuffer(String prefix, String fileName){
+        MemorySegment segment = mapFileIntoMemorySegment(prefix, fileName);
         return new AppendOnlyBoundedBuffer(segment, fileName);
     }
 
-    private static MemorySegment mapFileIntoMemorySegment(String fileName) {
-        File file = buildFile(fileName);
+    private static MemorySegment mapFileIntoMemorySegment(String prefix, String fileName) {
+        File file = buildFile(prefix, fileName);
         try {
             StandardOpenOption[] options = buildFileOpenOptions(false);
             FileChannel fc = FileChannel.open(Path.of(file.toURI()), options);
@@ -149,8 +158,8 @@ public class StorageUtils {
         }
     }
 
-    public static MemorySegment mapFileIntoMemorySegment(long bytes, String fileName, boolean truncate) {
-        File file = buildFile(fileName);
+    public static MemorySegment mapFileIntoMemorySegment(String prefix, long bytes, String fileName, boolean truncate) {
+        File file = buildFile(prefix, fileName);
         try {
             StandardOpenOption[] options = buildFileOpenOptions(truncate);
             FileChannel fc = FileChannel.open(Path.of(file.toURI()), options);
@@ -161,19 +170,30 @@ public class StorageUtils {
         }
     }
 
-    public static String getBasePath(){
+    public static MemorySegment mapFileIntoMemorySegment(String prefix, long bytes, String fileName, StandardOpenOption[] options) {
+        File file = buildFile(prefix, fileName);
+        try {
+            FileChannel fc = FileChannel.open(Path.of(file.toURI()), options);
+            LOGGER.log(DEBUG, "Attempt to open file in directory completed successfully: "+file.getAbsolutePath());
+            return mapFileChannelIntoMemorySegment(fc, bytes);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    public static String getBasePath(String suffix){
         String userHome = ConfigUtils.getUserHome();
         String basePath;
         if(ConfigUtils.isWindows()){
-            basePath = userHome + "\\vms\\";
+            basePath = userHome + "\\vms_"+suffix+"\\";
         } else {
-            basePath = userHome + "/vms/";
+            basePath = userHome + "/vms_"+suffix+"/";
         }
         return basePath;
     }
 
-    public static File buildFile(String fileName) {
-        String filePath = getBasePath() + fileName + ".data";
+    public static File buildFile(String prefix, String fileName) {
+        String filePath = getBasePath(prefix) + fileName + ".data";
         File file = new File(filePath);
         LOGGER.log(DEBUG, "Attempt to create new file in directory: "+filePath);
         if(file.getParentFile().mkdirs()){
