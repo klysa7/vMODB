@@ -1,5 +1,4 @@
 package dk.ku.di.dms.vms.calcite.olap.orchestrator.planning;
-
 import dk.ku.di.dms.vms.calcite.modb.rel.VModbTableAccess;
 import dk.ku.di.dms.vms.calcite.olap.orchestrator.Orchestrator;
 import dk.ku.di.dms.vms.calcite.olap.orchestrator.placement.PlacementResolver;
@@ -17,7 +16,6 @@ import java.util.ArrayList;
 import java.util.List;
 
 import static java.lang.System.Logger.Level.INFO;
-
 
 public final class DistributedPlanner {
 
@@ -55,8 +53,10 @@ public final class DistributedPlanner {
         if (node instanceof Join join) {
             CoordinatorOperatorDefinition leftOperation = relNodeToOperatorTree(join.getLeft());
             CoordinatorOperatorDefinition rightOperation = relNodeToOperatorTree(join.getRight());
-            int[] keys = extractJoinKeys(join);
-            return new JoinDefinition(leftOperation, rightOperation, keys[0], keys[1]);
+
+            JoinKeys keys = extractJoinKeys(join);
+
+            return new JoinDefinition(leftOperation, rightOperation, keys.left, keys.right);
         }
 
         if (isTableAccess(node)) {
@@ -112,36 +112,51 @@ public final class DistributedPlanner {
     }
 
 
-    private int[] extractJoinKeys(Join join) {
+    private record JoinKeys(int[] left, int[] right) {}
+
+    private JoinKeys extractJoinKeys(Join join) {
         RexNode condition = join.getCondition();
+        List<Integer> leftKeys = new ArrayList<>();
+        List<Integer> rightKeys = new ArrayList<>();
+        int leftFieldCount = join.getLeft().getRowType().getFieldCount();
 
-        if (!(condition instanceof RexCall call) || call.getKind() != SqlKind.EQUALS) {
-            throw new IllegalArgumentException("only supports equal join condition");
+        if (condition.getKind() == SqlKind.AND) {
+            RexCall andCall = (RexCall) condition;
+            for (RexNode operand : andCall.getOperands()) {
+                parseEquality(operand, leftKeys, rightKeys, leftFieldCount);
+            }
         }
-        if (call.getOperands().size() != 2) {
-            throw new IllegalArgumentException("unexpected join condition operands");
+        else if (condition.getKind() == SqlKind.EQUALS) {
+            parseEquality(condition, leftKeys, rightKeys, leftFieldCount);
         }
-
-        RexNode leftSide = call.getOperands().get(0);
-        RexNode rightSide = call.getOperands().get(1);
-
-        if (!(leftSide instanceof RexInputRef rexInputRefLeft) || !(rightSide instanceof RexInputRef rexInputRefRight)) {
-            throw new IllegalArgumentException("v1 only supports input-ref join keys, got: " + leftSide + " and " + rightSide);
-        }
-
-        int border = join.getLeft().getRowType().getFieldCount();
-
-        boolean aIsRight = rexInputRefLeft.getIndex() >= border;
-        boolean bIsRight = rexInputRefRight.getIndex() >= border;
-        if (aIsRight == bIsRight) {
-            throw new IllegalArgumentException("Join keys validation failed they must be from different VMSes");
+        else {
+            throw new IllegalArgumentException("Gateway error: only supports equal join condition (found " + condition.getKind() + ")");
         }
 
-        int leftKey = aIsRight ? rexInputRefRight.getIndex() : rexInputRefLeft.getIndex();
-        int rightKeyGlobal = aIsRight ? rexInputRefLeft.getIndex() : rexInputRefRight.getIndex();
-        int rightKey = rightKeyGlobal - border;
+        return new JoinKeys(
+                leftKeys.stream().mapToInt(i -> i).toArray(),
+                rightKeys.stream().mapToInt(i -> i).toArray()
+        );
+    }
 
-        return new int[]{leftKey, rightKey};
+    private void parseEquality(RexNode operand, List<Integer> leftKeys, List<Integer> rightKeys, int leftFieldCount) {
+        if (operand.getKind() != SqlKind.EQUALS) {
+            throw new RuntimeException("Gateway error: inside AND, only supports equal join condition");
+        }
+        RexCall eqCall = (RexCall) operand;
+        RexInputRef op1 = (RexInputRef) eqCall.getOperands().get(0);
+        RexInputRef op2 = (RexInputRef) eqCall.getOperands().get(1);
+
+        int idx1 = op1.getIndex();
+        int idx2 = op2.getIndex();
+
+        if (idx1 < leftFieldCount) {
+            leftKeys.add(idx1);
+            rightKeys.add(idx2 - leftFieldCount);
+        } else {
+            leftKeys.add(idx2);
+            rightKeys.add(idx1 - leftFieldCount);
+        }
     }
 
     public interface ColumnsResolver {

@@ -2,93 +2,85 @@ package dk.ku.di.dms.vms.calcite.olap.orchestrator.runtime.ops;
 
 import dk.ku.di.dms.vms.calcite.olap.orchestrator.runtime.CoordinatorOperator;
 import java.util.*;
-import static java.lang.System.Logger.Level.INFO;
 
 public class LocalJoinOperator implements CoordinatorOperator {
 
-    private static final System.Logger LOGGER = System.getLogger(LocalJoinOperator.class.getName());
-
     private final CoordinatorOperator left;
     private final CoordinatorOperator right;
-    private final Integer leftKeyIdx;
-    private final Integer rightKeyIdx;
-    private Map<Object, List<Object[]>> buildTable;
-    private Iterator<Object[]> currentProbeBatch;
+    private final int[] leftKeyIndices;
+    private final int[] rightKeyIndices;
+    private Map<List<Object>, List<Object[]>> buildTable;
+    private List<Object[]> probeBatch;
+    private int probeIndex = 0;
+    private final List<Object[]> outputBuffer = new ArrayList<>();
 
-    public LocalJoinOperator(CoordinatorOperator left, CoordinatorOperator right, Integer leftKeyIdx, Integer rightKeyIdx) {
+    public LocalJoinOperator(CoordinatorOperator left, CoordinatorOperator right, int[] leftKeyIndices, int[] rightKeyIndices) {
         this.left = left;
         this.right = right;
-        this.leftKeyIdx = leftKeyIdx;
-        this.rightKeyIdx = rightKeyIdx;
-    }
-
-
-    private Object toJoinKey(Object input) {
-        if (input instanceof Number) {
-            return ((Number) input).longValue();
-        }
-        return input;
+        this.leftKeyIndices = leftKeyIndices;
+        this.rightKeyIndices = rightKeyIndices;
     }
 
     @Override
     public void open() {
-        LOGGER.log(INFO, "[LocalJoin] OPENING BOTH SIDES (Parallel Gather)...");
         left.open();
         right.open();
 
         this.buildTable = new HashMap<>();
         List<Object[]> batch;
-        long buildCount = 0;
-
-        //build teh left side
         while ((batch = left.nextBatch()) != null) {
             for (Object[] row : batch) {
-                Object rawKey = row[leftKeyIdx];
-                Object key = toJoinKey(rawKey);
-
-                if (key != null) {
-                    buildTable.computeIfAbsent(key, k -> new ArrayList<>()).add(row);
-                }
-                buildCount++;
+                List<Object> key = extractKey(row, leftKeyIndices);
+                buildTable.computeIfAbsent(key, k -> new ArrayList<>()).add(row);
             }
         }
-
-        String keyType = buildTable.isEmpty() ? "None" : buildTable.keySet().iterator().next().getClass().getSimpleName();
-        LOGGER.log(INFO, "[LocalJoin] Build Complete. Total Rows: " + buildCount + " | Unique Keys: " + buildTable.size() + " | Key Type: " + keyType);
     }
 
     @Override
     public List<Object[]> nextBatch() {
-        // the probe - right side
-        List<Object[]> outputBatch = new ArrayList<>();
+        while (outputBuffer.size() < 1000) {
 
-        while (outputBatch.size() < 100) {
-            if (currentProbeBatch == null || !currentProbeBatch.hasNext()) {
-                List<Object[]> rightBatch = right.nextBatch();
-                if (rightBatch == null) break;
-                currentProbeBatch = rightBatch.iterator();
+            if (probeBatch == null || probeIndex >= probeBatch.size()) {
+                probeBatch = right.nextBatch();
+                probeIndex = 0;
+
+                if (probeBatch == null) {
+                    if (outputBuffer.isEmpty()) return null; // Truly done
+                    break; // Return whatever partial buffer we have
+                }
             }
 
-            Object[] rightRow = currentProbeBatch.next();
+            Object[] rightRow = probeBatch.get(probeIndex++);
+            List<Object> key = extractKey(rightRow, rightKeyIndices);
 
-            Object rawRightKey = rightRow[rightKeyIdx];
-            Object rightKey = toJoinKey(rawRightKey);
-
-            List<Object[]> leftMatches = buildTable.get(rightKey);
-            if (leftMatches != null) {
-                for (Object[] leftRow : leftMatches) {
-                    outputBatch.add(merge(leftRow, rightRow));
+            List<Object[]> matches = buildTable.get(key);
+            if (matches != null) {
+                for (Object[] leftRow : matches) {
+                    outputBuffer.add(concat(leftRow, rightRow));
                 }
             }
         }
-        return outputBatch.isEmpty() ? null : outputBatch;
+
+        if (outputBuffer.isEmpty()) return null;
+
+        List<Object[]> result = new ArrayList<>(outputBuffer);
+        outputBuffer.clear();
+        return result;
     }
 
-    private Object[] merge(Object[] left, Object[] right) {
-        Object[] joined = new Object[left.length + right.length];
-        System.arraycopy(left, 0, joined, 0, left.length);
-        System.arraycopy(right, 0, joined, left.length, right.length);
-        return joined;
+    private List<Object> extractKey(Object[] row, int[] indices) {
+        List<Object> key = new ArrayList<>(indices.length);
+        for (int idx : indices) {
+            key.add(row[idx]);
+        }
+        return key;
+    }
+
+    private Object[] concat(Object[] left, Object[] right) {
+        Object[] result = new Object[left.length + right.length];
+        System.arraycopy(left, 0, result, 0, left.length);
+        System.arraycopy(right, 0, result, left.length, right.length);
+        return result;
     }
 
     @Override

@@ -1,6 +1,7 @@
 package dk.ku.di.dms.vms.calcite;
 
 import com.sun.net.httpserver.HttpServer;
+import dk.ku.di.dms.vms.calcite.client.VmsGatewayClient; // Import the TCP Client
 import dk.ku.di.dms.vms.calcite.http.GatewayHttpHandler;
 import dk.ku.di.dms.vms.calcite.monitor.SnapshotMonitor;
 import dk.ku.di.dms.vms.calcite.service.CoordinatorClient;
@@ -23,18 +24,19 @@ public final class GatewayApp {
         this.coordinatorClientFactory = coordinatorClientFactory;
     }
 
-    // UPDATED SIGNATURE: Takes two URLs now
     public HttpServer start(String bindHost, int port, String httpUrl, String sseUrl) throws IOException {
         HttpServer server = HttpServer.create(new InetSocketAddress(bindHost, port), 0);
 
-        // 1. Start Radio Receiver on Port 8091 (SSE URL)
         startSnapshotMonitor(sseUrl);
-
-        // 2. Initialize Client on Port 8079 (HTTP URL)
         CoordinatorClient coordinatorClient = coordinatorClientFactory.apply(httpUrl);
 
-        // 3. Create Service with access to the Snapshot ID
-        OlapGatewayService service = new OlapGatewayService(coordinatorClient, globalSnapshotId);
+        VmsGatewayClient gatewayClient = new VmsGatewayClient();
+
+        OlapGatewayService service = new OlapGatewayService(
+                coordinatorClient,
+                globalSnapshotId,
+                gatewayClient // <--- NEW ARGUMENT
+        );
 
         server.createContext("/", new GatewayHttpHandler(service));
         server.setExecutor(null);
@@ -50,7 +52,6 @@ public final class GatewayApp {
     private void startSnapshotMonitor(String sseUrl) {
         try {
             URI uri = URI.create(sseUrl);
-            // Pass the host and port from the SSE URL (8091)
             SnapshotMonitor monitor = new SnapshotMonitor(uri.getHost(), uri.getPort(), this.globalSnapshotId);
 
             Thread monitorThread = new Thread(monitor);

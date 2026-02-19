@@ -7,16 +7,20 @@ import dk.ku.di.dms.vms.modb.common.schema.network.control.Presentation;
 import dk.ku.di.dms.vms.modb.common.schema.network.node.IdentifiableNode;
 import dk.ku.di.dms.vms.modb.common.schema.network.node.ServerNode;
 import dk.ku.di.dms.vms.modb.common.schema.network.node.VmsNode;
+import dk.ku.di.dms.vms.modb.common.schema.network.query.QueryRequestEvent;
 import dk.ku.di.dms.vms.modb.common.schema.network.transaction.TransactionAbort;
 import dk.ku.di.dms.vms.modb.common.schema.network.transaction.TransactionEvent;
 import dk.ku.di.dms.vms.modb.common.serdes.IVmsSerdesProxy;
 import dk.ku.di.dms.vms.modb.common.transaction.ITransactionManager;
+import dk.ku.di.dms.vms.modb.index.unique.UniqueHashBufferIndex;
+import dk.ku.di.dms.vms.modb.transaction.TransactionManager;
 import dk.ku.di.dms.vms.sdk.core.metadata.VmsRuntimeMetadata;
 import dk.ku.di.dms.vms.sdk.core.operational.InboundEvent;
 import dk.ku.di.dms.vms.sdk.core.operational.OutboundEventResult;
 import dk.ku.di.dms.vms.sdk.core.scheduler.IVmsTransactionResult;
 import dk.ku.di.dms.vms.sdk.embed.channel.VmsEmbedInternalChannels;
 import dk.ku.di.dms.vms.sdk.embed.client.VmsApplicationOptions;
+import dk.ku.di.dms.vms.sdk.embed.query.VmsQueryWorker;
 import dk.ku.di.dms.vms.web_common.HttpUtils;
 import dk.ku.di.dms.vms.web_common.IHttpHandler;
 import dk.ku.di.dms.vms.web_common.ModbHttpServer;
@@ -583,9 +587,115 @@ public final class VmsEventHandler extends ModbHttpServer {
             switch (nodeTypeIdentifier) {
                 case (Presentation.SERVER_TYPE) -> this.processServerPresentation();
                 case (Presentation.VMS_TYPE) -> this.processVmsPresentation();
+                case (Presentation.GATEWAY_TYPE) -> this.processGatewayPresentation();
                 default -> this.processUnknownNodeType(nodeTypeIdentifier);
             }
         }
+
+        private void processGatewayPresentation() {
+            LOGGER.log(INFO, me.identifier + ": Start processing presentation message from a Gateway");
+            VmsNode gatewayNode = Presentation.readVms(this.buffer, serdesProxy);
+            LOGGER.log(INFO, me.identifier + ": Gateway identified: " + gatewayNode.identifier);
+
+            this.buffer.clear();
+
+            ConnectionMetadata connMetadata = new ConnectionMetadata(
+                    gatewayNode.hashCode(),
+                    ConnectionMetadata.NodeType.GATEWAY,
+                    this.channel
+            );
+
+            this.channel.read(this.buffer, 0,
+                    new GatewayReadCompletionHandler(gatewayNode, connMetadata, this.buffer));
+        }
+
+        /**
+         * NEW: Dedicated Gateway Handler
+         */
+        private final class GatewayReadCompletionHandler implements CompletionHandler<Integer, Integer> {
+
+            private final IdentifiableNode gateway;
+            private final ConnectionMetadata connectionMetadata;
+            private final ByteBuffer readBuffer;
+
+            public GatewayReadCompletionHandler(IdentifiableNode gateway, ConnectionMetadata connectionMetadata, ByteBuffer readBuffer) {
+                this.gateway = gateway;
+                this.connectionMetadata = connectionMetadata;
+                this.readBuffer = readBuffer;
+            }
+
+            @Override
+            public void completed(Integer result, Integer startPos) {
+                if (result == -1) {
+                    LOGGER.log(WARNING, me.identifier + ": Gateway " + gateway.identifier + " disconnected.");
+                    try { connectionMetadata.channel.close(); } catch (IOException ignored) {}
+                    return;
+                }
+
+                if (startPos == 0) readBuffer.flip();
+
+                byte type = readBuffer.get();
+
+                if (type == QueryRequestEvent.QUERY_REQUEST_TYPE) {
+                    processQueryRequest(readBuffer);
+                } else {
+                    LOGGER.log(ERROR, "Unknown message type from Gateway: " + type);
+                }
+
+                if (readBuffer.hasRemaining()) {
+                    this.completed(result, readBuffer.position());
+                } else {
+                    readBuffer.clear();
+                    connectionMetadata.channel.read(readBuffer, 0, this);
+                }
+            }
+
+            private void processQueryRequest(ByteBuffer buffer) {
+                try {
+                    var payload = QueryRequestEvent.read(buffer);
+                    LOGGER.log(INFO, "Received Scan Request for Table: " + payload.tableName());
+
+                    TransactionManager tm = (TransactionManager) transactionManager;
+
+                    Object indexObj = tm.getIndex(payload.tableName());
+                    Iterator<Long> addressIterator = tm.getScanIterator(payload.tableName());
+
+                    if (indexObj == null || addressIterator == null) {
+                        LOGGER.log(ERROR, "Table or Index not found: " + payload.tableName());
+                        return;
+                    }
+
+                    if (!(indexObj instanceof UniqueHashBufferIndex)) {
+                        LOGGER.log(ERROR, "Table " + payload.tableName() + " is not using a BufferIndex. Chaining must be false.");
+                        return;
+                    }
+
+                    UniqueHashBufferIndex index = (UniqueHashBufferIndex) indexObj;
+
+                    VmsQueryWorker worker = new VmsQueryWorker(
+                            (AsynchronousSocketChannel) connectionMetadata.channel,
+                            index,
+                            addressIterator,
+                            payload,
+                            options.networkBufferSize(),
+                            options.networkSendTimeout()
+                    );
+
+                    Thread.ofPlatform()
+                            .name("query-worker-" + payload.queryId())
+                            .start(worker);
+
+                } catch (Exception e) {
+                    LOGGER.log(ERROR, "Error processing query request", e);
+                }
+            }
+
+            @Override
+            public void failed(Throwable exc, Integer attachment) {
+                LOGGER.log(ERROR, "Gateway connection error", exc);
+            }
+        }
+
 
         private void processServerPresentation() {
             LOGGER.log(INFO,me.identifier+": Start processing presentation message from a node claiming to be a server");

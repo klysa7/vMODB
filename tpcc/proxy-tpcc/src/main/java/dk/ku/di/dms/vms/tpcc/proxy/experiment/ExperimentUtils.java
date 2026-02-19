@@ -1,6 +1,7 @@
 package dk.ku.di.dms.vms.tpcc.proxy.experiment;
 
 import dk.ku.di.dms.vms.coordinator.Coordinator;
+
 import dk.ku.di.dms.vms.coordinator.transaction.TransactionBootstrap;
 import dk.ku.di.dms.vms.coordinator.transaction.TransactionDAG;
 import dk.ku.di.dms.vms.coordinator.transaction.TransactionInput;
@@ -25,6 +26,8 @@ import java.util.function.Function;
 import static java.lang.System.Logger.Level.WARNING;
 
 public final class ExperimentUtils {
+
+    private static final boolean SLEEP_MODE = true;
 
     private static final System.Logger LOGGER = System.getLogger(ExperimentUtils.class.getName());
 
@@ -199,6 +202,15 @@ public final class ExperimentUtils {
 
     private static Function<Object, Long> tpccInputBuilder(final Coordinator coordinator) {
         return input -> {
+
+            if (SLEEP_MODE) {
+                try {
+                    Thread.sleep(1000); // Sleep 1 second for Human Pace
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+
             TransactionInput.Event eventPayload;
             String txIdentifier;
             if(input instanceof NewOrderWareIn newOrderInput){

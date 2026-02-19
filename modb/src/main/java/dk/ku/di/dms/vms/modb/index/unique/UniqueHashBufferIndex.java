@@ -14,6 +14,8 @@ import dk.ku.di.dms.vms.modb.storage.iterator.unique.KeyRecordIterator;
 import dk.ku.di.dms.vms.modb.storage.iterator.unique.RecordIterator;
 import dk.ku.di.dms.vms.modb.storage.record.RecordBufferContext;
 
+import java.nio.ByteBuffer;
+import java.util.Iterator;
 import java.util.concurrent.locks.ReentrantLock;
 
 import static dk.ku.di.dms.vms.modb.common.memory.MemoryUtils.UNSAFE;
@@ -57,6 +59,56 @@ public class UniqueHashBufferIndex extends ReadWriteIndex<IKey> implements ReadW
         this.capacity = capacity;
         this.limit = recordBufferContext.address + (this.recordSize * (this.capacity == 1 ? 1 : this.capacity - 1));
         this.p = Integer.numberOfTrailingZeros(this.capacity);
+    }
+
+    public int getRecordSize() {
+        return (int) this.recordSize;
+    }
+
+    /**
+     * NEW: Zero-Copy Method
+     * Copies raw bytes from off-heap memory directly to the network buffer.
+     */
+    /**
+     * COPIES RAW DATA FROM MEMORY TO NETWORK BUFFER.
+     */
+    public void copyRecordToBuffer(long srcAddress, ByteBuffer destBuffer) {
+        // 1. Calculate source address (Skip the internal Record Header)
+        // We only want the payload (columns), not the MVCC/Locking headers.
+        long dataAddress = srcAddress + Schema.RECORD_HEADER;
+
+        // 2. Determine how many bytes to copy
+        int dataSize = this.schema.getRecordSizeWithoutHeader();
+
+        // 3. Perform the Copy
+        // We copy from Off-Heap Memory -> Temporary Heap Array -> ByteBuffer.
+        // This is safe for both Direct and Heap buffers.
+        byte[] temp = new byte[dataSize];
+        UNSAFE.copyMemory(null, dataAddress, temp, UNSAFE.arrayBaseOffset(byte[].class), dataSize);
+
+        // 4. Put bytes into the network buffer
+        destBuffer.put(temp);
+    }
+
+    /**
+     * NEW: Address Iterator
+     * Returns an iterator that yields MEMORY ADDRESSES (long), not Objects.
+     */
+    public Iterator<Long> addressIterator() {
+        return new Iterator<Long>() {
+            private final IRecordIterator<IKey> internalIter = iterator();
+
+            @Override
+            public boolean hasNext() {
+                return internalIter.hasNext();
+            }
+
+            @Override
+            public Long next() {
+                internalIter.next(); // Advance
+                return internalIter.address(); // Return address
+            }
+        };
     }
 
     @Override

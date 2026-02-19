@@ -4,12 +4,20 @@ public final class PlacementResolver {
 
     public String endpointUrl(String schema, String table) {
 
-        if ("order".equals(schema) && "orders".equals(table)) {
-            return "http://localhost:8083/orders";
+        if ("warehouse".equals(schema)) {
+            return "http://localhost:8001/" + table;
         }
 
-        if ("payment".equals(schema) && "order_payment_cards".equals(table)) {
-            return "http://localhost:8084/order-payments";
+        if ("inventory".equals(schema)) {
+            return "http://localhost:8002/" + table;
+        }
+
+        if ("order".equals(schema)) {
+            return "http://localhost:8003/" + table;
+        }
+
+        if ("payment".equals(schema)) {
+            return "http://localhost:8084/" + table;
         }
 
         throw new IllegalArgumentException("No endpoint mapping for " + schema + "." + table);

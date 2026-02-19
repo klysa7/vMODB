@@ -1,8 +1,8 @@
 package dk.ku.di.dms.vms.calcite.olap.orchestrator.runtime;
 
+import dk.ku.di.dms.vms.calcite.client.VmsGatewayClient;
 import dk.ku.di.dms.vms.calcite.olap.orchestrator.planning.DistributedPlan;
 import dk.ku.di.dms.vms.calcite.olap.orchestrator.planning.VmsSubplan;
-import dk.ku.di.dms.vms.calcite.olap.orchestrator.rpc.VmsHttpClient;
 import dk.ku.di.dms.vms.calcite.olap.orchestrator.planning.ops.*;
 import dk.ku.di.dms.vms.calcite.olap.orchestrator.runtime.ops.*;
 
@@ -15,70 +15,76 @@ import static java.lang.System.Logger.Level.INFO;
 public final class DistributedExecutor {
 
     private static final System.Logger LOGGER = System.getLogger(DistributedExecutor.class.getName());
-    private final VmsHttpClient vmsHttpClient;
 
-    public DistributedExecutor(VmsHttpClient vmsHttpClient) {
-        this.vmsHttpClient = vmsHttpClient;
+    private final VmsGatewayClient gatewayClient;
+
+    public DistributedExecutor(VmsGatewayClient gatewayClient) {
+        this.gatewayClient = gatewayClient;
     }
 
     public PushdownResponse execute(DistributedPlan distributedPlan) {
         long start = System.currentTimeMillis();
-        LOGGER.log(INFO, ">>> STH LIKE A TRINO DRIVER STARTING DRIVER LOOP FFOR SNAPSHOT #" + distributedPlan.snapshot);
+        LOGGER.log(INFO, ">>> [EXECUTOR] Starting Execution for Snapshot #" + distributedPlan.snapshot);
 
         CoordinatorOperator root = buildOperatorTree(distributedPlan.root, distributedPlan);
-        LOGGER.log(INFO, "--> [DRIVER] OPENING PIPELINE THE ROOT OPENS< ITS STARTING");
+
+        LOGGER.log(INFO, "--> [EXECUTOR] Opening Pipeline...");
         root.open();
 
         List<List<Object>> allRows = new ArrayList<>();
         List<Object[]> batch;
-        int batchCount = 0;
+        long totalRows = 0;
 
-        LOGGER.log(INFO, "--> [DRIVER] ENTERING PROCESSING LOOP...");
+        LOGGER.log(INFO, "--> [EXECUTOR] Entering Fetch Loop...");
         try {
-            // This is the tight loop. In Trino, this checks isBlocked
-            // but nextBatch() returns immediately if data is in the buffer
             while ((batch = root.nextBatch()) != null) {
-                batchCount++;
-                if (!batch.isEmpty()) {
-                    System.out.println(" RESULT ROW: " + java.util.Arrays.toString(batch.get(0)));
-                }
+                totalRows += batch.size();
                 for (Object[] row : batch) {
                     allRows.add(Arrays.asList(row));
                 }
-//                if (batchCount % 10 == 0) LOGGER.log(INFO, ">>> [DRIVER] Processed batch #" + batchCount);
             }
+        } catch (Exception e) {
+            LOGGER.log(System.Logger.Level.ERROR, "Error during execution execution", e);
+            throw e;
         } finally {
-            LOGGER.log(INFO, ">>> [DRIVER] CLOSING PIPELINE");
+            LOGGER.log(INFO, ">>> [EXECUTOR] Closing Pipeline");
             root.close();
         }
 
-        LOGGER.log(INFO, "DRIVER] FINISHED. Total Rows: " + allRows.size() + " Time: " + (System.currentTimeMillis() - start) + "ms");
+        long duration = System.currentTimeMillis() - start;
+        LOGGER.log(INFO, "[EXECUTOR] FINISHED. Total Rows: " + totalRows + " Time: " + duration + "ms");
+
         return new PushdownResponse("gateway", distributedPlan.snapshot, null, allRows);
     }
 
-    private CoordinatorOperator buildOperatorTree(CoordinatorOperatorDefinition coordinatorOperatorDefinition,
-                                                  DistributedPlan distributedPlan) {
+    private CoordinatorOperator buildOperatorTree(CoordinatorOperatorDefinition def, DistributedPlan plan) {
 
-        if (coordinatorOperatorDefinition instanceof ScanDefinition scanDef) {
-            VmsSubplan subplan = distributedPlan.subPlans.stream()
+        if (def instanceof ScanDefinition scanDef) {
+            VmsSubplan subplan = plan.subPlans.stream()
                     .filter(s -> s.exchangeId.equals(scanDef.exchangeId()))
-                    .findFirst().orElseThrow();
-            //do it asychronously
-            return new AsyncExchangeReadOperator(vmsHttpClient, subplan, distributedPlan.snapshot);
+                    .findFirst()
+                    .orElseThrow(() -> new IllegalStateException("Subplan not found for exchange: " + scanDef.exchangeId()));
+
+            return new StreamingScanOperator(gatewayClient, subplan, plan.snapshot);
         }
-        if (coordinatorOperatorDefinition instanceof JoinDefinition joinDefinition) {
+
+        if (def instanceof JoinDefinition joinDef) {
             return new LocalJoinOperator(
-                    buildOperatorTree(joinDefinition.left(), distributedPlan),
-                    buildOperatorTree(joinDefinition.right(), distributedPlan),
-                    joinDefinition.leftKeyIndex(), joinDefinition.rightKeyIndex()
+                    buildOperatorTree(joinDef.left(), plan),
+                    buildOperatorTree(joinDef.right(), plan),
+                    // CHANGED: passing arrays (int[]) instead of single ints
+                    joinDef.leftKeys(),
+                    joinDef.rightKeys()
             );
         }
-        if (coordinatorOperatorDefinition instanceof ProjectDefinition projectDefinition) {
+
+        if (def instanceof ProjectDefinition projDef) {
             return new LocalProjectOperator(
-                    buildOperatorTree(projectDefinition.input(), distributedPlan),
-                    projectDefinition.projectedIndices()
+                    buildOperatorTree(projDef.input(), plan),
+                    projDef.projectedIndices()
             );
         }
-        throw new IllegalArgumentException("Unknown Op: " + coordinatorOperatorDefinition);
+
+        throw new IllegalArgumentException("Unknown Op: " + def);
     }
 }

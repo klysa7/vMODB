@@ -48,8 +48,8 @@ public class PlanVisualizer {
 
         if (op instanceof JoinDefinition join) {
             sb.append("LOCAL JOIN [Hash]\n");
-            sb.append(indent).append("    ").append("Condition: Left($").append(join.leftKeyIndex())
-                    .append(") == Right($").append(join.rightKeyIndex()).append(")\n");
+            sb.append(indent).append("    ").append("Condition: Left($").append(join.leftKeys())
+                    .append(") == Right($").append(join.rightKeys()).append(")\n");
 
             // Recurse Left and Right
             printRecursive(join.left(), level + 1, sb);

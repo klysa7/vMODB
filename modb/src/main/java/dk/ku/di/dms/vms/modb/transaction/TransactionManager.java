@@ -11,6 +11,7 @@ import dk.ku.di.dms.vms.modb.definition.Table;
 import dk.ku.di.dms.vms.modb.definition.key.IKey;
 import dk.ku.di.dms.vms.modb.definition.key.KeyUtils;
 import dk.ku.di.dms.vms.modb.definition.key.SimpleKey;
+import dk.ku.di.dms.vms.modb.index.unique.UniqueHashBufferIndex;
 import dk.ku.di.dms.vms.modb.query.analyzer.Analyzer;
 import dk.ku.di.dms.vms.modb.query.analyzer.QueryTree;
 import dk.ku.di.dms.vms.modb.query.analyzer.exception.AnalyzerException;
@@ -183,6 +184,32 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
             }
             case DELETE -> { }
             default -> throw new IllegalStateException("Statement type cannot be identified.");
+        }
+    }
+
+    public Object getIndex(String tableName) {
+        Table table = this.catalog.get(tableName);
+        if (table == null) return null;
+        return table.primaryKeyIndex().underlyingIndex();
+    }
+
+    public Iterator<Long> getScanIterator(String tableName) {
+        Table table = this.catalog.get(tableName);
+        if (table == null) throw new IllegalArgumentException("Table not found: " + tableName);
+
+        var underlying = table.primaryKeyIndex().underlyingIndex();
+
+        if (underlying instanceof UniqueHashBufferIndex rawIndex) {
+            return rawIndex.addressIterator();
+        }
+
+        LOGGER.log(INFO, "Table " + tableName + " is using HashMapIndex. Attempting fallback...");
+
+        try {
+            java.lang.reflect.Method method = underlying.getClass().getMethod("addressIterator");
+            return (Iterator<Long>) method.invoke(underlying);
+        } catch (Exception e) {
+            throw new IllegalStateException("Table " + tableName + " is using HashMapIndex and does not support address iteration.");
         }
     }
 
