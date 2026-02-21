@@ -25,9 +25,19 @@ public final class Main {
         // variable
         int numStockItems = num_ware * 100_000;
         prop.setProperty("max_records.stock", String.valueOf(numStockItems));
-        prop.setProperty("table.stock.chaining", "true");
+
+        // --- HARDCODED PROPERTIES ---
+        prop.setProperty("table.stock.chaining", "false");
+        prop.setProperty("checkpointing", "true");
+
+        System.out.println("\n===========================================");
+        System.out.println("[CONFIG] INVENTORY NODE BOOTING...");
+        System.out.println("[CONFIG] Chaining: " + prop.getProperty("table.stock.chaining"));
+        System.out.println("[CONFIG] Checkpointing: " + prop.getProperty("checkpointing"));
+        System.out.println("===========================================\n");
 
         VmsApplicationOptions options = VmsApplicationOptions.build(
+                prop, // Pass the modified properties here!
                 "0.0.0.0",
                 8002, new String[]{
                         "dk.ku.di.dms.vms.tpcc.inventory",

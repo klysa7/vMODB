@@ -13,13 +13,13 @@ public final class GatewayHttpHandler implements HttpHandler {
 
     static final String PATH_ORDERS = "/olap/orders";
     static final String SQL = """
-        SELECT c.c_id, c.c_first, c.c_last, o.o_id, o.o_entry_d
+        SELECT c.c_id, c.c_first, o.o_id
         FROM warehouse.customer c
         JOIN "order".orders o
-          ON c.c_w_id = o.o_w_id 
-          AND c.c_d_id = o.o_d_id 
-          AND c.c_id = o.o_c_id
-        """;
+        ON c.c_w_id = o.o_w_id
+        AND c.c_d_id = o.o_d_id
+        AND c.c_id = o.o_c_id
+    """;
 
     private final OlapGatewayService service;
 

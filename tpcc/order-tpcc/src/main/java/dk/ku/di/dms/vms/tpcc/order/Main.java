@@ -34,22 +34,31 @@ public final class Main {
         prop.setProperty("max_records.order_line", String.valueOf(numOrderLine));
         prop.setProperty("max_records.history", "500000");
 
-        prop.setProperty("table.orders.chaining", "true");
-        prop.setProperty("table.new_orders.chaining", "true");
-        prop.setProperty("table.order_line.chaining", "true");
-        prop.setProperty("table.history.chaining", "true");
+        // --- HARDCODED PROPERTIES ---
+        prop.setProperty("table.orders.chaining", "false");
+        prop.setProperty("table.new_orders.chaining", "false");
+        prop.setProperty("table.order_line.chaining", "false");
+        prop.setProperty("table.history.chaining", "false");
+        prop.setProperty("checkpointing", "true");
+
+        System.out.println("\n===========================================");
+        System.out.println("[CONFIG] ORDER NODE BOOTING...");
+        System.out.println("[CONFIG] Chaining: " + prop.getProperty("table.orders.chaining"));
+        System.out.println("[CONFIG] Checkpointing: " + prop.getProperty("checkpointing"));
+        System.out.println("===========================================\n");
 
         VmsApplicationOptions options = VmsApplicationOptions.build(
+                prop, // Pass the modified properties here!
                 "0.0.0.0",
                 8003, new String[]{
                         "dk.ku.di.dms.vms.tpcc.order",
                         "dk.ku.di.dms.vms.tpcc.common"
                 });
         return VmsApplication.build(options, (x,y) -> new OrderHttpHandler(x,
-                (IOrderRepository) y.apply("orders"),
-                (INewOrderRepository) y.apply("new_orders"),
-                (IOrderLineRepository) y.apply("order_line"),
-                (IHistoryRepository) y.apply("history")
+                        (IOrderRepository) y.apply("orders"),
+                        (INewOrderRepository) y.apply("new_orders"),
+                        (IOrderLineRepository) y.apply("order_line"),
+                        (IHistoryRepository) y.apply("history")
                 )
         );
     }

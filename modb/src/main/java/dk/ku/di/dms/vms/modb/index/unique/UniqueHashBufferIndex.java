@@ -65,35 +65,16 @@ public class UniqueHashBufferIndex extends ReadWriteIndex<IKey> implements ReadW
         return (int) this.recordSize;
     }
 
-    /**
-     * NEW: Zero-Copy Method
-     * Copies raw bytes from off-heap memory directly to the network buffer.
-     */
-    /**
-     * COPIES RAW DATA FROM MEMORY TO NETWORK BUFFER.
-     */
     public void copyRecordToBuffer(long srcAddress, ByteBuffer destBuffer) {
-        // 1. Calculate source address (Skip the internal Record Header)
-        // We only want the payload (columns), not the MVCC/Locking headers.
         long dataAddress = srcAddress + Schema.RECORD_HEADER;
-
-        // 2. Determine how many bytes to copy
         int dataSize = this.schema.getRecordSizeWithoutHeader();
 
-        // 3. Perform the Copy
-        // We copy from Off-Heap Memory -> Temporary Heap Array -> ByteBuffer.
-        // This is safe for both Direct and Heap buffers.
         byte[] temp = new byte[dataSize];
         UNSAFE.copyMemory(null, dataAddress, temp, UNSAFE.arrayBaseOffset(byte[].class), dataSize);
 
-        // 4. Put bytes into the network buffer
         destBuffer.put(temp);
     }
 
-    /**
-     * NEW: Address Iterator
-     * Returns an iterator that yields MEMORY ADDRESSES (long), not Objects.
-     */
     public Iterator<Long> addressIterator() {
         return new Iterator<Long>() {
             private final IRecordIterator<IKey> internalIter = iterator();
@@ -105,8 +86,8 @@ public class UniqueHashBufferIndex extends ReadWriteIndex<IKey> implements ReadW
 
             @Override
             public Long next() {
-                internalIter.next(); // Advance
-                return internalIter.address(); // Return address
+                internalIter.next();
+                return internalIter.address();
             }
         };
     }

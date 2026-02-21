@@ -655,10 +655,10 @@ public final class VmsEventHandler extends ModbHttpServer {
                     var payload = QueryRequestEvent.read(buffer);
                     LOGGER.log(INFO, "Received Scan Request for Table: " + payload.tableName());
 
-                    TransactionManager tm = (TransactionManager) transactionManager;
+                    TransactionManager transactionManagerGateway = (TransactionManager) transactionManager;
 
-                    Object indexObj = tm.getIndex(payload.tableName());
-                    Iterator<Long> addressIterator = tm.getScanIterator(payload.tableName());
+                    Object indexObj = transactionManagerGateway.getIndex(payload.tableName());
+                    Iterator<Long> addressIterator = transactionManagerGateway.getScanIterator(payload.tableName());
 
                     if (indexObj == null || addressIterator == null) {
                         LOGGER.log(ERROR, "Table or Index not found: " + payload.tableName());
