@@ -14,6 +14,7 @@ import java.util.NoSuchElementException;
 import java.util.Queue;
 
 import static java.lang.System.Logger.Level.INFO;
+import static java.lang.System.Logger.Level.ERROR;
 
 public class VmsResultIterator implements Iterator<Object[]> {
 
@@ -36,24 +37,23 @@ public class VmsResultIterator implements Iterator<Object[]> {
         }
         this.columnTypes = columnTypes;
         this.tableName = tableName;
-
-        LOGGER.log(INFO, "Iterator initialized for: " + tableName);
+        LOGGER.log(INFO, ">>> [ITERATOR] Initialized. Awaiting bytes from: " + tableName);
     }
 
     private void fetchNextBatch() {
         if (isEos) return;
         try {
+            LOGGER.log(INFO, ">>> [ITERATOR] Blocking on network read for table: " + tableName);
             byte type = dataInputStream.readByte();
 
-            //end of stream
             if (type == 101) {
                 dataInputStream.readInt();
                 dataInputStream.readLong();
-                LOGGER.log(INFO, "[" + tableName + "] End of stream reached. Total read: " + recordsRead);
+                LOGGER.log(INFO, ">>> [ITERATOR] Clean End of stream reached. Total read: " + recordsRead);
                 close();
                 return;
             }
-            //QUERY_RESULT_TYPE
+
             if (type == 100) {
                 int dataSize = dataInputStream.readInt();
                 long queryId = dataInputStream.readLong();
@@ -63,7 +63,6 @@ public class VmsResultIterator implements Iterator<Object[]> {
                     int rowSize = dataInputStream.readInt();
                     byte[] rowData = new byte[rowSize];
                     dataInputStream.readFully(rowData);
-
                     bytesRemainingInBatch -= (4 + rowSize);
 
                     Object[] parsedRow = parseRowData(rowData);
@@ -71,14 +70,15 @@ public class VmsResultIterator implements Iterator<Object[]> {
                     recordsRead++;
 
                     if (recordsRead <= 3 || recordsRead % 10000 == 0) {
-                        LOGGER.log(INFO, "[" + tableName + "] Scanned Record " + recordsRead);
+                        LOGGER.log(INFO, ">>> [ITERATOR] Successfully extracted JSON Record " + recordsRead);
                     }
                 }
             }
         } catch (EOFException e) {
+            LOGGER.log(INFO, ">>> [ITERATOR] Connection closed normally by VMS.");
             close();
         } catch (Exception e) {
-            LOGGER.log(INFO, "Iterator error", e);
+            LOGGER.log(ERROR, ">>> [ITERATOR] FATAL ERROR during fetchNextBatch!", e);
             close();
         }
     }
@@ -86,10 +86,29 @@ public class VmsResultIterator implements Iterator<Object[]> {
     private Object[] parseRowData(byte[] rowData) {
         Object[] row = new Object[columnTypes.length];
         ByteBuffer wrapper = ByteBuffer.wrap(rowData).order(ByteOrder.LITTLE_ENDIAN);
-//very specific, maybe find the tables, columnns in a dynamic way
-        if (tableName.contains("customer")) {
-            int base = 17;
-            try {
+
+        try {
+            // THE DISTRIBUTED JOIN RESPONSE
+            if (rowData.length > 100) {
+                int customerBase = 17;
+                row[0] = wrapper.getInt(customerBase + 8); // c_id
+
+                byte[] strBytes = new byte[16];
+                wrapper.position(customerBase + 12);
+                wrapper.get(strBytes);
+                row[1] = new String(strBytes, StandardCharsets.UTF_8).trim(); // c_first
+
+                int orderRecordSize = 40;
+                int orderStartOffset = rowData.length - orderRecordSize;
+                int orderBase = orderStartOffset + 4;
+                row[2] = wrapper.getInt(orderBase + 8); // o_id
+
+                return row;
+            }
+
+            // STANDARD SINGLE TABLE SCANS
+            if (tableName.contains("customer")) {
+                int base = 17;
                 row[2] = wrapper.getInt(base + 0);
                 row[1] = wrapper.getInt(base + 4);
                 row[0] = wrapper.getInt(base + 8);
@@ -100,10 +119,8 @@ public class VmsResultIterator implements Iterator<Object[]> {
                     wrapper.get(strBytes);
                     row[3] = new String(strBytes, StandardCharsets.UTF_8).trim();
                 }
-            } catch (Exception e) { Arrays.fill(row, "RAW"); }
-        } else {//order
-            int base = 4;
-            try {
+            } else { // order
+                int base = 4;
                 int w_id = wrapper.getInt(base + 0);
                 int d_id = wrapper.getInt(base + 4);
                 int o_id = wrapper.getInt(base + 8);
@@ -115,14 +132,17 @@ public class VmsResultIterator implements Iterator<Object[]> {
                 row[3] = c_id;
 
                 if (columnTypes.length > 4) row[4] = wrapper.getLong(base + 16);
-            } catch (Exception e) { Arrays.fill(row, "RAW"); }
+            }
+        } catch (Exception e) {
+            Arrays.fill(row, "PARSE_ERROR");
         }
+
         return row;
     }
 
     @Override
     public boolean hasNext() {
-        if (rowBuffer.isEmpty()) {
+        if (rowBuffer.isEmpty() && !isEos) {
             fetchNextBatch();
         }
         return !rowBuffer.isEmpty();

@@ -19,6 +19,7 @@ public final class GatewayHttpHandler implements HttpHandler {
         ON c.c_w_id = o.o_w_id
         AND c.c_d_id = o.o_d_id
         AND c.c_id = o.o_c_id
+        WHERE c.c_w_id = 1
     """;
 
     private final OlapGatewayService service;

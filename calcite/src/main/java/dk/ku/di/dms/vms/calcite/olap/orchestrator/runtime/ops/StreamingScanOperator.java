@@ -33,6 +33,8 @@ public class StreamingScanOperator implements CoordinatorOperator {
         this.snapshotId = snapshotId;
     }
 
+
+
     @Override
     public void open() {
         this.startTime = System.nanoTime();
@@ -45,7 +47,7 @@ public class StreamingScanOperator implements CoordinatorOperator {
         String host = "localhost";
         int tcpPort = resolveTpccPort(tableName);
 
-        LOGGER.log(INFO, "[StreamingScan] Opening Connection -> " + host + ":" + tcpPort + " | Table: " + tableName);
+        LOGGER.log(INFO, "[StreamingScan] Opening Connection -> " + host + ":" + tcpPort + " | Table: " + tableName + " | Mode: " + subplan.mode);
 
         List<Class<?>> types = new ArrayList<>();
         for (String col : subplan.columnsInOrder) {
@@ -53,7 +55,9 @@ public class StreamingScanOperator implements CoordinatorOperator {
         }
 
         try {
-            this.tcpIterator = client.scan(host, tcpPort, snapshotId, tableName, types);
+            // FIX: We now pass subplan.mode and subplan.routingData to match the new signature!
+            this.tcpIterator = client.scan(host, tcpPort, snapshotId, snapshotId, subplan.mode, tableName, types, subplan.predicates, subplan.routingData);
+
             LOGGER.log(INFO, "[StreamingScan] Connection Established. Iterator ready.");
         } catch (Exception e) {
             throw new RuntimeException("Failed to open streaming connection to " + host + ":" + tcpPort, e);
@@ -95,18 +99,31 @@ public class StreamingScanOperator implements CoordinatorOperator {
 
     @Override
     public List<Object[]> nextBatch() {
+        String tableName = ((ScanAllOperation) subplan.operation).table;
+        LOGGER.log(INFO, ">>> [StreamingScan] nextBatch() called for table: " + tableName);
+
         if (this.firstByteTime == 0) {
             this.firstByteTime = System.nanoTime();
             double ttfbMs = (firstByteTime - startTime) / 1_000_000.0;
-            System.out.println("[Metrics] TTFB: " + ttfbMs + " ms");
+            System.out.println("[Metrics] Operator invoke time (NOT real TTFB): " + ttfbMs + " ms");
         }
 
-        if (tcpIterator == null || !tcpIterator.hasNext()) {
+        if (tcpIterator == null) {
+            LOGGER.log(INFO, ">>> [StreamingScan] tcpIterator is NULL! Returning null.");
+            return null;
+        }
+
+        LOGGER.log(INFO, ">>> [StreamingScan] Blocking on tcpIterator.hasNext() for table: " + tableName + "...");
+        boolean hasData = tcpIterator.hasNext();
+        LOGGER.log(INFO, ">>> [StreamingScan] tcpIterator.hasNext() returned: " + hasData);
+
+        if (!hasData) {
             if (this.endTime == 0 && startTime != 0) {
                 this.endTime = System.nanoTime();
                 double totalMs = (endTime - startTime) / 1_000_000.0;
                 System.out.println("[Metrics] Total Duration: " + totalMs + " ms | Rows: " + rowCount);
             }
+            LOGGER.log(INFO, ">>> [StreamingScan] No more data. Returning null.");
             return null;
         }
 
@@ -118,6 +135,8 @@ public class StreamingScanOperator implements CoordinatorOperator {
             count++;
             rowCount++;
         }
+
+        LOGGER.log(INFO, ">>> [StreamingScan] Returning batch of size: " + count);
         return batch;
     }
 

@@ -7,29 +7,29 @@ import org.apache.calcite.rel.BiRel;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.type.RelDataType;
 
+import java.util.Arrays;
 import java.util.List;
-
 
 public final class VModbJoin extends BiRel implements VModbRel {
 
-    public final int leftJoinCol;
-    public final int rightJoinCol;
+    public final int[] leftJoinCols;  // CHANGED to arrays
+    public final int[] rightJoinCols;
     private final RelDataType relDataType;
 
     private VModbJoin(RelOptCluster cluster, RelTraitSet traitSet, RelNode left,
-                      RelNode right, RelDataType relDataType, Integer leftJoinCol,
-                      Integer rightJoinCol) {
+                      RelNode right, RelDataType relDataType, int[] leftJoinCols,
+                      int[] rightJoinCols) {
         super(cluster, traitSet, left, right);
         this.relDataType = relDataType;
-        this.leftJoinCol = leftJoinCol;
-        this.rightJoinCol = rightJoinCol;
+        this.leftJoinCols = leftJoinCols;
+        this.rightJoinCols = rightJoinCols;
     }
 
     public static VModbJoin create(RelNode left, RelNode right,
-                                   RelDataType outRowType, int leftJoinCol, int rightJoinCol) {
+                                   RelDataType outRowType, int[] leftJoinCols, int[] rightJoinCols) {
         RelOptCluster cluster = left.getCluster();
         return new VModbJoin(cluster, cluster.traitSetOf(VModbConvention.INSTANCE),
-                left, right, outRowType, leftJoinCol, rightJoinCol);
+                left, right, outRowType, leftJoinCols, rightJoinCols);
     }
 
     @Override
@@ -40,21 +40,13 @@ public final class VModbJoin extends BiRel implements VModbRel {
     @Override
     public VModbJoin copy(RelTraitSet traitSet, List<RelNode> inputs) {
         return new VModbJoin(getCluster(), traitSet,
-                inputs.get(0), inputs.get(1), relDataType, leftJoinCol, rightJoinCol);
+                inputs.get(0), inputs.get(1), relDataType, leftJoinCols, rightJoinCols);
     }
 
     @Override
     public org.apache.calcite.rel.RelWriter explainTerms(org.apache.calcite.rel.RelWriter pw) {
         return super.explainTerms(pw)
-                .item("leftJoinCol", leftJoinCol)
-                .item("rightJoinCol", rightJoinCol);
-    }
-
-    public int getLeftJoinCol() {
-        return leftJoinCol;
-    }
-
-    public int getRightJoinCol() {
-        return rightJoinCol;
+                .item("leftJoinCols", Arrays.toString(leftJoinCols))
+                .item("rightJoinCols", Arrays.toString(rightJoinCols));
     }
 }

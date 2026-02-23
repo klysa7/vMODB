@@ -1,8 +1,6 @@
 package dk.ku.di.dms.vms.calcite.client;
 
 import dk.ku.di.dms.vms.modb.common.schema.network.Constants;
-import dk.ku.di.dms.vms.modb.common.schema.network.query.QueryRequestEvent;
-
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
@@ -15,8 +13,9 @@ import java.util.List;
 public class VmsGatewayClient {
 
     private static final byte GATEWAY_TYPE = 12;
+    private static final byte QUERY_REQUEST_TYPE = 99;
 
-    public Iterator<Object[]> scan(String host, int port, long queryId, String tableName, List<Class<?>> columnTypes) {
+    public Iterator<Object[]> scan(String host, int port, long queryId, long snapshotId, byte mode, String tableName, List<Class<?>> columnTypes, byte[] predicates, byte[] routingData) {
         try {
             Socket socket = new Socket(host, port);
             socket.setTcpNoDelay(true);
@@ -25,34 +24,7 @@ public class VmsGatewayClient {
             DataInputStream in = new DataInputStream(socket.getInputStream());
 
             ByteBuffer buffer = ByteBuffer.allocate(4096);
-            buffer.put(Constants.PRESENTATION);
-            buffer.put(GATEWAY_TYPE);
-            writeString(buffer, "Gateway");
-            buffer.putLong(0L);
-            buffer.putLong(0L);
-            buffer.putLong(0L);
-            buffer.putInt(0);
-            writeString(buffer, "localhost");
-
-            byte[] emptyJson = "{}".getBytes(StandardCharsets.UTF_8);
-            for(int i=0; i<3; i++) {
-                buffer.putInt(emptyJson.length);
-                buffer.put(emptyJson);
-            }
-
-            buffer.flip();
-            out.write(buffer.array(), 0, buffer.limit());
-            out.flush();
-
-            try { Thread.sleep(200); } catch (InterruptedException ignored) {}
-
-            buffer.clear();
-            buffer.put(QueryRequestEvent.QUERY_REQUEST_TYPE);
-            buffer.putLong(queryId);
-            buffer.putInt(0);
-            writeString(buffer, "");
-            writeString(buffer, tableName);
-            buffer.putInt(0);
+            buildPayload(buffer, queryId, snapshotId, mode, tableName, predicates, routingData);
 
             buffer.flip();
             out.write(buffer.array(), 0, buffer.limit());
@@ -65,10 +37,62 @@ public class VmsGatewayClient {
         }
     }
 
-    private void writeString(ByteBuffer buffer, String val) {
-        if (val == null) val = "";
-        byte[] bytes = val.getBytes(StandardCharsets.UTF_8);
-        buffer.putInt(bytes.length);
-        buffer.put(bytes);
+    public void triggerBroadcast(String host, int port, long queryId, long snapshotId, String tableName, byte[] predicates, String targetHostPort) {
+        try {
+            Socket socket = new Socket(host, port);
+            socket.setTcpNoDelay(true);
+            DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+
+            ByteBuffer buffer = ByteBuffer.allocate(4096);
+            buildPayload(buffer, queryId, snapshotId, (byte) 1, tableName, predicates, targetHostPort.getBytes(StandardCharsets.UTF_8));
+
+            buffer.flip();
+            out.write(buffer.array(), 0, buffer.limit());
+            out.flush();
+
+            // =================================================================
+            // 🔥 FIX: Keep the Gateway open for 5 seconds so the Warehouse
+            // doesn't crash from a disconnected pipe while scanning!
+            // =================================================================
+            System.out.println(">>> [GATEWAY] Trigger sent! Waiting 5 seconds for VMS to finish...");
+            Thread.sleep(5000);
+
+            socket.close();
+            System.out.println(">>> [GATEWAY] Socket closed cleanly.");
+        } catch (Exception e) {
+            System.err.println("Broadcast trigger failed: " + e.getMessage());
+        }
+    }
+
+    private void buildPayload(ByteBuffer buffer, long queryId, long snapshotId, byte mode, String tableName, byte[] predicates, byte[] routingData) {
+        int startPos = buffer.position();
+        buffer.put(QUERY_REQUEST_TYPE);
+        buffer.putInt(0);
+
+        buffer.putLong(queryId);
+        buffer.putLong(snapshotId);
+        buffer.put(mode);
+
+        byte[] tableBytes = tableName.getBytes(StandardCharsets.UTF_8);
+        buffer.putInt(tableBytes.length);
+        buffer.put(tableBytes);
+
+        if (predicates != null && predicates.length > 0) {
+            buffer.putInt(predicates.length);
+            buffer.put(predicates);
+        } else {
+            buffer.putInt(0);
+        }
+
+        if (routingData != null && routingData.length > 0) {
+            buffer.putInt(routingData.length);
+            buffer.put(routingData);
+        } else {
+            buffer.putInt(0);
+        }
+
+        int endPos = buffer.position();
+        buffer.putInt(startPos + 1, endPos - startPos - 1 - Integer.BYTES);
+        buffer.position(endPos);
     }
 }

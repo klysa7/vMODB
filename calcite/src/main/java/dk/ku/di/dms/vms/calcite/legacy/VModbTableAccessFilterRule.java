@@ -30,6 +30,6 @@ public final class VModbTableAccessFilterRule extends RelOptRule {
         FilterContext filterCtx = RexToVModb.toFilterContext(filter.getCondition());
 
         call.transformTo(VModbTableAccess.create(scan.getCluster(), scan.getTable(),
-                schema, null, filterCtx, null, null));
+                schema, null, null, null, null));
     }
 }

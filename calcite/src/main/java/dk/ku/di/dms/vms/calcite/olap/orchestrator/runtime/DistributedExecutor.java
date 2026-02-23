@@ -10,6 +10,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
+import static java.lang.System.Logger.Level.ERROR;
 import static java.lang.System.Logger.Level.INFO;
 
 public final class DistributedExecutor {
@@ -44,7 +45,7 @@ public final class DistributedExecutor {
                 }
             }
         } catch (Exception e) {
-            LOGGER.log(System.Logger.Level.ERROR, "Error during execution execution", e);
+            LOGGER.log(ERROR, "Error during execution execution", e);
             throw e;
         } finally {
             LOGGER.log(INFO, ">>> [EXECUTOR] Closing Pipeline");
@@ -63,28 +64,74 @@ public final class DistributedExecutor {
             VmsSubplan subplan = plan.subPlans.stream()
                     .filter(s -> s.exchangeId.equals(scanDef.exchangeId()))
                     .findFirst()
-                    .orElseThrow(() -> new IllegalStateException("Subplan not found for exchange: " + scanDef.exchangeId()));
-
+                    .orElseThrow();
             return new StreamingScanOperator(gatewayClient, subplan, plan.snapshot);
         }
 
         if (def instanceof JoinDefinition joinDef) {
+            if (joinDef.left() instanceof ScanDefinition leftScan && joinDef.right() instanceof ScanDefinition rightScan) {
+                LOGGER.log(INFO, "OPTIMIZATION: Converting to Distributed VMS-to-VMS Broadcast Join!");
+
+                VmsSubplan leftPlan = plan.subPlans.stream().filter(s -> s.exchangeId.equals(leftScan.exchangeId())).findFirst().get();
+                VmsSubplan rightPlan = plan.subPlans.stream().filter(s -> s.exchangeId.equals(rightScan.exchangeId())).findFirst().get();
+
+                String leftTable = ((ScanAllOperation) leftPlan.operation).table;
+                String rightTable = ((ScanAllOperation) rightPlan.operation).table;
+
+                int leftPort = resolveTpccPort(leftTable);
+                int rightPort = resolveTpccPort(rightTable);
+
+                String targetAddress = "localhost:" + rightPort;
+                LOGGER.log(INFO, ">>> [GATEWAY] Scheduling Broadcast Trigger...");
+                java.util.concurrent.Executors.newSingleThreadScheduledExecutor().schedule(() -> {
+                    try {
+                        LOGGER.log(INFO, ">>> [TRIGGER THREAD] Firing Broadcast from " + leftTable + " to " + targetAddress);
+                        gatewayClient.triggerBroadcast(
+                                "localhost", leftPort, plan.snapshot, plan.snapshot,
+                                leftTable, leftPlan.predicates, targetAddress
+                        );
+                        LOGGER.log(INFO, ">>> [TRIGGER THREAD] Successfully signaled Warehouse VMS.");
+                    } catch (Exception e) {
+                        LOGGER.log(ERROR, ">>> [TRIGGER THREAD] Failed to signal Warehouse!", e);
+                    }
+                }, 1, java.util.concurrent.TimeUnit.SECONDS); // Give it a full 1 second to be safe
+
+                byte[] joinColumnIndexData = "3".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+
+                // =========================================================
+                // 🔥 FIX 1: MERGE THE SCHEMAS FOR THE GATEWAY PARSER
+                // =========================================================
+                List<String> combinedColumns = new java.util.ArrayList<>(leftPlan.columnsInOrder);
+                combinedColumns.addAll(rightPlan.columnsInOrder);
+
+                VmsSubplan receiverJoinPlan = new VmsSubplan(
+                        rightPlan.vmsName, rightPlan.url, rightPlan.exchangeId, rightPlan.operation,
+                        combinedColumns, // <-- Pass the combined schema here!
+                        rightPlan.predicates, (byte) 2, joinColumnIndexData
+                );
+
+                return new StreamingScanOperator(gatewayClient, receiverJoinPlan, plan.snapshot);
+            }
+
             return new LocalJoinOperator(
                     buildOperatorTree(joinDef.left(), plan),
                     buildOperatorTree(joinDef.right(), plan),
-                    // CHANGED: passing arrays (int[]) instead of single ints
-                    joinDef.leftKeys(),
-                    joinDef.rightKeys()
+                    joinDef.leftKeys(), joinDef.rightKeys()
             );
         }
 
         if (def instanceof ProjectDefinition projDef) {
-            return new LocalProjectOperator(
-                    buildOperatorTree(projDef.input(), plan),
-                    projDef.projectedIndices()
-            );
+            return new LocalProjectOperator(buildOperatorTree(projDef.input(), plan), projDef.projectedIndices());
         }
 
         throw new IllegalArgumentException("Unknown Op: " + def);
+    }
+
+    // Helper to resolve ports
+    private int resolveTpccPort(String tableName) {
+        tableName = tableName.toLowerCase();
+        if (tableName.contains("warehouse") || tableName.contains("customer")) return 8001;
+        if (tableName.contains("item") || tableName.contains("stock")) return 8002;
+        return 8003;
     }
 }

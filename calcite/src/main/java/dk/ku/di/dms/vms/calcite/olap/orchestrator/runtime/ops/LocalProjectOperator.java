@@ -20,6 +20,8 @@ public class LocalProjectOperator implements CoordinatorOperator {
         this.projectedIndices = projectedIndices;
     }
 
+
+
     @Override
     public void open() {
         LOGGER.log(INFO,"I entered open read of theproject");
@@ -29,28 +31,31 @@ public class LocalProjectOperator implements CoordinatorOperator {
 
     @Override
     public List<Object[]> nextBatch() {
-        LOGGER.log(INFO,"I entered nextBatch project");
+        LOGGER.log(INFO, ">>> [LocalProject] nextBatch() called! Asking input for data...");
 
         List<Object[]> inputBatch = input.nextBatch();
 
-        if (inputBatch == null) return null;
+        if (inputBatch == null) {
+            LOGGER.log(INFO, ">>> [LocalProject] Input returned NULL! Pipeline is stopping.");
+            return null;
+        }
 
         List<Object[]> outputBatch = new ArrayList<>(inputBatch.size());
 
         for (Object[] inRow : inputBatch) {
             Object[] outRow = new Object[projectedIndices.length];
-
             for (int i = 0; i < projectedIndices.length; i++) {
                 int sourceIndex = projectedIndices[i];
                 if (sourceIndex < inRow.length) {
                     outRow[i] = inRow[sourceIndex];
                 } else {
-                    outRow[i] = null; // Or throw exception
+                    outRow[i] = null;
                 }
             }
             outputBatch.add(outRow);
         }
 
+        LOGGER.log(INFO, ">>> [LocalProject] Returning projected batch of size: " + outputBatch.size());
         return outputBatch;
     }
 

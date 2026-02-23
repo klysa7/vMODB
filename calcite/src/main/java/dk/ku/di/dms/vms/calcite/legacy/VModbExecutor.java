@@ -23,7 +23,7 @@ public final class VModbExecutor {
         var index = runtime.index(plan.schemaName, plan.tableName);
         int entrySize = runtime.entrySize(plan.schemaName, plan.tableName);
 
-        FilterContext boundFilter = bindParams(plan.filter, params);
+        FilterContext boundFilter = bindParams(null, params);
 
         if (plan.key != null || plan.keys != null) {
             IndexScan scan = new IndexScan(index, plan.projects, entrySize);

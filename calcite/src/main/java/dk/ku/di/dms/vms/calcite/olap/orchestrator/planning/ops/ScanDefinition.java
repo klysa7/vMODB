@@ -4,5 +4,6 @@ import java.util.List;
 
 public record ScanDefinition(
         String exchangeId,
-        List<String> outputColumns
+        List<String> outputColumns,
+        byte[] predicates
 ) implements CoordinatorOperatorDefinition {}
