@@ -29,9 +29,19 @@ public final class Main {
         prop.setProperty("max_records.district", String.valueOf(numDistrict));
         int numCustomers = num_ware * 30_000;
         prop.setProperty("max_records.customer", String.valueOf(numCustomers));
-        prop.setProperty("table.customer.chaining", "true");
+
+        // --- HARDCODED PROPERTIES ---
+        prop.setProperty("table.customer.chaining", "false");
+        prop.setProperty("checkpointing", "true");
+
+        System.out.println("\n===========================================");
+        System.out.println("[CONFIG] WAREHOUSE NODE BOOTING...");
+        System.out.println("[CONFIG] Chaining: " + prop.getProperty("table.customer.chaining"));
+        System.out.println("[CONFIG] Checkpointing: " + prop.getProperty("checkpointing"));
+        System.out.println("===========================================\n");
 
         VmsApplicationOptions options = VmsApplicationOptions.build(
+                prop, // Pass the modified properties here!
                 "0.0.0.0",
                 8001, new String[]{
                         "dk.ku.di.dms.vms.tpcc.warehouse",
@@ -44,5 +54,4 @@ public final class Main {
                         (ICustomerRepository) y.apply("customer")
                 ));
     }
-
 }

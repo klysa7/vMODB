@@ -11,6 +11,7 @@ import dk.ku.di.dms.vms.modb.definition.Table;
 import dk.ku.di.dms.vms.modb.definition.key.IKey;
 import dk.ku.di.dms.vms.modb.definition.key.KeyUtils;
 import dk.ku.di.dms.vms.modb.definition.key.SimpleKey;
+import dk.ku.di.dms.vms.modb.index.unique.UniqueHashBufferIndex;
 import dk.ku.di.dms.vms.modb.query.analyzer.Analyzer;
 import dk.ku.di.dms.vms.modb.query.analyzer.QueryTree;
 import dk.ku.di.dms.vms.modb.query.analyzer.exception.AnalyzerException;
@@ -22,6 +23,7 @@ import dk.ku.di.dms.vms.modb.query.execution.operators.minmax.IndexAggregateScan
 import dk.ku.di.dms.vms.modb.query.execution.operators.scan.FullScan;
 import dk.ku.di.dms.vms.modb.query.execution.operators.scan.IndexScan;
 import dk.ku.di.dms.vms.modb.query.planner.SimplePlanner;
+import dk.ku.di.dms.vms.modb.storage.iterator.IRecordIterator;
 import dk.ku.di.dms.vms.modb.transaction.multiversion.index.IMultiVersionIndex;
 import dk.ku.di.dms.vms.modb.transaction.multiversion.index.NonUniqueSecondaryIndex;
 import dk.ku.di.dms.vms.modb.transaction.multiversion.index.PrimaryIndex;
@@ -48,6 +50,8 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
 
     private static final System.Logger LOGGER = System.getLogger(TransactionManager.class.getName());
 
+    public record SimplePredicate(int columnPosition, ExpressionTypeEnum expression, Object value) {}
+
     private final Map<Long, TransactionContext> txCtxMap;
 
     private final Analyzer analyzer;
@@ -60,7 +64,7 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
      */
     private final Map<String, AbstractSimpleOperator> queryPlanCacheMap;
 
-    private final Map<String, Table> catalog;
+    public final Map<String, Table> catalog;
 
     public TransactionManager(Map<String, Table> catalog){
         this.planner = new SimplePlanner();
@@ -184,6 +188,176 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
             case DELETE -> { }
             default -> throw new IllegalStateException("Statement type cannot be identified.");
         }
+    }
+
+    public Object getIndex(String tableName) {
+        Table table = this.catalog.get(tableName);
+        if (table == null) return null;
+        return table.primaryKeyIndex().underlyingIndex();
+    }
+
+    public Iterator<Long> getScanIterator(String tableName, List<SimplePredicate> predicates) {
+        Table table = this.catalog.get(tableName);
+        if (table == null) throw new IllegalArgumentException("Table not found: " + tableName);
+
+        var underlying = table.primaryKeyIndex().underlyingIndex();
+
+        if (underlying instanceof UniqueHashBufferIndex rawIndex) {
+            IRecordIterator<IKey> internalIter = rawIndex.iterator();
+
+            return new Iterator<Long>() {
+                Long nextMatch = null;
+
+                @Override
+                public boolean hasNext() {
+                    if (nextMatch != null) return true;
+
+                    while (internalIter.hasNext()) {
+                        internalIter.next();
+                        long currentAddr = internalIter.address();
+
+                        if (predicates == null || predicates.isEmpty()) {
+                            nextMatch = currentAddr;
+                            return true;
+                        }
+
+                        Object[] record = rawIndex.record(internalIter);
+                        if (checkPredicates(record, predicates)) {
+                            nextMatch = currentAddr;
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+
+                @Override
+                public Long next() {
+                    if (nextMatch == null && !hasNext()) throw new NoSuchElementException();
+                    Long result = nextMatch;
+                    nextMatch = null;
+                    return result;
+                }
+            };
+        }
+
+        LOGGER.log(INFO, "Table " + tableName + " is using HashMapIndex. Attempting fallback...");
+        try {
+            java.lang.reflect.Method method = underlying.getClass().getMethod("addressIterator");
+            return (Iterator<Long>) method.invoke(underlying);
+        } catch (Exception e) {
+            throw new IllegalStateException("Index does not support address iteration.");
+        }
+    }
+
+    private boolean checkPredicates(Object[] row, List<SimplePredicate> predicates) {
+        for (SimplePredicate p : predicates) {
+            Object val = row[p.columnPosition()];
+            if (val == null) return false;
+
+            int cmp = compareValues(val, p.value());
+
+            switch (p.expression()) {
+                case EQUALS: if (cmp != 0) return false; break;
+                case GREATER_THAN: if (cmp <= 0) return false; break;
+                case LESS_THAN: if (cmp >= 0) return false; break;
+                case GREATER_THAN_OR_EQUAL: if (cmp < 0) return false; break;
+                case LESS_THAN_OR_EQUAL: if (cmp > 0) return false; break;
+                case NOT_EQUALS: if (cmp == 0) return false; break;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * DISTRIBUTED JOIN ITERATOR
+     * Scans the local table, looks up the join key in the broadcast buffer, and stitches the bytes together.
+     */
+    public Iterator<byte[]> getJoinIterator(String tableName, Map<Integer, byte[]> broadcastBuffer, int localJoinColumnIndex) {
+        Table table = this.catalog.get(tableName);
+        var underlying = table.primaryKeyIndex().underlyingIndex();
+
+        if (!(underlying instanceof UniqueHashBufferIndex rawIndex)) {
+            throw new IllegalStateException("Joins currently require UniqueHashBufferIndex.");
+        }
+
+        IRecordIterator<IKey> internalIter = rawIndex.iterator();
+        final int localRecordSize = rawIndex.schema().getRecordSizeWithoutHeader();
+
+        return new Iterator<byte[]>() {
+            byte[] nextMatch = null;
+            int debugCounter = 0;
+
+            @Override
+            public boolean hasNext() {
+                if (nextMatch != null) return true;
+
+                while (internalIter.hasNext()) {
+                    internalIter.next();
+                    long currentAddr = internalIter.address();
+
+                    Object[] record = rawIndex.record(internalIter);
+
+                    // ==============================================================
+                    // 🔥 FIX: AVOID THE EMPTY MEMORY BUG
+                    // If the row is uninitialized (0), skip it!
+                    // ==============================================================
+                    if (record == null || record.length == 0 || (record[0] instanceof Number n && n.intValue() == 0)) {
+                        continue;
+                    }
+
+                    Object joinKeyObj = record[localJoinColumnIndex];
+                    if (joinKeyObj == null) continue;
+
+                    int joinHash = (joinKeyObj instanceof Number n) ? Integer.hashCode(n.intValue()) : joinKeyObj.hashCode();
+
+                    if (debugCounter < 5) {
+                        System.out.println(">>> [DEBUG JOIN PROBE] Extracted Value: " + joinKeyObj + " from row: " + java.util.Arrays.toString(record));
+                        debugCounter++;
+                    }
+
+                    byte[] remoteBytes = broadcastBuffer.get(joinHash);
+
+                    if (remoteBytes != null) {
+                        System.out.println(">>> [DEBUG JOIN PROBE] MATCH FOUND! Hash: " + joinHash);
+
+                        byte[] localBytes = new byte[localRecordSize];
+
+                        dk.ku.di.dms.vms.modb.common.memory.MemoryUtils.UNSAFE.copyMemory(
+                                null,
+                                currentAddr + dk.ku.di.dms.vms.modb.definition.Schema.RECORD_HEADER,
+                                localBytes,
+                                dk.ku.di.dms.vms.modb.common.memory.MemoryUtils.UNSAFE.arrayBaseOffset(byte[].class),
+                                localRecordSize
+                        );
+
+                        nextMatch = new byte[remoteBytes.length + localRecordSize];
+                        System.arraycopy(remoteBytes, 0, nextMatch, 0, remoteBytes.length);
+                        System.arraycopy(localBytes, 0, nextMatch, remoteBytes.length, localRecordSize);
+
+                        return true;
+                    }
+                }
+                return false;
+            }
+
+            @Override
+            public byte[] next() {
+                if (nextMatch == null && !hasNext()) throw new NoSuchElementException();
+                byte[] result = nextMatch;
+                nextMatch = null;
+                return result;
+            }
+        };
+    }
+
+    /**
+     * Safely compares two objects, normalizing numbers so Integer(1) == BigDecimal(1)
+     */
+    private int compareValues(Object val1, Object val2) {
+        if (val1 instanceof Number n1 && val2 instanceof Number n2) {
+            return Double.compare(n1.doubleValue(), n2.doubleValue());
+        }
+        return String.valueOf(val1).compareTo(String.valueOf(val2));
     }
 
     /****** ENTITY *******/

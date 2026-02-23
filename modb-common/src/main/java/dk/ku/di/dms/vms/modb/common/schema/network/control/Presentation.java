@@ -24,6 +24,7 @@ public final class Presentation {
     public static final byte NO = 1;
     public static final byte SERVER_TYPE = 10;
     public static final byte VMS_TYPE = 11;
+    public static final byte GATEWAY_TYPE = 12;
 
     //                                                      0 server 1 vms  if leader already have metadata
     //                                     message type | node type [0,1] | metadata bit | lastOffset | port | size host
@@ -70,6 +71,49 @@ public final class Presentation {
             host = new String(buffer.array(), SERVER_HEADER_SIZE, hostSize, StandardCharsets.UTF_8);
         }
         return new ServerNode( host, port, offset );
+    }
+
+    /**
+     * Writes a Gateway presentation.
+     * Fills VMS-specific fields (TIDs, Schemas) with empty values
+     * so that the existing readVms() method on the server can parse it without crashing.
+     */
+    public static void writeGateway(ByteBuffer buffer, String host, int port, String identifier) {
+        buffer.put(Constants.PRESENTATION);
+        buffer.put(GATEWAY_TYPE); // Type 12
+
+        // 1. Identifier
+        byte[] name = identifier.getBytes(StandardCharsets.UTF_8);
+        buffer.putInt(name.length);
+        buffer.put(name);
+
+        // 2. Dummy Longs (Batch, Tid, PrevBatch) - Gateways don't have these
+        buffer.putLong(0L);
+        buffer.putLong(0L);
+        buffer.putLong(0L);
+
+        // 3. Port & Host
+        buffer.putInt(port);
+        byte[] hostBytes = host.getBytes(StandardCharsets.UTF_8);
+        buffer.putInt(hostBytes.length);
+        buffer.put(hostBytes);
+
+        // 4. Empty Schemas
+        // We must write these because readVms() expects 3 strings at the end.
+        // We send "{}" to represent an empty JSON map.
+        byte[] emptyJson = "{}".getBytes(StandardCharsets.UTF_8);
+
+        // Data Schema
+        buffer.putInt(emptyJson.length);
+        buffer.put(emptyJson);
+
+        // Input Event Schema
+        buffer.putInt(emptyJson.length);
+        buffer.put(emptyJson);
+
+        // Output Event Schema
+        buffer.putInt(emptyJson.length);
+        buffer.put(emptyJson);
     }
 
     public static void writeVms(ByteBuffer buffer,

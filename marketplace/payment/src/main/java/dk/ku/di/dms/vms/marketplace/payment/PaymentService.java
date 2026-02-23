@@ -14,6 +14,8 @@ import dk.ku.di.dms.vms.marketplace.payment.provider.IExternalProvider;
 import dk.ku.di.dms.vms.marketplace.payment.repositories.IOrderPaymentCardRepository;
 import dk.ku.di.dms.vms.marketplace.payment.repositories.IOrderPaymentRepository;
 import dk.ku.di.dms.vms.modb.api.annotations.*;
+import dk.ku.di.dms.vms.modb.api.query.builder.QueryBuilderFactory;
+import dk.ku.di.dms.vms.modb.api.query.statement.SelectStatement;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -62,6 +64,13 @@ public final class PaymentService {
         this.orderPaymentRepository = orderPaymentRepository;
         this.orderPaymentCardRepository = orderPaymentCardRepository;
     }
+
+    @VmsPreparedStatement("orderPaymentsAll")
+    public static final SelectStatement ORDER_PAYMENTS_ALL =
+            QueryBuilderFactory.select()
+                    .project("customer_id,order_id,sequential,type,installments,value,status,created_at")
+                    .from("order_payments")
+                    .build();
 
     @Inbound(values = {INVOICE_ISSUED})
     @Outbound(PAYMENT_CONFIRMED)

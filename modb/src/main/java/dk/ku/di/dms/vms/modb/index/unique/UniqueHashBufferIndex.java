@@ -14,6 +14,8 @@ import dk.ku.di.dms.vms.modb.storage.iterator.unique.KeyRecordIterator;
 import dk.ku.di.dms.vms.modb.storage.iterator.unique.RecordIterator;
 import dk.ku.di.dms.vms.modb.storage.record.RecordBufferContext;
 
+import java.nio.ByteBuffer;
+import java.util.Iterator;
 import java.util.concurrent.locks.ReentrantLock;
 
 import static dk.ku.di.dms.vms.modb.common.memory.MemoryUtils.UNSAFE;
@@ -57,6 +59,37 @@ public class UniqueHashBufferIndex extends ReadWriteIndex<IKey> implements ReadW
         this.capacity = capacity;
         this.limit = recordBufferContext.address + (this.recordSize * (this.capacity == 1 ? 1 : this.capacity - 1));
         this.p = Integer.numberOfTrailingZeros(this.capacity);
+    }
+
+    public int getRecordSize() {
+        return (int) this.recordSize;
+    }
+
+    public void copyRecordToBuffer(long srcAddress, ByteBuffer destBuffer) {
+        long dataAddress = srcAddress + Schema.RECORD_HEADER;
+        int dataSize = this.schema.getRecordSizeWithoutHeader();
+
+        byte[] temp = new byte[dataSize];
+        UNSAFE.copyMemory(null, dataAddress, temp, UNSAFE.arrayBaseOffset(byte[].class), dataSize);
+
+        destBuffer.put(temp);
+    }
+
+    public Iterator<Long> addressIterator() {
+        return new Iterator<Long>() {
+            private final IRecordIterator<IKey> internalIter = iterator();
+
+            @Override
+            public boolean hasNext() {
+                return internalIter.hasNext();
+            }
+
+            @Override
+            public Long next() {
+                internalIter.next();
+                return internalIter.address();
+            }
+        };
     }
 
     @Override
