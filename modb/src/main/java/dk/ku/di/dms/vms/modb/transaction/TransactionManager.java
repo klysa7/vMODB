@@ -64,7 +64,7 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
      */
     private final Map<String, AbstractSimpleOperator> queryPlanCacheMap;
 
-    private final Map<String, Table> catalog;
+    public final Map<String, Table> catalog;
 
     public TransactionManager(Map<String, Table> catalog){
         this.planner = new SimplePlanner();
@@ -285,7 +285,7 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
 
         return new Iterator<byte[]>() {
             byte[] nextMatch = null;
-            int debugCounter = 0; // Added to trap the first few rows
+            int debugCounter = 0;
 
             @Override
             public boolean hasNext() {
@@ -295,36 +295,31 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
                     internalIter.next();
                     long currentAddr = internalIter.address();
 
-                    // 1. Read local row to find the join key
                     Object[] record = rawIndex.record(internalIter);
+
+                    // ==============================================================
+                    // 🔥 FIX: AVOID THE EMPTY MEMORY BUG
+                    // If the row is uninitialized (0), skip it!
+                    // ==============================================================
+                    if (record == null || record.length == 0 || (record[0] instanceof Number n && n.intValue() == 0)) {
+                        continue;
+                    }
+
                     Object joinKeyObj = record[localJoinColumnIndex];
                     if (joinKeyObj == null) continue;
 
-                    // Safely get the integer hash regardless of whether it's an Integer, Long, or Short
                     int joinHash = (joinKeyObj instanceof Number n) ? Integer.hashCode(n.intValue()) : joinKeyObj.hashCode();
 
-                    // =========================================================
-                    // 🔥 X-RAY: PRINT EXACTLY WHAT THE ORDER TABLE IS SEARCHING FOR
-                    // =========================================================
                     if (debugCounter < 5) {
-                        System.out.println(">>> [DEBUG JOIN PROBE] Local Table: " + tableName +
-                                " | Join Col Index: " + localJoinColumnIndex +
-                                " | Extracted Value: " + joinKeyObj +
-                                " | Hash Lookup: " + joinHash);
+                        System.out.println(">>> [DEBUG JOIN PROBE] Extracted Value: " + joinKeyObj + " from row: " + java.util.Arrays.toString(record));
                         debugCounter++;
                     }
 
-                    // 2. Probe the remote broadcast buffer
                     byte[] remoteBytes = broadcastBuffer.get(joinHash);
 
                     if (remoteBytes != null) {
+                        System.out.println(">>> [DEBUG JOIN PROBE] MATCH FOUND! Hash: " + joinHash);
 
-                        if (debugCounter < 10) {
-                            System.out.println(">>> [DEBUG JOIN PROBE] MATCH FOUND! Hash: " + joinHash);
-                            debugCounter++; // Push past 5 so we don't spam the console
-                        }
-
-                        // WE HAVE A MATCH! Stitch the memory together.
                         byte[] localBytes = new byte[localRecordSize];
 
                         dk.ku.di.dms.vms.modb.common.memory.MemoryUtils.UNSAFE.copyMemory(
@@ -336,8 +331,6 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
                         );
 
                         nextMatch = new byte[remoteBytes.length + localRecordSize];
-
-                        // Put Customer bytes FIRST, Order bytes SECOND
                         System.arraycopy(remoteBytes, 0, nextMatch, 0, remoteBytes.length);
                         System.arraycopy(localBytes, 0, nextMatch, remoteBytes.length, localRecordSize);
 

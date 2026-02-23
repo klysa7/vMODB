@@ -24,7 +24,11 @@ public final class DistributedExecutor {
     }
 
     public PushdownResponse execute(DistributedPlan distributedPlan) {
-        long start = System.currentTimeMillis();
+        // =========================================================
+        // 🔥 START THE HIGH-PRECISION OLAP BENCHMARK CLOCK
+        // =========================================================
+        long startNano = System.nanoTime();
+
         LOGGER.log(INFO, ">>> [EXECUTOR] Starting Execution for Snapshot #" + distributedPlan.snapshot);
 
         CoordinatorOperator root = buildOperatorTree(distributedPlan.root, distributedPlan);
@@ -45,15 +49,27 @@ public final class DistributedExecutor {
                 }
             }
         } catch (Exception e) {
-            LOGGER.log(ERROR, "Error during execution execution", e);
+            LOGGER.log(ERROR, "Error during execution", e);
             throw e;
         } finally {
             LOGGER.log(INFO, ">>> [EXECUTOR] Closing Pipeline");
             root.close();
         }
 
-        long duration = System.currentTimeMillis() - start;
-        LOGGER.log(INFO, "[EXECUTOR] FINISHED. Total Rows: " + totalRows + " Time: " + duration + "ms");
+        // =========================================================
+        // 🔥 STOP THE CLOCK AND PRINT THE REPORT
+        // =========================================================
+        long endNano = System.nanoTime();
+        double durationMs = (endNano - startNano) / 1_000_000.0;
+        double throughput = (durationMs > 0) ? (totalRows / (durationMs / 1000.0)) : 0.0;
+
+        System.out.println("\n========================================================");
+        System.out.println(" 📊 [OLAP BENCHMARK] DISTRIBUTED QUERY COMPLETE");
+        System.out.println("========================================================");
+        System.out.println(String.format("   Total Rows Returned : %d", totalRows));
+        System.out.println(String.format("   Total Latency (ms)  : %.3f ms", durationMs));
+        System.out.println(String.format("   Throughput (rows/s) : %.2f rows/sec", throughput));
+        System.out.println("========================================================\n");
 
         return new PushdownResponse("gateway", distributedPlan.snapshot, null, allRows);
     }
@@ -94,7 +110,7 @@ public final class DistributedExecutor {
                     } catch (Exception e) {
                         LOGGER.log(ERROR, ">>> [TRIGGER THREAD] Failed to signal Warehouse!", e);
                     }
-                }, 1, java.util.concurrent.TimeUnit.SECONDS); // Give it a full 1 second to be safe
+                }, 100, java.util.concurrent.TimeUnit.MILLISECONDS);
 
                 byte[] joinColumnIndexData = "3".getBytes(java.nio.charset.StandardCharsets.UTF_8);
 

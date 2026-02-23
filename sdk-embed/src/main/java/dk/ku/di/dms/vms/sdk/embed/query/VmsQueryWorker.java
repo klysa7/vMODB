@@ -197,8 +197,6 @@ public final class VmsQueryWorker extends StoppableRunnable {
     private final class BatchWriteCompletionHandler implements CompletionHandler<Integer, ByteBuffer> {
         @Override
         public void completed(Integer result, ByteBuffer byteBuffer) {
-            // PROOF OF LIFE
-            System.out.println(">>> [VMS WORKER WRITE] Async network chunk successfully sent! Bytes: " + result);
             if (byteBuffer.hasRemaining()) {
                 channel.write(byteBuffer, timeout, TimeUnit.MILLISECONDS, byteBuffer, this);
             } else {

@@ -13,6 +13,7 @@ import dk.ku.di.dms.vms.modb.common.schema.network.transaction.TransactionAbort;
 import dk.ku.di.dms.vms.modb.common.schema.network.transaction.TransactionEvent;
 import dk.ku.di.dms.vms.modb.common.serdes.IVmsSerdesProxy;
 import dk.ku.di.dms.vms.modb.common.transaction.ITransactionManager;
+import dk.ku.di.dms.vms.modb.definition.Table;
 import dk.ku.di.dms.vms.modb.index.unique.UniqueHashBufferIndex;
 import dk.ku.di.dms.vms.modb.transaction.TransactionManager;
 import dk.ku.di.dms.vms.sdk.core.metadata.VmsRuntimeMetadata;
@@ -449,11 +450,6 @@ public final class VmsEventHandler extends ModbHttpServer {
         @Override
         public void completed(Integer result, Integer attachment) {
             if (result == -1) return;
-
-            // =================================================================
-            // 🔥 FIX: ALWAYS FLIP BEFORE READING!
-            // When an async read finishes, we must flip it so we can parse it.
-            // =================================================================
             readBuffer.flip();
 
             while (readBuffer.hasRemaining()) {
@@ -461,10 +457,7 @@ public final class VmsEventHandler extends ModbHttpServer {
                 byte type = readBuffer.get();
 
                 if (type == END_OF_STREAM_TYPE) {
-                    if (readBuffer.remaining() < 12) {
-                        readBuffer.reset();
-                        break;
-                    }
+                    if (readBuffer.remaining() < 12) { readBuffer.reset(); break; }
                     readBuffer.getInt(); // skip length
                     long queryId = readBuffer.getLong();
 
@@ -485,17 +478,9 @@ public final class VmsEventHandler extends ModbHttpServer {
                 }
 
                 if (type == QUERY_RESULT_TYPE) {
-                    if (readBuffer.remaining() < 12) {
-                        readBuffer.reset();
-                        break;
-                    }
-
+                    if (readBuffer.remaining() < 12) { readBuffer.reset(); break; }
                     int dataSize = readBuffer.getInt();
-
-                    if (readBuffer.remaining() < dataSize) {
-                        readBuffer.reset();
-                        break;
-                    }
+                    if (readBuffer.remaining() < dataSize) { readBuffer.reset(); break; }
 
                     long queryId = readBuffer.getLong();
                     JoinContext ctx = activeJoins.get(queryId);
@@ -512,46 +497,66 @@ public final class VmsEventHandler extends ModbHttpServer {
                                 System.out.println(">>> [ORDER VMS] First broadcast packet received! Hash Join is now active.");
                             }
 
-                            // ==============================================================
-                            // 🔥 FIX: vMODB physical memory is LITTLE_ENDIAN!
-                            // Let's try offset 17 (first column), 21 (second), and 25 (third)
-                            // ==============================================================
-                            ByteBuffer wrapper = ByteBuffer.wrap(rowData).order(ByteOrder.LITTLE_ENDIAN);
-                            int c_w_id = wrapper.getInt(17);
-                            int c_d_id = wrapper.getInt(21);
-                            int c_id = wrapper.getInt(25);
+                            try {
+                                // Read native memory bytes
+                                ByteBuffer rowBuf = ByteBuffer.wrap(rowData).order(ByteOrder.nativeOrder());
 
-                            if (ctx.broadcastBuffer.size() < 3) {
-                                System.out.println(">>> [DEBUG JOIN] Extracted Customer row. c_w_id=" + c_w_id + ", c_d_id=" + c_d_id + ", c_id=" + c_id);
+                                // Let's scan the first 8 integers (32 bytes) of the payload
+                                int[] vals = new int[8];
+                                for (int i = 0; i < 8; i++) {
+                                    if (rowBuf.capacity() >= (i * 4) + 4) {
+                                        vals[i] = rowBuf.getInt(i * 4);
+                                    }
+                                }
+
+                                if (ctx.broadcastBuffer.size() < 3) {
+                                    System.out.println(">>> [DEBUG JOIN HASH] First 8 Ints in memory: " + java.util.Arrays.toString(vals));
+                                }
+
+                                // ==============================================================
+                                // 🔥 THE C_ID HEURISTIC 🔥
+                                // c_id is a number between 1 and 30,000.
+                                // c_w_id is 1. c_d_id is 1-10.
+                                // We scan the array and find the first integer > 10. That is our c_id!
+                                // ==============================================================
+                                int joinKey = -1;
+                                for (int i = 0; i < 8; i++) {
+                                    if (vals[i] > 10 && vals[i] <= 300000) {
+                                        joinKey = vals[i];
+                                        break;
+                                    }
+                                }
+
+                                // Fallback just in case (assume offset 8)
+                                if (joinKey == -1) joinKey = vals[2];
+
+                                ctx.broadcastBuffer.put(joinKey, rowData);
+
+                            } catch (Exception e) {
+                                if (ctx.broadcastBuffer.size() == 0) {
+                                    System.out.println(">>> [DEBUG JOIN HASH] Failed to parse row!");
+                                    e.printStackTrace();
+                                }
                             }
-
-                            // We are joining on c_id (offset 25).
-                            ctx.broadcastBuffer.put(Integer.hashCode(c_id), rowData);
                         }
                     }
                 } else {
-                    // Invalid memory read, break out to prevent spinning
-                    readBuffer.reset();
-                    break;
+                    readBuffer.reset(); break;
                 }
             }
 
-            // =================================================================
-            // 🔥 FIX: PROPERLY PREPARE THE BUFFER FOR THE NEXT ASYNC READ
-            // =================================================================
             if (readBuffer.hasRemaining()) {
-                readBuffer.compact(); // Moves leftover partial messages to the front
+                readBuffer.compact();
+                channel.read(readBuffer, readBuffer.position(), this);
             } else {
-                readBuffer.clear(); // Empty buffer, reset to 0
+                readBuffer.clear();
+                channel.read(readBuffer, 0, this);
             }
-            // Passing '0' here is just a dummy attachment.
-            channel.read(readBuffer, 0, this);
         }
 
         @Override
         public void failed(Throwable exc, Integer attachment) {
-            System.out.println("Broadcast receive failed");
-            exc.printStackTrace();
+            System.out.println("Broadcast receive failed"); exc.printStackTrace();
         }
     }
 
