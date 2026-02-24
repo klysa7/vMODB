@@ -34,12 +34,14 @@ public final class Main {
         prop.setProperty("max_records.order_line", String.valueOf(numOrderLine));
         prop.setProperty("max_records.history", "500000");
 
-        prop.setProperty("table.orders.chaining", "true");
-        prop.setProperty("table.new_orders.chaining", "true");
-        prop.setProperty("table.order_line.chaining", "true");
-        prop.setProperty("table.history.chaining", "true");
+        prop.setProperty("table.orders.chaining", "false");
+        prop.setProperty("table.new_orders.chaining", "false");
+        prop.setProperty("table.order_line.chaining", "false");
+        prop.setProperty("table.history.chaining", "false");
+        prop.setProperty("checkpointing", "true");
 
         VmsApplicationOptions options = VmsApplicationOptions.build(
+                prop,
                 "0.0.0.0",
                 8003, new String[]{
                         "dk.ku.di.dms.vms.tpcc.order",

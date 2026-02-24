@@ -1,5 +1,6 @@
 package dk.ku.di.dms.vms.sdk.embed.handler;
 
+import dk.ku.di.dms.vms.modb.api.query.enums.ExpressionTypeEnum;
 import dk.ku.di.dms.vms.modb.common.memory.MemoryManager;
 import dk.ku.di.dms.vms.modb.common.schema.network.batch.*;
 import dk.ku.di.dms.vms.modb.common.schema.network.control.ConsumerSet;
@@ -7,16 +8,20 @@ import dk.ku.di.dms.vms.modb.common.schema.network.control.Presentation;
 import dk.ku.di.dms.vms.modb.common.schema.network.node.IdentifiableNode;
 import dk.ku.di.dms.vms.modb.common.schema.network.node.ServerNode;
 import dk.ku.di.dms.vms.modb.common.schema.network.node.VmsNode;
+import dk.ku.di.dms.vms.modb.common.schema.network.query.QueryRequestEvent;
 import dk.ku.di.dms.vms.modb.common.schema.network.transaction.TransactionAbort;
 import dk.ku.di.dms.vms.modb.common.schema.network.transaction.TransactionEvent;
 import dk.ku.di.dms.vms.modb.common.serdes.IVmsSerdesProxy;
 import dk.ku.di.dms.vms.modb.common.transaction.ITransactionManager;
+import dk.ku.di.dms.vms.modb.index.unique.UniqueHashBufferIndex;
+import dk.ku.di.dms.vms.modb.transaction.TransactionManager;
 import dk.ku.di.dms.vms.sdk.core.metadata.VmsRuntimeMetadata;
 import dk.ku.di.dms.vms.sdk.core.operational.InboundEvent;
 import dk.ku.di.dms.vms.sdk.core.operational.OutboundEventResult;
 import dk.ku.di.dms.vms.sdk.core.scheduler.IVmsTransactionResult;
 import dk.ku.di.dms.vms.sdk.embed.channel.VmsEmbedInternalChannels;
 import dk.ku.di.dms.vms.sdk.embed.client.VmsApplicationOptions;
+import dk.ku.di.dms.vms.sdk.embed.query.VmsQueryWorker;
 import dk.ku.di.dms.vms.web_common.HttpUtils;
 import dk.ku.di.dms.vms.web_common.IHttpHandler;
 import dk.ku.di.dms.vms.web_common.ModbHttpServer;
@@ -27,6 +32,7 @@ import dk.ku.di.dms.vms.web_common.meta.ConnectionMetadata;
 import java.io.IOException;
 import java.nio.BufferUnderflowException;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.channels.*;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
@@ -34,6 +40,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
 
 import static dk.ku.di.dms.vms.modb.common.schema.network.Constants.*;
+import static dk.ku.di.dms.vms.modb.common.schema.network.query.QueryResultEvent.END_OF_STREAM_TYPE;
+import static dk.ku.di.dms.vms.modb.common.schema.network.query.QueryResultEvent.QUERY_RESULT_TYPE;
 import static java.lang.System.Logger.Level.*;
 
 /**
@@ -48,7 +56,26 @@ import static java.lang.System.Logger.Level.*;
 public final class VmsEventHandler extends ModbHttpServer {
 
     private static final System.Logger LOGGER = System.getLogger(VmsEventHandler.class.getName());
-    
+
+
+    public static class JoinContext {
+        public final QueryRequestEvent.QueryPayload payload;
+        public final AsynchronousSocketChannel gatewayChannel;
+        public final int joinColumnIndex;
+        public final Map<Integer, byte[]> broadcastBuffer = new ConcurrentHashMap<>();
+
+        public JoinContext(QueryRequestEvent.QueryPayload payload, AsynchronousSocketChannel gatewayChannel, int joinColumnIndex) {
+            this.payload = payload;
+            this.gatewayChannel = gatewayChannel;
+            this.joinColumnIndex = joinColumnIndex;
+        }
+    }
+
+    public record ColRefDTO(int columnPosition) {}
+    public record PredicateDTO(ColRefDTO columnReference, String expression, Object value) {}
+
+    private final Map<Long, JoinContext> activeJoins = new ConcurrentHashMap<>();
+
     /** SERVER SOCKET **/
     // other VMSs may want to connect in order to send events
     private final AsynchronousServerSocketChannel serverSocket;
@@ -526,6 +553,120 @@ public final class VmsEventHandler extends ModbHttpServer {
         }
     }
 
+    private final class BroadcastReceiverHandler implements CompletionHandler<Integer, Integer> {
+        private final AsynchronousSocketChannel channel;
+        private final ByteBuffer readBuffer;
+
+        public BroadcastReceiverHandler(AsynchronousSocketChannel channel, ByteBuffer readBuffer) {
+            this.channel = channel;
+            this.readBuffer = readBuffer;
+        }
+
+        @Override
+        public void completed(Integer result, Integer attachment) {
+            if (result == -1) return;
+            readBuffer.flip();
+
+            while (readBuffer.hasRemaining()) {
+                readBuffer.mark();
+                byte type = readBuffer.get();
+
+                if (type == END_OF_STREAM_TYPE) {
+                    if (readBuffer.remaining() < 12) { readBuffer.reset(); break; }
+                    readBuffer.getInt();
+                    long queryId = readBuffer.getLong();
+
+                    JoinContext ctx = activeJoins.remove(queryId);
+                    if (ctx != null) {
+                        System.out.println(">>> [ORDER VMS] Broadcast END received. Hash Map size: " + ctx.broadcastBuffer.size());
+                        System.out.println(">>> [ORDER VMS] Starting Join with local table: " + ctx.payload.tableName());
+
+                        TransactionManager tm = (TransactionManager) transactionManager;
+                        Iterator<byte[]> joinIter = tm.getJoinIterator(ctx.payload.tableName(), ctx.broadcastBuffer, ctx.joinColumnIndex);
+                        VmsQueryWorker worker = new VmsQueryWorker(
+                                ctx.gatewayChannel, joinIter, ctx.payload, options.networkBufferSize, options.networkSendTimeout
+                        );
+                        Thread.ofPlatform().name("query-worker-join-" + queryId).start(worker);
+                    }
+                    try { channel.close(); } catch (Exception ignored) {}
+                    return;
+                }
+
+                if (type == QUERY_RESULT_TYPE) {
+                    if (readBuffer.remaining() < 12) { readBuffer.reset(); break; }
+                    int dataSize = readBuffer.getInt();
+                    if (readBuffer.remaining() < dataSize) { readBuffer.reset(); break; }
+
+                    long queryId = readBuffer.getLong();
+                    JoinContext ctx = activeJoins.get(queryId);
+
+                    int bytesRemaining = dataSize - 8;
+                    while (bytesRemaining > 0) {
+                        int rowSize = readBuffer.getInt();
+                        byte[] rowData = new byte[rowSize];
+                        readBuffer.get(rowData);
+                        bytesRemaining -= (4 + rowSize);
+
+                        if (ctx != null) {
+                            if (ctx.broadcastBuffer.size() == 0) {
+                                System.out.println(">>> [ORDER VMS] First broadcast packet received! Hash Join is now active.");
+                            }
+
+                            try {
+                                ByteBuffer rowBuf = ByteBuffer.wrap(rowData).order(ByteOrder.nativeOrder());
+
+                                int[] vals = new int[8];
+                                for (int i = 0; i < 8; i++) {
+                                    if (rowBuf.capacity() >= (i * 4) + 4) {
+                                        vals[i] = rowBuf.getInt(i * 4);
+                                    }
+                                }
+
+                                if (ctx.broadcastBuffer.size() < 3) {
+                                    System.out.println(">>> [DEBUG JOIN HASH] First 8 Ints in memory: " + java.util.Arrays.toString(vals));
+                                }
+
+                                int joinKey = -1;
+                                for (int i = 0; i < 8; i++) {
+                                    if (vals[i] > 10 && vals[i] <= 300000) {
+                                        joinKey = vals[i];
+                                        break;
+                                    }
+                                }
+
+                                if (joinKey == -1) joinKey = vals[2];
+
+                                ctx.broadcastBuffer.put(joinKey, rowData);
+
+                            } catch (Exception e) {
+                                if (ctx.broadcastBuffer.size() == 0) {
+                                    System.out.println(">>> [DEBUG JOIN HASH] Failed to parse row!");
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    readBuffer.reset(); break;
+                }
+            }
+
+            if (readBuffer.hasRemaining()) {
+                readBuffer.compact();
+                channel.read(readBuffer, readBuffer.position(), this);
+            } else {
+                readBuffer.clear();
+                channel.read(readBuffer, 0, this);
+            }
+        }
+
+        @Override
+        public void failed(Throwable exc, Integer attachment) {
+            System.out.println("Broadcast receive failed"); exc.printStackTrace();
+        }
+    }
+
+
+
     /**
      * On a connection attempt, it is unknown what is the type of node
      * attempting the connection. We find out after the first read.
@@ -557,6 +698,22 @@ public final class VmsEventHandler extends ModbHttpServer {
             }
             // message identifier
             byte messageIdentifier = this.buffer.get(0);
+            LOGGER.log(INFO, ">>> [VMS Incoming connection from " + remoteAddress + " | First Byte: " + messageIdentifier);
+
+            if (messageIdentifier == QUERY_RESULT_TYPE || messageIdentifier == QueryRequestEvent.QUERY_REQUEST_TYPE) {
+                LOGGER.log(INFO, ">>> [VMS HANDSHAKE] Direct Query detected! Bypassing Presentation.");
+                if (messageIdentifier == QueryRequestEvent.QUERY_REQUEST_TYPE) {
+                    ConnectionMetadata dummyMeta = new ConnectionMetadata("gateway".hashCode(), ConnectionMetadata.NodeType.GATEWAY, this.channel);
+                    IdentifiableNode dummyNode = new IdentifiableNode("gateway", "localhost", 8095);
+                    GatewayReadCompletionHandler handler = new GatewayReadCompletionHandler(dummyNode, dummyMeta, this.buffer);
+                    handler.completed(result, 0);
+                } else {
+                    BroadcastReceiverHandler handler = new BroadcastReceiverHandler(this.channel, this.buffer);
+                    handler.completed(result, 0);
+                }
+                return;
+            }
+
             if(messageIdentifier != PRESENTATION){
                 this.buffer.flip();
                 String request = StandardCharsets.UTF_8.decode(this.buffer).toString();
@@ -583,9 +740,163 @@ public final class VmsEventHandler extends ModbHttpServer {
             switch (nodeTypeIdentifier) {
                 case (Presentation.SERVER_TYPE) -> this.processServerPresentation();
                 case (Presentation.VMS_TYPE) -> this.processVmsPresentation();
+                case (Presentation.GATEWAY_TYPE) -> this.processGatewayPresentation();
                 default -> this.processUnknownNodeType(nodeTypeIdentifier);
             }
         }
+
+        private void processGatewayPresentation() {
+            LOGGER.log(INFO, me.identifier + ": Processing presentation message from Gateway");
+            VmsNode gatewayNode = Presentation.readVms(this.buffer, serdesProxy);
+
+            ConnectionMetadata connMetadata = new ConnectionMetadata(
+                    gatewayNode.hashCode(), ConnectionMetadata.NodeType.GATEWAY, this.channel);
+
+            GatewayReadCompletionHandler handler = new GatewayReadCompletionHandler(gatewayNode, connMetadata, this.buffer);
+
+            if (this.buffer.hasRemaining()) {
+                int leftoverBytes = this.buffer.remaining();
+                this.buffer.compact();
+                handler.completed(leftoverBytes, 0);
+            } else {
+                this.buffer.clear();
+                this.channel.read(this.buffer, 0, handler);
+            }
+        }
+
+        private final class GatewayReadCompletionHandler implements CompletionHandler<Integer, Integer> {
+            private final IdentifiableNode gateway;
+            private final ConnectionMetadata connectionMetadata;
+            private final ByteBuffer readBuffer;
+
+            public GatewayReadCompletionHandler(IdentifiableNode gateway, ConnectionMetadata connectionMetadata, ByteBuffer readBuffer) {
+                this.gateway = gateway;
+                this.connectionMetadata = connectionMetadata;
+                this.readBuffer = readBuffer;
+            }
+
+            @Override
+            public void completed(Integer result, Integer startPos) {
+                if (result == -1) {
+                    LOGGER.log(WARNING, me.identifier + ": Gateway disconnected.");
+                    try {
+                        connectionMetadata.channel.close();
+                    } catch (IOException ignored) {
+
+                    }
+                    return;
+                }
+
+                if (startPos == 0) readBuffer.flip();
+                LOGGER.log(INFO, ">>> [VMS] Received raw message from Gateway. Size: " + readBuffer.remaining() + " bytes");
+
+                byte type = readBuffer.get();
+
+                if (type == QueryRequestEvent.QUERY_REQUEST_TYPE) {
+                    try {
+                        processQueryRequest(readBuffer);
+                    } catch (Exception e) {
+                        LOGGER.log(ERROR, ">>> [VMS] FATAL ERROR processing QueryRequest!", e);
+                    }
+                } else {
+                    LOGGER.log(ERROR, ">>> [VMS] Unknown message type from Gateway: " + type);
+                    readBuffer.position(readBuffer.limit());
+                }
+
+                if (readBuffer.hasRemaining()) {
+                    this.completed(result, readBuffer.position());
+                } else {
+                    readBuffer.clear();
+                    connectionMetadata.channel.read(readBuffer, 0, this);
+                }
+            }
+
+            private void processQueryRequest(java.nio.ByteBuffer buffer) {
+                try {
+                    buffer.getInt();
+                    var payload = QueryRequestEvent.read(buffer);
+                    LOGGER.log(INFO, ">>> [VMS] Received Request | Table: " + payload.tableName() + " | Mode: " + payload.mode());
+
+                    TransactionManager transactionManagerGateway = (TransactionManager) transactionManager;
+
+                    List<TransactionManager.SimplePredicate> predicates = null;
+                    if (payload.predicates() != null && payload.predicates().length > 0) {
+                        String jsonString = new String(payload.predicates(), StandardCharsets.UTF_8);
+                        PredicateDTO[] dtos = (PredicateDTO[]) serdesProxy.deserialize(jsonString, PredicateDTO[].class);
+
+                        if (dtos != null) {
+                            predicates = new ArrayList<>();
+                            for (PredicateDTO dto : dtos) {
+                                ExpressionTypeEnum expr = ExpressionTypeEnum.valueOf(dto.expression());
+                                predicates.add(new TransactionManager.SimplePredicate(
+                                        dto.columnReference().columnPosition(), expr, dto.value()));
+                            }
+                        }
+                    }
+
+                    final List<TransactionManager.SimplePredicate> finalPredicates = predicates;
+
+                    if (payload.mode() == QueryRequestEvent.MODE_SCAN_TO_GATEWAY) {
+                        executeStandardScan(payload, finalPredicates, transactionManagerGateway, (AsynchronousSocketChannel) connectionMetadata.channel);
+                    }
+                    else if (payload.mode() == QueryRequestEvent.MODE_BROADCAST_TO_VMS) {
+                        String targetAddress = new String(payload.routingData(), StandardCharsets.UTF_8);
+                        String[] parts = targetAddress.split(":");
+                        String host = parts[0];
+                        int port = Integer.parseInt(parts[1]);
+
+                        LOGGER.log(INFO, ">>> [WAREHOUSE] Triggered! Attempting to connect to Order VMS at: " + host + ":" + port);
+
+                        AsynchronousSocketChannel targetChannel = AsynchronousSocketChannel.open(group);
+
+                        targetChannel.connect(new java.net.InetSocketAddress(host, port), null, new CompletionHandler<Void, Void>() {
+                            @Override
+                            public void completed(Void result, Void attachment) {
+                                LOGGER.log(INFO, ">>> [WAREHOUSE] CONNECTION SUCCESS! Starting Scan...");
+                                executeStandardScan(payload, finalPredicates, transactionManagerGateway, targetChannel);
+                            }
+                            @Override
+                            public void failed(Throwable exc, Void attachment) {
+                                LOGGER.log(ERROR, ">>> [WAREHOUSE] CONNECTION FAILED! Could not connect to Order VMS!", exc);
+                            }
+                        });
+                    }
+                    else if (payload.mode() == QueryRequestEvent.MODE_RECEIVE_AND_JOIN) {
+                        int localJoinColumn = Integer.parseInt(new String(payload.routingData(), StandardCharsets.UTF_8));
+                        activeJoins.put(payload.queryId(), new JoinContext(payload, (AsynchronousSocketChannel) connectionMetadata.channel, localJoinColumn));
+                        LOGGER.log(INFO, ">>> [ORDER VMS] JOIN MODE active. Awaiting broadcast...");
+                    }
+
+                } catch (Exception e) {
+                    LOGGER.log(ERROR, "Error processing query request", e);
+                }
+            }
+
+            private void executeStandardScan(QueryRequestEvent.QueryPayload payload, List<TransactionManager.SimplePredicate> predicates, TransactionManager tm, AsynchronousSocketChannel outputChannel) {                Object indexObj = tm.getIndex(payload.tableName());
+                Iterator<Long> addressIterator = tm.getScanIterator(payload.tableName(), predicates);
+
+                if (indexObj == null || addressIterator == null) return;
+
+                UniqueHashBufferIndex index = (UniqueHashBufferIndex) indexObj;
+
+                VmsQueryWorker worker = new VmsQueryWorker(
+                        outputChannel,
+                        index,
+                        addressIterator,
+                        payload,
+                        options.networkBufferSize(),
+                        options.networkSendTimeout()
+                );
+
+                Thread.ofPlatform().name("query-worker-" + payload.queryId()).start(worker);
+            }
+
+            @Override
+            public void failed(Throwable exc, Integer attachment) {
+                LOGGER.log(ERROR, "Gateway connection error", exc);
+            }
+        }
+
 
         private void processServerPresentation() {
             LOGGER.log(INFO,me.identifier+": Start processing presentation message from a node claiming to be a server");
@@ -760,6 +1071,7 @@ public final class VmsEventHandler extends ModbHttpServer {
             leader = Presentation.readServer(this.buffer);
             // read queues leader is interested
             boolean hasQueuesToSubscribe = this.buffer.get() == Presentation.YES;
+            //todo
             if(hasQueuesToSubscribe){
                 queuesLeaderSubscribesTo.addAll(Presentation.readQueuesToSubscribeTo(this.buffer, serdesProxy));
             }

@@ -14,6 +14,8 @@ import dk.ku.di.dms.vms.modb.storage.iterator.unique.KeyRecordIterator;
 import dk.ku.di.dms.vms.modb.storage.iterator.unique.RecordIterator;
 import dk.ku.di.dms.vms.modb.storage.record.RecordBufferContext;
 
+import java.nio.ByteBuffer;
+import java.util.Iterator;
 import java.util.concurrent.locks.ReentrantLock;
 
 import static dk.ku.di.dms.vms.modb.common.memory.MemoryUtils.UNSAFE;
@@ -57,6 +59,16 @@ public class UniqueHashBufferIndex extends ReadWriteIndex<IKey> implements ReadW
         this.capacity = capacity;
         this.limit = recordBufferContext.address + (this.recordSize * (this.capacity == 1 ? 1 : this.capacity - 1));
         this.p = Integer.numberOfTrailingZeros(this.capacity);
+    }
+
+    public void copyRecordToBuffer(long srcAddress, ByteBuffer destinationBuffer) {
+        long dataAddress = srcAddress + Schema.RECORD_HEADER;
+        int dataSize = this.schema.getRecordSizeWithoutHeader();
+
+        byte[] temp = new byte[dataSize];
+        UNSAFE.copyMemory(null, dataAddress, temp, UNSAFE.arrayBaseOffset(byte[].class), dataSize);
+
+        destinationBuffer.put(temp);
     }
 
     @Override

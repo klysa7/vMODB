@@ -21,7 +21,7 @@ echo "Starting proxy server..."
 java --enable-preview \
      --add-exports java.base/jdk.internal.misc=ALL-UNNAMED \
      --add-opens java.base/jdk.internal.util=ALL-UNNAMED \
-     -jar tpcc/proxy-tpcc/target/proxy-tpcc-1.0-SNAPSHOT-jar-with-dependencies.jar
+     -jar tpcc/proxy-tpcc/target/proxy-tpcc-1.0-SNAPSHOT.jar
 
 cleanup() {
     echo "Cleaning up background processes..."
@@ -33,4 +33,4 @@ cleanup() {
     done
 }
 
-trap cleanup EXIT 
+trap cleanup EXIT
