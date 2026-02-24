@@ -1,6 +1,5 @@
 package dk.ku.di.dms.vms.calcite.client;
 
-import dk.ku.di.dms.vms.modb.common.schema.network.Constants;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;

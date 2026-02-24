@@ -1,7 +1,5 @@
 package dk.ku.di.dms.vms.calcite.olap.orchestrator.planning;
 
-import dk.ku.di.dms.vms.calcite.olap.orchestrator.planning.ops.CoordinatorHashJoinOperation;
-import dk.ku.di.dms.vms.calcite.olap.orchestrator.planning.ops.CoordinatorOperation;
 import dk.ku.di.dms.vms.calcite.olap.orchestrator.planning.ops.CoordinatorOperatorDefinition;
 
 import java.util.List;

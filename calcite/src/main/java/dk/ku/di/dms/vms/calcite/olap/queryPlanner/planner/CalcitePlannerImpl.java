@@ -1,9 +1,11 @@
 package dk.ku.di.dms.vms.calcite.olap.queryPlanner.planner;
 
 import dk.ku.di.dms.vms.calcite.modb.convention.VModbConvention;
-import dk.ku.di.dms.vms.calcite.modb.rules.*;
+import dk.ku.di.dms.vms.calcite.modb.rules.VModbFilterRule;
+import dk.ku.di.dms.vms.calcite.modb.rules.VModbJoinRule;
+import dk.ku.di.dms.vms.calcite.modb.rules.VModbProjectRule;
+import dk.ku.di.dms.vms.calcite.modb.rules.VModbTableAccessRule;
 import dk.ku.di.dms.vms.calcite.schema.Optimizer;
-import org.apache.calcite.adapter.enumerable.EnumerableConvention;
 import org.apache.calcite.plan.hep.HepPlanner;
 import org.apache.calcite.plan.hep.HepProgramBuilder;
 import org.apache.calcite.rel.RelNode;
@@ -20,10 +22,7 @@ import java.io.StringWriter;
 import java.util.List;
 import java.util.Objects;
 
-import static java.lang.System.Logger.Level.ERROR;
 import static java.lang.System.Logger.Level.INFO;
-import static org.apache.calcite.adapter.enumerable.EnumerableRules.ENUMERABLE_JOIN_RULE;
-import static org.apache.calcite.adapter.enumerable.EnumerableRules.ENUMERABLE_PROJECT_RULE;
 
 public final class CalcitePlannerImpl implements CalcitePlanner {
 

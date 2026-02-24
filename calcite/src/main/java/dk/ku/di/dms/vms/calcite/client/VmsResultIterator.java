@@ -6,7 +6,6 @@ import java.io.EOFException;
 import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
-import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Iterator;
 import java.util.LinkedList;

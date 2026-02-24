@@ -1,6 +1,9 @@
 package dk.ku.di.dms.vms.calcite.olap.orchestrator.planning;
 
-import dk.ku.di.dms.vms.calcite.olap.orchestrator.planning.ops.*;
+import dk.ku.di.dms.vms.calcite.olap.orchestrator.planning.ops.CoordinatorOperatorDefinition;
+import dk.ku.di.dms.vms.calcite.olap.orchestrator.planning.ops.JoinDefinition;
+import dk.ku.di.dms.vms.calcite.olap.orchestrator.planning.ops.ProjectDefinition;
+import dk.ku.di.dms.vms.calcite.olap.orchestrator.planning.ops.ScanDefinition;
 import org.apache.calcite.plan.RelOptUtil;
 import org.apache.calcite.rel.RelNode;
 

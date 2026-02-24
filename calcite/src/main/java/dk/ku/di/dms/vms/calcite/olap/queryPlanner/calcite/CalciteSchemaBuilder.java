@@ -8,8 +8,6 @@ import org.apache.calcite.schema.SchemaPlus;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.calcite.tools.Frameworks;
 
-import static java.lang.System.Logger.Level.INFO;
-
 public final class CalciteSchemaBuilder {
 
     private static final System.Logger LOGGER =

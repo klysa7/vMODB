@@ -4,7 +4,9 @@ import dk.ku.di.dms.vms.calcite.client.VmsGatewayClient;
 import dk.ku.di.dms.vms.calcite.olap.orchestrator.planning.DistributedPlan;
 import dk.ku.di.dms.vms.calcite.olap.orchestrator.planning.VmsSubplan;
 import dk.ku.di.dms.vms.calcite.olap.orchestrator.planning.ops.*;
-import dk.ku.di.dms.vms.calcite.olap.orchestrator.runtime.ops.*;
+import dk.ku.di.dms.vms.calcite.olap.orchestrator.runtime.ops.LocalJoinOperator;
+import dk.ku.di.dms.vms.calcite.olap.orchestrator.runtime.ops.LocalProjectOperator;
+import dk.ku.di.dms.vms.calcite.olap.orchestrator.runtime.ops.StreamingScanOperator;
 
 import java.util.ArrayList;
 import java.util.Arrays;

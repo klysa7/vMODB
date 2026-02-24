@@ -10,8 +10,6 @@ public final class VmsSubplan {
     public final SubPlanOperation operation;
     public final List<String> columnsInOrder;
     public final byte[] predicates;
-
-    // NEW: Distributed Execution fields
     public final byte mode;
     public final byte[] routingData;
 

@@ -1,13 +1,12 @@
 package dk.ku.di.dms.vms.calcite.olap.orchestrator.planning;
+
+import dk.ku.di.dms.vms.calcite.modb.rel.VModbFilter;
+import dk.ku.di.dms.vms.calcite.modb.rel.VModbJoin;
+import dk.ku.di.dms.vms.calcite.modb.rel.VModbProject;
 import dk.ku.di.dms.vms.calcite.modb.rel.VModbTableAccess;
 import dk.ku.di.dms.vms.calcite.olap.orchestrator.Orchestrator;
 import dk.ku.di.dms.vms.calcite.olap.orchestrator.placement.PlacementResolver;
 import dk.ku.di.dms.vms.calcite.olap.orchestrator.planning.ops.*;
-
-import dk.ku.di.dms.vms.modb.api.query.enums.ExpressionTypeEnum;
-import dk.ku.di.dms.vms.modb.definition.ColumnReference;
-import dk.ku.di.dms.vms.modb.query.analyzer.predicate.WherePredicate;
-import dk.ku.di.dms.vms.modb.query.execution.filter.FilterContext;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.Join;
 import org.apache.calcite.rel.core.Project;
@@ -49,19 +48,19 @@ public final class DistributedPlanner {
 
     private CoordinatorOperatorDefinition relNodeToOperatorTree(RelNode node) {
 
-        if (node instanceof dk.ku.di.dms.vms.calcite.modb.rel.VModbProject project) {
+        if (node instanceof VModbProject project) {
             CoordinatorOperatorDefinition inputOperation = relNodeToOperatorTree(project.getInput());
             return new ProjectDefinition(inputOperation, project.getProjects());
         }
 
-        if (node instanceof dk.ku.di.dms.vms.calcite.modb.rel.VModbJoin join) {
+        if (node instanceof VModbJoin join) {
             CoordinatorOperatorDefinition leftOperation = relNodeToOperatorTree(join.getLeft());
             CoordinatorOperatorDefinition rightOperation = relNodeToOperatorTree(join.getRight());
             return new JoinDefinition(leftOperation, rightOperation, join.leftJoinCols, join.rightJoinCols);
         }
 
         // We know the filter is directly on top of the scan now!
-        if (node instanceof dk.ku.di.dms.vms.calcite.modb.rel.VModbFilter filter) {
+        if (node instanceof VModbFilter filter) {
             if (filter.getInput() instanceof VModbTableAccess scan) {
                 return createScanSubplan(scan, filter.getCondition());
             }
