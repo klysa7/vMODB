@@ -21,16 +21,12 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 
-import static java.lang.System.Logger.Level.INFO;
-
 /**
  * The interface between the application and internal database operations
  * Responsible to parse objects and convert database results to application objects.
  * A repository class do not need direct access to {@link ITransactionManager}
  */
 public abstract class AbstractProxyRepository<PK extends Serializable, T extends IEntity<PK>> extends EntityHandler<PK,T> implements IRepository<PK, T> {
-
-    private static final System.Logger LOGGER = System.getLogger(AbstractProxyRepository.class.getName());
 
     /**
      * Respective table of the entity
@@ -279,7 +275,6 @@ public abstract class AbstractProxyRepository<PK extends Serializable, T extends
 
     @Override
     public <DTO> List<DTO> fetchMany(SelectStatement statement, Class<DTO> clazz){
-        LOGGER.log(INFO, "I ENTERED THE FetchMany WITH IDENTIFIER " + statement.SQL.toString());
         List<Object[]> objects = this.operationalAPI.fetch(this.table, statement);
         Constructor<?> constructor = clazz.getDeclaredConstructors()[0];
         Field[] fields = clazz.getFields();

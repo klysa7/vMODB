@@ -12,8 +12,6 @@ import dk.ku.di.dms.vms.marketplace.order.repositories.IOrderHistoryRepository;
 import dk.ku.di.dms.vms.marketplace.order.repositories.IOrderItemRepository;
 import dk.ku.di.dms.vms.marketplace.order.repositories.IOrderRepository;
 import dk.ku.di.dms.vms.modb.api.annotations.*;
-import dk.ku.di.dms.vms.modb.api.query.builder.QueryBuilderFactory;
-import dk.ku.di.dms.vms.modb.api.query.statement.SelectStatement;
 
 import java.text.DateFormat;
 import java.text.SimpleDateFormat;
@@ -45,19 +43,6 @@ public final class OrderService {
         this.orderItemRepository = orderItemRepository;
         this.orderHistoryRepository = orderHistoryRepository;
     }
-
-    @VmsPreparedStatement("ordersAll")
-    public static final SelectStatement ORDERS_ALL =
-            QueryBuilderFactory.select()
-                    .project(
-                            "customer_id,order_id,invoice_number,status," +
-                                    "purchase_date,payment_date,delivered_carrier_date," +
-                                    "delivered_customer_date,estimated_delivery_date," +
-                                    "count_items,total_amount,total_freight,total_incentive," +
-                                    "total_invoice,total_items,created_at,updated_at"
-                    )
-                    .from("orders")
-                    .build();
 
     @Inbound(values = {STOCK_CONFIRMED})
     @Outbound(INVOICE_ISSUED)
