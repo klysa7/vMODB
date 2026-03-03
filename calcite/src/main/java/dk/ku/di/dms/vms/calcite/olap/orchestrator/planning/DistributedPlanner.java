@@ -27,7 +27,6 @@ public final class DistributedPlanner {
     private List<VmsSubplan> subplansAccumulator;
     private int exchangeCounter;
 
-
     public DistributedPlanner(PlacementResolver placement, ColumnsResolver columnsResolver) {
         this.placement = placement;
         this.columnsResolver = columnsResolver;
@@ -45,7 +44,6 @@ public final class DistributedPlanner {
     }
 
     private CoordinatorOperatorDefinition relNodeToOperatorTree(RelNode node) {
-
         if (node instanceof VModbProject project) {
             CoordinatorOperatorDefinition inputOperation = relNodeToOperatorTree(project.getInput());
             return new ProjectDefinition(inputOperation, project.getProjects());
@@ -76,8 +74,7 @@ public final class DistributedPlanner {
 
     private static final com.fasterxml.jackson.databind.ObjectMapper MAPPER = new com.fasterxml.jackson.databind.ObjectMapper();
 
-    public record ColRefDTO(int columnPosition) {}
-    public record PredicateDTO(ColRefDTO columnReference, String expression, Object value) {}
+    public record PredicateDTO(String columnName, String expression, Object value) {}
 
     private ScanDefinition createScanSubplan(VModbTableAccess scan, RexNode condition) {
         String schema = scan.getSchemaName();
@@ -86,7 +83,7 @@ public final class DistributedPlanner {
 
         List<String> columns = columnsResolver.columnsInOrder(schema, table);
 
-        byte[] predicatesJson = extractPredicates(condition);
+        byte[] predicatesJson = extractPredicates(condition, columns);
 
         VmsSubplan subplan = new VmsSubplan(
                 placement.ownerVms(schema, table),
@@ -103,7 +100,7 @@ public final class DistributedPlanner {
         return new ScanDefinition(exchangeId, columns, predicatesJson);
     }
 
-    private byte[] extractPredicates(RexNode filter) {
+    private byte[] extractPredicates(RexNode filter, List<String> columns) {
         if (filter == null) return new byte[0];
 
         List<PredicateDTO> dtos = new ArrayList<>();
@@ -111,11 +108,11 @@ public final class DistributedPlanner {
         if (filter.getKind() == SqlKind.AND) {
             RexCall andCall = (RexCall) filter;
             for (RexNode operand : andCall.getOperands()) {
-                PredicateDTO p = parseSingleCondition(operand);
+                PredicateDTO p = parseSingleCondition(operand, columns);
                 if (p != null) dtos.add(p);
             }
         } else {
-            PredicateDTO p = parseSingleCondition(filter);
+            PredicateDTO p = parseSingleCondition(filter, columns);
             if (p != null) dtos.add(p);
         }
 
@@ -129,7 +126,7 @@ public final class DistributedPlanner {
         }
     }
 
-    private PredicateDTO parseSingleCondition(RexNode node) {
+    private PredicateDTO parseSingleCondition(RexNode node, List<String> columns) {
         if (!(node instanceof RexCall call)) return null;
         if (call.getOperands().size() != 2) return null;
 
@@ -137,6 +134,7 @@ public final class DistributedPlanner {
         if (!(call.getOperands().get(1) instanceof org.apache.calcite.rex.RexLiteral literal)) return null;
 
         int columnIndex = columnRef.getIndex();
+        String columnName = columns.get(columnIndex);
         Object value = literal.getValue3();
 
         String exprType;
@@ -150,7 +148,7 @@ public final class DistributedPlanner {
             default: return null;
         }
 
-        return new PredicateDTO(new ColRefDTO(columnIndex), exprType, value);
+        return new PredicateDTO(columnName, exprType, value);
     }
 
     public interface ColumnsResolver {

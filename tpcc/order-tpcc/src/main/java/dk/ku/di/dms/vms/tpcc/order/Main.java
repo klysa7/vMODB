@@ -10,11 +10,12 @@ import dk.ku.di.dms.vms.tpcc.order.repositories.IOrderLineRepository;
 import dk.ku.di.dms.vms.tpcc.order.repositories.IOrderRepository;
 
 import java.util.Properties;
+import static java.lang.System.Logger.Level.INFO;
 
-/**
- * Port of the TPC-C order-related code as a virtual micro service
- */
 public final class Main {
+
+    private static final System.Logger LOGGER = System.getLogger(Main.class.getName());
+
     public static void main( String[] args ) throws Exception {
         build().start();
     }
@@ -23,9 +24,8 @@ public final class Main {
         Properties prop = ConfigUtils.loadProperties();
         String numWareStr = prop.getProperty("num_ware");
         int num_ware = Integer.parseInt(numWareStr);
-        // num orders fixed = 30k * num_ware
+
         int numOrders = num_ware * 30_000;
-        // based on 20k tx/s and 10s run
         numOrders += (20_000 * 10);
         int numOrderLine = numOrders * 10;
 
@@ -40,19 +40,39 @@ public final class Main {
         prop.setProperty("table.history.chaining", "false");
         prop.setProperty("checkpointing", "true");
 
+        prop.setProperty("max_records.customer", "1");
+        prop.setProperty("max_records.warehouse", "1");
+        prop.setProperty("max_records.district", "1");
+        prop.setProperty("max_records.stock", "1");
+        prop.setProperty("max_records.item", "1");
+
+        LOGGER.log(INFO, ">>> [ORDER VMS] Registered global schemas for Warehouse and Inventory packages.");
+
         VmsApplicationOptions options = VmsApplicationOptions.build(
                 prop,
                 "0.0.0.0",
                 8003, new String[]{
                         "dk.ku.di.dms.vms.tpcc.order",
+                        "dk.ku.di.dms.vms.tpcc.warehouse",
+                        "dk.ku.di.dms.vms.tpcc.inventory",
                         "dk.ku.di.dms.vms.tpcc.common"
                 });
-        return VmsApplication.build(options, (x,y) -> new OrderHttpHandler(x,
-                (IOrderRepository) y.apply("orders"),
-                (INewOrderRepository) y.apply("new_orders"),
-                (IOrderLineRepository) y.apply("order_line"),
-                (IHistoryRepository) y.apply("history")
-                )
-        );
+
+        return VmsApplication.build(options, (x,y) -> {
+
+            // ---> THE FIX: Force the TransactionManager to parse and register the remote schemas! <---
+            y.apply("customer");
+            y.apply("warehouse");
+            y.apply("district");
+            y.apply("stock");
+            y.apply("item");
+
+            return new OrderHttpHandler(x,
+                    (IOrderRepository) y.apply("orders"),
+                    (INewOrderRepository) y.apply("new_orders"),
+                    (IOrderLineRepository) y.apply("order_line"),
+                    (IHistoryRepository) y.apply("history")
+            );
+        });
     }
 }

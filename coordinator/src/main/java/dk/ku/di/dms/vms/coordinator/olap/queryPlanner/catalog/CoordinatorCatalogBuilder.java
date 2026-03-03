@@ -49,23 +49,16 @@ public final class CoordinatorCatalogBuilder {
         return new CatalogTable(model.tableName, columns, primaryKeyColumns);
     }
 
-    private CatalogType mapType(DataType dataType) {
-        if (dataType == null) {
-            return CatalogType.BYTES;
-        }
-
-        return switch (dataType) {
-            case BOOL -> CatalogType.BOOLEAN;
-            case INT -> CatalogType.INT;
-            case LONG -> CatalogType.BIGINT;
-            case FLOAT -> CatalogType.FLOAT;
-            case DOUBLE -> CatalogType.DOUBLE;
-            case CHAR, STRING, ENUM -> CatalogType.VARCHAR;
-            case DATE -> CatalogType.DATE;
-            case STRING_ARRAY,
-                 FLOAT_ARRAY,
-                 INT_ARRAY,
-                 COMPLEX -> CatalogType.BYTES;
+    private CatalogColumn toColumn(String name, DataType dt, boolean nullable) {
+        int byteSize = switch (dt) {
+            case INT   -> 4;
+            case LONG  -> 8;
+            case FLOAT -> 4;
+            case DOUBLE-> 8;
+            case BOOL  -> 1;
+            case CHAR  -> dt.value; // CHAR has fixed size in value field
+            default    -> 0; // STRING/variable — treat as 0; handle separately
         };
+        return new CatalogColumn(name, mapType(dt), true, byteSize);
     }
 }

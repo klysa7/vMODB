@@ -7,6 +7,8 @@ import dk.ku.di.dms.vms.modb.common.data_structure.Tuple;
 import dk.ku.di.dms.vms.modb.common.memory.MemoryRefNode;
 import dk.ku.di.dms.vms.modb.common.transaction.ITransactionContext;
 import dk.ku.di.dms.vms.modb.common.transaction.ITransactionManager;
+import dk.ku.di.dms.vms.modb.common.type.DataType;
+import dk.ku.di.dms.vms.modb.definition.Schema;
 import dk.ku.di.dms.vms.modb.definition.Table;
 import dk.ku.di.dms.vms.modb.definition.key.IKey;
 import dk.ku.di.dms.vms.modb.definition.key.KeyUtils;
@@ -22,6 +24,8 @@ import dk.ku.di.dms.vms.modb.query.execution.operators.AbstractSimpleOperator;
 import dk.ku.di.dms.vms.modb.query.execution.operators.minmax.IndexAggregateScan;
 import dk.ku.di.dms.vms.modb.query.execution.operators.scan.FullScan;
 import dk.ku.di.dms.vms.modb.query.execution.operators.scan.IndexScan;
+import dk.ku.di.dms.vms.modb.query.execution.raw.GeneralRowView;
+import dk.ku.di.dms.vms.modb.query.execution.raw.RawPredicate;
 import dk.ku.di.dms.vms.modb.query.planner.SimplePlanner;
 import dk.ku.di.dms.vms.modb.storage.iterator.IRecordIterator;
 import dk.ku.di.dms.vms.modb.transaction.multiversion.index.IMultiVersionIndex;
@@ -198,13 +202,17 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
         return table.primaryKeyIndex().underlyingIndex();
     }
 
-    public Iterator<Long> getScanIterator(String tableName, List<SimplePredicate> predicates) {
-        Table table = this.catalog.get(tableName);
-        if (table == null) throw new IllegalArgumentException("Table not found: " + tableName);
+    // ==============================================================================
+    // [BREAKPOINT] ZERO-COPY SCAN ITERATOR
+    // ==============================================================================
+    public Iterator<Long> getScanIterator(String tableName, List<RawPredicate> predicates) {
+        LOGGER.log(INFO, ">>> [TM-SCAN] getScanIterator called for table: " + tableName);
 
+        Table table = this.catalog.get(tableName);
         var underlying = table.primaryKeyIndex().underlyingIndex();
 
         if (underlying instanceof UniqueHashBufferIndex rawIndex) {
+            LOGGER.log(INFO, ">>> [TM-SCAN] Initialized UniqueHashBufferIndex for Zero-Copy pointer scanning.");
             IRecordIterator<IKey> internalIterator = rawIndex.iterator();
 
             return new Iterator<Long>() {
@@ -223,8 +231,14 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
                             return true;
                         }
 
+                        // Local predicate check
                         Object[] record = rawIndex.record(internalIterator);
-                        if (checkPredicates(record, predicates)) {
+                        boolean passed = true;
+                        for (RawPredicate p : predicates) {
+                            if (!p.matches(record)) { passed = false; break; }
+                        }
+
+                        if (passed) {
                             nextMatch = currentAddr;
                             return true;
                         }
@@ -234,121 +248,97 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
 
                 @Override
                 public Long next() {
-                    if (nextMatch == null && !hasNext()) throw new NoSuchElementException();
                     Long result = nextMatch;
                     nextMatch = null;
                     return result;
                 }
             };
         }
-
-        LOGGER.log(INFO, "Table " + tableName + " is using HashMapIndex. Attempting fallback...");
-        try {
-            java.lang.reflect.Method method = underlying.getClass().getMethod("addressIterator");
-            return (Iterator<Long>) method.invoke(underlying);
-        } catch (Exception e) {
-            throw new IllegalStateException("Index does not support address iteration.");
-        }
+        throw new IllegalStateException("Raw scanning requires UniqueHashBufferIndex.");
     }
 
-    private boolean checkPredicates(Object[] row, List<SimplePredicate> predicates) {
-        for (SimplePredicate p : predicates) {
-            Object val = row[p.columnPosition()];
-            if (val == null) return false;
+    // ==============================================================================
+    // [BREAKPOINT] ZERO-COPY JOIN PROBE ITERATOR
+    // ==============================================================================
+    public Iterator<byte[]> getJoinIterator(String tableName, java.util.Map<Integer, byte[]> broadcastBuffer, int[] localJoinColumnIndices) {
+        LOGGER.log(INFO, ">>> [TM-PROBE] getJoinIterator called for local table: " + tableName);
+        LOGGER.log(INFO, ">>> [TM-PROBE] Network Broadcast Map contains " + broadcastBuffer.size() + " entries.");
 
-            int cmp = compareValues(val, p.value());
-
-            switch (p.expression()) {
-                case EQUALS: if (cmp != 0) return false; break;
-                case GREATER_THAN: if (cmp <= 0) return false; break;
-                case LESS_THAN: if (cmp >= 0) return false; break;
-                case GREATER_THAN_OR_EQUAL: if (cmp < 0) return false; break;
-                case LESS_THAN_OR_EQUAL: if (cmp > 0) return false; break;
-                case NOT_EQUALS: if (cmp == 0) return false; break;
-            }
-        }
-        return true;
-    }
-
-    public Iterator<byte[]> getJoinIterator(String tableName, Map<Integer, byte[]> broadcastBuffer, int localJoinColumnIndex) {
         Table table = this.catalog.get(tableName);
+        Schema schema = table.schema();
         var underlying = table.primaryKeyIndex().underlyingIndex();
 
-        if (!(underlying instanceof UniqueHashBufferIndex rawIndex)) {
-            throw new IllegalStateException("Joins currently require UniqueHashBufferIndex.");
+        if (underlying instanceof UniqueHashBufferIndex rawIndex) {
+            IRecordIterator<IKey> internalIterator = rawIndex.iterator();
+
+            return new Iterator<byte[]>() {
+                byte[] nextMatch = null;
+
+                @Override
+                public boolean hasNext() {
+                    if (nextMatch != null) return true;
+
+                    while (internalIterator.hasNext()) {
+                        internalIterator.next();
+
+                        // Because the local memory has dynamic padding, we use modb's native Object[]
+                        // purely to calculate the hash correctly!
+                        Object[] record = rawIndex.record(internalIterator);
+
+                        int hash = 1;
+                        for (int colIdx : localJoinColumnIndices) {
+                            Object val = record[colIdx];
+                            int colHash = 0;
+                            if (val != null) {
+                                DataType type = schema.columnDataType(colIdx);
+                                switch (type) {
+                                    case INT: colHash = Integer.hashCode(((Number) val).intValue()); break;
+                                    case LONG: colHash = Long.hashCode(((Number) val).longValue()); break;
+                                    case DOUBLE: colHash = Double.hashCode(((Number) val).doubleValue()); break;
+                                }
+                            }
+                            hash = 31 * hash + colHash;
+                        }
+
+                        // Look up the hash in the Map generated by GeneralRowView!
+                        byte[] remoteData = broadcastBuffer.get(hash);
+
+                        if (remoteData != null) {
+                            // WE FOUND A MATCH!
+                            long currentAddr = internalIterator.address();
+                            int localSize = schema.getRecordSizeWithoutHeader();
+                            byte[] localData = new byte[localSize];
+
+                            // Copy the RAW local C-struct bytes (skipping header)
+                            for (int i = 0; i < localSize; i++) {
+                                localData[i] = UNSAFE.getByte(currentAddr + RECORD_HEADER + i);
+                            }
+
+                            // Concatenate remote bytes + local bytes
+                            byte[] joinedRecord = new byte[remoteData.length + localData.length];
+                            System.arraycopy(remoteData, 0, joinedRecord, 0, remoteData.length);
+                            System.arraycopy(localData, 0, joinedRecord, remoteData.length, localData.length);
+
+                            nextMatch = joinedRecord;
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+
+                @Override
+                public byte[] next() {
+                    byte[] res = nextMatch;
+                    nextMatch = null;
+                    return res;
+                }
+            };
         }
-
-        IRecordIterator<IKey> internalIterator = rawIndex.iterator();
-        final int localRecordSize = rawIndex.schema().getRecordSizeWithoutHeader();
-
-        return new Iterator<byte[]>() {
-            byte[] nextMatch = null;
-            int debugCounter = 0;
-
-            @Override
-            public boolean hasNext() {
-                if (nextMatch != null) {
-                    return true;
-                }
-
-                while (internalIterator.hasNext()) {
-                    internalIterator.next();
-                    long currentAddr = internalIterator.address();
-
-                    Object[] record = rawIndex.record(internalIterator);
-                    if (record == null || record.length == 0 || (record[0] instanceof Number n && n.intValue() == 0)) {
-                        continue;
-                    }
-
-                    Object joinKeyObj = record[localJoinColumnIndex];
-                    if (joinKeyObj == null) {
-                        continue;
-                    }
-
-                    int joinHash = (joinKeyObj instanceof Number n) ? Integer.hashCode(n.intValue()) : joinKeyObj.hashCode();
-                    if (debugCounter < 5) {
-                        System.out.println(">>> [DEBUG JOIN PROBE] Extracted Value: " + joinKeyObj + " from row: " + java.util.Arrays.toString(record));
-                        debugCounter++;
-                    }
-
-                    byte[] remoteBytes = broadcastBuffer.get(joinHash);
-                    if (remoteBytes != null) {
-                        System.out.println(">>> [DEBUG JOIN PROBE] MATCH FOUND! Hash: " + joinHash);
-
-                        byte[] localBytes = new byte[localRecordSize];
-                        UNSAFE.copyMemory(
-                                null,
-                                currentAddr + RECORD_HEADER,
-                                localBytes,
-                                UNSAFE.arrayBaseOffset(byte[].class),
-                                localRecordSize
-                        );
-
-                        nextMatch = new byte[remoteBytes.length + localRecordSize];
-                        System.arraycopy(remoteBytes, 0, nextMatch, 0, remoteBytes.length);
-                        System.arraycopy(localBytes, 0, nextMatch, remoteBytes.length, localRecordSize);
-                        return true;
-                    }
-                }
-                return false;
-            }
-
-            @Override
-            public byte[] next() {
-                if (nextMatch == null && !hasNext()) {
-                    throw new NoSuchElementException();
-                }
-                byte[] result = nextMatch;
-                nextMatch = null;
-                return result;
-            }
-        };
+        throw new IllegalStateException("Raw scanning requires UniqueHashBufferIndex.");
     }
 
     private int compareValues(Object val1, Object val2) {
-        if (val1 instanceof Number n1 && val2 instanceof Number n2) {
-            return Double.compare(n1.doubleValue(), n2.doubleValue());
-        }
+        if (val1 instanceof Number n1 && val2 instanceof Number n2) return Double.compare(n1.doubleValue(), n2.doubleValue());
         return String.valueOf(val1).compareTo(String.valueOf(val2));
     }
 

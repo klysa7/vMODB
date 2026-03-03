@@ -3,40 +3,24 @@ package dk.ku.di.dms.vms.sdk.embed.query;
 import dk.ku.di.dms.vms.modb.common.memory.MemoryManager;
 import dk.ku.di.dms.vms.modb.common.runnable.StoppableRunnable;
 import dk.ku.di.dms.vms.modb.common.schema.network.query.QueryRequestEvent;
-import dk.ku.di.dms.vms.modb.common.schema.network.query.QueryResultEvent;
 import dk.ku.di.dms.vms.modb.index.unique.UniqueHashBufferIndex;
-import java.lang.invoke.MethodHandles;
-import java.lang.invoke.VarHandle;
+
 import java.nio.ByteBuffer;
 import java.nio.channels.AsynchronousSocketChannel;
 import java.nio.channels.CompletionHandler;
-import java.util.Deque;
 import java.util.Iterator;
-import java.util.concurrent.ConcurrentLinkedDeque;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class VmsQueryWorker extends StoppableRunnable {
 
-    private static final VarHandle WRITE_SYNCHRONIZER;
-
-    static {
-        try {
-            MethodHandles.Lookup l = MethodHandles.lookup();
-            WRITE_SYNCHRONIZER = l.findVarHandle(VmsQueryWorker.class, "writeSynchronizer", int.class);
-        } catch (Exception e) {
-            throw new InternalError(e);
-        }
-    }
-
-    @SuppressWarnings("unused")
-    private volatile int writeSynchronizer;
     private final int bufferSize;
     private final int timeout;
     private final AsynchronousSocketChannel channel;
-    private final Deque<ByteBuffer> writeBufferPool;
-    private final BatchWriteCompletionHandler batchWriteCompletionHandler = new BatchWriteCompletionHandler();
     private final UniqueHashBufferIndex index;
     private final QueryRequestEvent.QueryPayload queryPayload;
+
     private final Iterator<Long> recordAddressIterator;
     private final Iterator<byte[]> byteRecordIterator;
 
@@ -46,11 +30,8 @@ public final class VmsQueryWorker extends StoppableRunnable {
         this.recordAddressIterator = recordAddressIterator;
         this.byteRecordIterator = null;
         this.queryPayload = queryPayload;
-        this.bufferSize = bufferSize;
-        this.timeout = timeout;
-        this.writeBufferPool = new ConcurrentLinkedDeque<>();
-        this.writeBufferPool.add(MemoryManager.getTemporaryDirectBuffer(this.bufferSize));
-        this.writeBufferPool.add(MemoryManager.getTemporaryDirectBuffer(this.bufferSize));
+        this.bufferSize = Math.max(bufferSize, 8192);
+        this.timeout = timeout <= 0 ? 5000 : timeout;
     }
 
     public VmsQueryWorker(AsynchronousSocketChannel channel, Iterator<byte[]> byteRecordIterator, QueryRequestEvent.QueryPayload queryPayload, int bufferSize, int timeout) {
@@ -59,152 +40,166 @@ public final class VmsQueryWorker extends StoppableRunnable {
         this.recordAddressIterator = null;
         this.byteRecordIterator = byteRecordIterator;
         this.queryPayload = queryPayload;
-        this.bufferSize = bufferSize;
-        this.timeout = timeout;
-        this.writeBufferPool = new ConcurrentLinkedDeque<>();
-        this.writeBufferPool.add(MemoryManager.getTemporaryDirectBuffer(this.bufferSize));
-        this.writeBufferPool.add(MemoryManager.getTemporaryDirectBuffer(this.bufferSize));
-    }
-
-    public boolean tryAcquireLock(){
-        return WRITE_SYNCHRONIZER.compareAndSet(this, 0, 1);
-    }
-
-    public void releaseLock(){
-        WRITE_SYNCHRONIZER.setVolatile(this, 0);
+        this.bufferSize = Math.max(bufferSize, 8192);
+        this.timeout = timeout <= 0 ? 5000 : timeout;
     }
 
     @Override
     public void run() {
         long start = System.nanoTime();
-        System.out.println("Starting Worker for QueryID: " + queryPayload.queryId() + " Table: " + queryPayload.tableName());
+        System.out.println(">>> [VMS-WORKER] Starting Raw C-Struct Byte Streamer for QueryID: " + queryPayload.queryId());
 
-        ByteBuffer writeBuffer = this.retrieveByteBuffer();
-        QueryResultEvent.initBatch(writeBuffer, queryPayload.queryId());
-        long count = 0;
+        ByteBuffer writeBuffer = MemoryManager.getTemporaryDirectBuffer(this.bufferSize);
+        writeBuffer.clear();
+
+        // -------------------------------------------------------------------------------------
+        // THE FIX: Manually write the CUSTOM HEADER that the Order VMS expects!
+        // The header is exactly 16 bytes: [Byte 99] [Int Size] [Long QueryID] [Int RowCount]
+        // -------------------------------------------------------------------------------------
+        writeBuffer.put((byte) 99); // QUERY_RESULT_TYPE
+        int sizePos = writeBuffer.position();
+        writeBuffer.putInt(0); // Placeholder for total payload size
+        writeBuffer.putLong(queryPayload.queryId());
+        int countPos = writeBuffer.position();
+        writeBuffer.putInt(0); // Placeholder for row count
+
+        long totalCount = 0;
+        int batchRowCount = 0;
 
         try {
             if (this.recordAddressIterator != null) {
-                while (this.recordAddressIterator.hasNext()) {
+                // =========================================================
+                // WAREHOUSE VMS: Block-Copy C-Structs to TCP Buffer
+                // =========================================================
+                while (this.recordAddressIterator.hasNext() && this.isRunning()) {
                     Long recordAddress = this.recordAddressIterator.next();
 
-                    if (writeBuffer.remaining() < 1024) {
+                    // If the buffer doesn't have enough space for the next struct, flush it!
+                    if (writeBuffer.remaining() < 2048) {
+                        // Backfill the header placeholders before sending
+                        int payloadSize = writeBuffer.position() - sizePos - 4;
+                        writeBuffer.putInt(sizePos, payloadSize);
+                        writeBuffer.putInt(countPos, batchRowCount);
+
+                        System.out.println(">>> [VMS-WORKER] Flushing TCP batch of " + batchRowCount + " structs (Size: " + payloadSize + " bytes).");
                         this.sendBuffer(writeBuffer);
-                        writeBuffer = this.retrieveByteBuffer();
-                        QueryResultEvent.initBatch(writeBuffer, queryPayload.queryId());
+
+                        // Reset the buffer and write a new custom header for the next batch
+                        writeBuffer.clear();
+                        writeBuffer.put((byte) 99);
+                        sizePos = writeBuffer.position();
+                        writeBuffer.putInt(0);
+                        writeBuffer.putLong(queryPayload.queryId());
+                        countPos = writeBuffer.position();
+                        writeBuffer.putInt(0);
+                        batchRowCount = 0;
                     }
 
+                    // Write the struct length as a 4-byte int, then copy the raw struct bytes
                     int lengthPos = writeBuffer.position();
-                    writeBuffer.putInt(0);
+                    writeBuffer.putInt(0); // length placeholder
                     int dataStart = writeBuffer.position();
-                    this.index.copyRecordToBuffer(recordAddress, writeBuffer);
-                    int dataEnd = writeBuffer.position();
-                    writeBuffer.putInt(lengthPos, dataEnd - dataStart);
 
-                    count++;
-                    if (count % 5000 == 0) System.out.println(">>> [VMS WORKER] Scanned " + count + " rows from " + queryPayload.tableName());
+                    // Directly copy off-heap C-struct (skipping header) into NIO!
+                    this.index.copyRecordToBuffer(recordAddress, writeBuffer);
+
+                    int dataEnd = writeBuffer.position();
+                    writeBuffer.putInt(lengthPos, dataEnd - dataStart); // backfill struct length
+
+                    batchRowCount++;
+                    totalCount++;
                 }
-            }
-            else if (this.byteRecordIterator != null) {
-                while (this.byteRecordIterator.hasNext()) {
+            } else if (this.byteRecordIterator != null) {
+                // =========================================================
+                // ORDER VMS: Write concatenated byte arrays to Gateway
+                // =========================================================
+                while (this.byteRecordIterator.hasNext() && this.isRunning()) {
                     byte[] joinedData = this.byteRecordIterator.next();
 
                     if (writeBuffer.remaining() < joinedData.length + 4) {
+                        int payloadSize = writeBuffer.position() - sizePos - 4;
+                        writeBuffer.putInt(sizePos, payloadSize);
+                        writeBuffer.putInt(countPos, batchRowCount);
+
                         this.sendBuffer(writeBuffer);
-                        writeBuffer = this.retrieveByteBuffer();
-                        QueryResultEvent.initBatch(writeBuffer, queryPayload.queryId());
+
+                        writeBuffer.clear();
+                        writeBuffer.put((byte) 99);
+                        sizePos = writeBuffer.position();
+                        writeBuffer.putInt(0);
+                        writeBuffer.putLong(queryPayload.queryId());
+                        countPos = writeBuffer.position();
+                        writeBuffer.putInt(0);
+                        batchRowCount = 0;
                     }
 
                     writeBuffer.putInt(joinedData.length);
                     writeBuffer.put(joinedData);
 
-                    count++;
-                    if (count % 5000 == 0) System.out.println(">>> [VMS WORKER] Joined and sent " + count + " rows from " + queryPayload.tableName());
+                    batchRowCount++;
+                    totalCount++;
                 }
             }
 
-            System.out.println(">>> [VMS WORKER] " + queryPayload.tableName() + " scan loop finished. Total rows: " + count);
+            System.out.println(">>> [VMS-WORKER] Table scan finished. Total rows encoded: " + totalCount);
 
-            if (writeBuffer.position() > QueryResultEvent.HEADER_SIZE) {
+            // Flush the final batch if there is any data left
+            if (batchRowCount > 0) {
+                int payloadSize = writeBuffer.position() - sizePos - 4;
+                writeBuffer.putInt(sizePos, payloadSize);
+                writeBuffer.putInt(countPos, batchRowCount);
+                System.out.println(">>> [VMS-WORKER] Flushing final TCP batch of " + batchRowCount + " rows.");
                 this.sendBuffer(writeBuffer);
-            } else {
-                this.returnByteBuffer(writeBuffer);
             }
 
-            System.out.println(">>> [VMS WORKER] Sending EndOfStream...");
-            this.sendEndOfStream();
+            System.out.println(">>> [VMS-WORKER] Sending EndOfStream flag...");
+            writeBuffer.clear();
+            writeBuffer.put((byte) 100); // END_OF_STREAM_TYPE
+            writeBuffer.putInt(8);       // EOF payload size
+            writeBuffer.putLong(queryPayload.queryId());
+            this.sendBuffer(writeBuffer);
 
         } catch (Exception e) {
-            System.out.println("CRITICAL ERROR in VmsQueryWorker");
+            System.out.println(">>> [VMS-WORKER] CRITICAL ERROR: " + e.getMessage());
+            e.printStackTrace();
+        } finally {
+            MemoryManager.releaseTemporaryDirectBuffer(writeBuffer);
         }
 
-        long end = System.nanoTime();
-        double durationMs = (end - start) / 1_000_000.0;
-        System.out.println(String.format(">>> [VMS WORKER] Finished. Mode: %d | Total Rows: %d | Time: %.2f ms", queryPayload.mode(), count, durationMs));
+        double durationMs = (System.nanoTime() - start) / 1_000_000.0;
+        System.out.println(String.format(">>> [VMS-WORKER] Stream Closed. Yielded %d Rows. Latency: %.2f ms", totalCount, durationMs));
     }
 
-    private void sendBuffer(ByteBuffer buffer) {
-        QueryResultEvent.finalizeBatch(buffer);
+    private void sendBuffer(ByteBuffer buffer) throws Exception {
+        if (buffer.position() == 0) return;
+
         buffer.flip();
 
-        int retries = 0;
-        while (!this.tryAcquireLock()) {
-            try {
-                if (retries < 10) { Thread.onSpinWait(); } else { Thread.sleep(1); }
-                retries++;
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return;
+        while (buffer.hasRemaining() && this.isRunning()) {
+            CountDownLatch writeLatch = new CountDownLatch(1);
+            AtomicBoolean writeFailed = new AtomicBoolean(false);
+
+            channel.write(buffer, timeout, TimeUnit.MILLISECONDS, buffer, new CompletionHandler<Integer, ByteBuffer>() {
+                @Override
+                public void completed(Integer result, ByteBuffer attachment) {
+                    if (result == -1) writeFailed.set(true);
+                    writeLatch.countDown();
+                }
+
+                @Override
+                public void failed(Throwable exc, ByteBuffer attachment) {
+                    System.out.println(">>> [VMS-WORKER-TCP] FAILED TO WRITE! " + exc.getMessage());
+                    writeFailed.set(true);
+                    writeLatch.countDown();
+                }
+            });
+
+            boolean completedInTime = writeLatch.await(timeout + 2000, TimeUnit.MILLISECONDS);
+
+            if (!completedInTime || writeFailed.get()) {
+                this.stop();
+                throw new java.io.IOException("TCP Socket dropped before stream finished.");
             }
-        }
-        this.channel.write(buffer, timeout, TimeUnit.MILLISECONDS, buffer, this.batchWriteCompletionHandler);
-    }
-
-    private void sendEndOfStream() {
-        ByteBuffer buffer = this.retrieveByteBuffer();
-        QueryResultEvent.writeEndOfStream(buffer, queryPayload.queryId());
-        buffer.flip();
-
-        int retries = 0;
-        while (!this.tryAcquireLock()) {
-            try {
-                if (retries < 10) { Thread.onSpinWait(); } else { Thread.sleep(1); }
-                retries++;
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return;
-            }
-        }
-        this.channel.write(buffer, timeout, TimeUnit.MILLISECONDS, buffer, this.batchWriteCompletionHandler);
-    }
-
-    private ByteBuffer retrieveByteBuffer() {
-        ByteBuffer bb = this.writeBufferPool.poll();
-        if(bb != null) { bb.clear(); return bb; }
-        return MemoryManager.getTemporaryDirectBuffer(this.bufferSize);
-    }
-
-    private void returnByteBuffer(ByteBuffer bb) {
-        this.writeBufferPool.add(bb);
-    }
-
-    private final class BatchWriteCompletionHandler implements CompletionHandler<Integer, ByteBuffer> {
-        @Override
-        public void completed(Integer result, ByteBuffer byteBuffer) {
-            if (byteBuffer.hasRemaining()) {
-                channel.write(byteBuffer, timeout, TimeUnit.MILLISECONDS, byteBuffer, this);
-            } else {
-                releaseLock();
-                returnByteBuffer(byteBuffer);
-            }
-        }
-
-        @Override
-        public void failed(Throwable exc, ByteBuffer byteBuffer) {
-            System.out.println(">>> [VMS WORKER WRITE] FAILED TO WRITE TO NETWORK!");
-            releaseLock();
-            returnByteBuffer(byteBuffer);
-            stop();
         }
     }
 }

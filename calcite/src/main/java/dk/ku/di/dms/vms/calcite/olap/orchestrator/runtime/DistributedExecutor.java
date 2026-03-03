@@ -7,10 +7,13 @@ import dk.ku.di.dms.vms.calcite.olap.orchestrator.planning.ops.*;
 import dk.ku.di.dms.vms.calcite.olap.orchestrator.runtime.ops.LocalJoinOperator;
 import dk.ku.di.dms.vms.calcite.olap.orchestrator.runtime.ops.LocalProjectOperator;
 import dk.ku.di.dms.vms.calcite.olap.orchestrator.runtime.ops.StreamingScanOperator;
+import dk.ku.di.dms.vms.calcite.olap.queryPlanner.catalog.CatalogColumn;
+import dk.ku.di.dms.vms.modb.common.schema.network.query.JoinRoutingData;
 
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.stream.Collectors;
 
 import static java.lang.System.Logger.Level.ERROR;
 import static java.lang.System.Logger.Level.INFO;
@@ -32,14 +35,14 @@ public final class DistributedExecutor {
 
         CoordinatorOperator root = buildOperatorTree(distributedPlan.root, distributedPlan);
 
-        LOGGER.log(INFO, "--> [EXECUTOR] Opening Pipeline...");
+        LOGGER.log(INFO, ">>> [EXECUTOR] Opening Pipeline...");
         root.open();
 
         List<List<Object>> allRows = new ArrayList<>();
         List<Object[]> batch;
         long totalRows = 0;
 
-        LOGGER.log(INFO, "--> [EXECUTOR] Entering Fetch Loop...");
+        LOGGER.log(INFO, ">>> [EXECUTOR] Entering Fetch Loop...");
         try {
             while ((batch = root.nextBatch()) != null) {
                 totalRows += batch.size();
@@ -79,53 +82,63 @@ public final class DistributedExecutor {
         }
 
         if (def instanceof JoinDefinition joinDef) {
-            if (joinDef.left() instanceof ScanDefinition leftScan && joinDef.right() instanceof ScanDefinition rightScan) {
-                LOGGER.log(INFO, "OPTIMIZATION: Converting to Distributed VMS-to-VMS Broadcast Join!");
+            if (joinDef.left() instanceof ScanDefinition leftScan
+                    && joinDef.right() instanceof ScanDefinition rightScan) {
 
-                VmsSubplan leftPlan = plan.subPlans.stream().filter(s -> s.exchangeId.equals(leftScan.exchangeId())).findFirst().get();
-                VmsSubplan rightPlan = plan.subPlans.stream().filter(s -> s.exchangeId.equals(rightScan.exchangeId())).findFirst().get();
+                VmsSubplan leftPlan  = findSubplan(plan, leftScan.exchangeId());
+                VmsSubplan rightPlan = findSubplan(plan, rightScan.exchangeId());
 
-                String leftTable = ((ScanAllOperation) leftPlan.operation).table;
+                String leftTable  = ((ScanAllOperation) leftPlan.operation).table;
                 String rightTable = ((ScanAllOperation) rightPlan.operation).table;
+                String leftSchema = ((ScanAllOperation) leftPlan.operation).schema;
+                String rightSchema= ((ScanAllOperation) rightPlan.operation).schema;
 
-                int leftPort = resolveTpccPort(leftTable);
-                int rightPort = resolveTpccPort(rightTable);
+                int leftPort  = extractPort(leftPlan.url);
+                int rightPort = extractPort(rightPlan.url);
 
-                String targetAddress = "localhost:" + rightPort;
-                LOGGER.log(INFO, ">>> [GATEWAY] Scheduling Broadcast Trigger...");
-                java.util.concurrent.Executors.newSingleThreadScheduledExecutor().schedule(() -> {
-                    try {
-                        LOGGER.log(INFO, ">>> [TRIGGER THREAD] Firing Broadcast from " + leftTable + " to " + targetAddress);
-                        gatewayClient.triggerBroadcast(
-                                "localhost", leftPort, plan.snapshot, plan.snapshot,
-                                leftTable, leftPlan.predicates, targetAddress
-                        );
-                        LOGGER.log(INFO, ">>> [TRIGGER THREAD] Successfully signaled Warehouse VMS.");
-                    } catch (Exception e) {
-                        LOGGER.log(ERROR, ">>> [TRIGGER THREAD] Failed to signal Warehouse!", e);
-                    }
-                }, 100, java.util.concurrent.TimeUnit.MILLISECONDS);
+                // ── Build JoinRoutingData for the ORDER (probe) side ──────────────────
+                // remote = customer (left/build side); local = orders (right/probe side)
+                List<CatalogColumn> remoteColumns =
+                        columnsResolver.columnMetas(leftSchema, leftTable);
+                List<CatalogColumn> localColumns  =
+                        columnsResolver.columnMetas(rightSchema, rightTable);
 
-                byte[] joinColumnIndexData = "3".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                int numJoinCols = joinDef.leftKeys().length;
+                int[] remoteOffsets  = new int[numJoinCols];
+                byte[] remoteTypes   = new byte[numJoinCols];
+                int[] localIndices   = new int[numJoinCols];
 
-                List<String> combinedColumns = new java.util.ArrayList<>(leftPlan.columnsInOrder);
-                combinedColumns.addAll(rightPlan.columnsInOrder);
+                for (int i = 0; i < numJoinCols; i++) {
+                    int remoteColIdx = joinDef.leftKeys()[i];
+                    remoteOffsets[i] = byteOffsetOf(remoteColumns, remoteColIdx);
+                    remoteTypes[i]   = typeCode(remoteColumns.get(remoteColIdx).type());
+                    localIndices[i]  = joinDef.rightKeys()[i];
+                }
+                int remoteRecordSize = totalByteSize(remoteColumns);
 
-                VmsSubplan receiverJoinPlan = new VmsSubplan(
-                        rightPlan.vmsName, rightPlan.url, rightPlan.exchangeId, rightPlan.operation,
-                        combinedColumns,
-                        rightPlan.predicates, (byte) 2, joinColumnIndexData
+                JoinRoutingData routing = new JoinRoutingData(
+                        remoteOffsets, remoteTypes, localIndices, remoteRecordSize);
+
+                // ── Trigger broadcast from Warehouse → Order ───────────────────────────
+                final String targetAddr = extractHost(leftPlan.url) + ":" + rightPort;
+                scheduleWithDelay(() -> gatewayClient.triggerBroadcast(
+                        extractHost(rightPlan.url), leftPort,
+                        plan.snapshot, plan.snapshot,
+                        leftTable, leftPlan.predicates, targetAddr), 100);
+
+                // ── Build combined column list for result deserialization ──────────────
+                List<CatalogColumn> combined = new ArrayList<>(remoteColumns);
+                combined.addAll(localColumns);
+
+                VmsSubplan receiverPlan = new VmsSubplan(
+                        rightPlan.vmsName, rightPlan.url, rightPlan.exchangeId,
+                        rightPlan.operation, toNames(combined),
+                        rightPlan.predicates, (byte) 2, routing.toBytes()
                 );
+                receiverPlan.setColumnLayouts(buildLayouts(combined)); // see below
 
-                return new StreamingScanOperator(gatewayClient, receiverJoinPlan, plan.snapshot);
+                return new StreamingScanOperator(gatewayClient, receiverPlan, plan.snapshot);
             }
-
-            return new LocalJoinOperator(
-                    buildOperatorTree(joinDef.left(), plan),
-                    buildOperatorTree(joinDef.right(), plan),
-                    joinDef.leftKeys(), joinDef.rightKeys()
-            );
-        }
 
         if (def instanceof ProjectDefinition projDef) {
             return new LocalProjectOperator(buildOperatorTree(projDef.input(), plan), projDef.projectedIndices());
@@ -140,4 +153,33 @@ public final class DistributedExecutor {
         if (tableName.contains("item") || tableName.contains("stock")) return 8002;
         return 8003;
     }
+
+        private static int byteOffsetOf(List<CatalogColumn> cols, int colIndex) {
+            int offset = 0;
+            for (int i = 0; i < colIndex; i++) {
+                offset += cols.get(i).byteSize();
+            }
+            return offset;
+        }
+
+        private static int totalByteSize(List<CatalogColumn> cols) {
+            return cols.stream().mapToInt(CatalogColumn::byteSize).sum();
+        }
+
+        private static byte typeCode(CatalogType t) {
+            return switch (t) {
+                case BIGINT, LONG -> JoinRoutingData.TYPE_LONG;
+                case DOUBLE -> JoinRoutingData.TYPE_DOUBLE;
+                default -> JoinRoutingData.TYPE_INT;
+            };
+        }
+
+        private static int extractPort(String url) {
+            // url is like "http://localhost:8001/table"
+            return URI.create(url.replace("http://","")).getPort();
+        }
+
+        private static String extractHost(String url) {
+            return URI.create(url.replace("http://","")).getHost();
+        }
 }
