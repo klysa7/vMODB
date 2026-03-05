@@ -1,6 +1,5 @@
 package dk.ku.di.dms.vms.coordinator.internal;
 
-
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
@@ -32,7 +31,7 @@ public final class CoordinatorInternalApi {
         CoordinatorInternalApi api = new CoordinatorInternalApi(catalog, server);
 
         server.createContext("/internal/snapshot", api::handleSnapshot);
-        server.createContext("/internal/catalog", api::handleCatalog);
+        server.createContext("/internal/catalog",  api::handleCatalog);
 
         server.setExecutor(null);
         server.start();
@@ -40,7 +39,6 @@ public final class CoordinatorInternalApi {
         System.err.println("Coordinator Internal API started on " + host + ":" + port);
         return api;
     }
-
 
     private void handleSnapshot(HttpExchange ex) throws IOException {
         if (!"GET".equalsIgnoreCase(ex.getRequestMethod())) {
@@ -57,7 +55,6 @@ public final class CoordinatorInternalApi {
         }
 
         long snapshotId = catalog.getSnapshotId();
-
         Map<String, Map<String, CatalogTableDto>> schemasDto = new HashMap<>();
 
         for (String schema : catalog.schemaNames()) {
@@ -65,9 +62,9 @@ public final class CoordinatorInternalApi {
 
             for (var entry : catalog.tablesInSchema(schema).entrySet()) {
                 String tableName = entry.getKey();
-                Object tableDef = entry.getValue();
+                Object tableDef  = entry.getValue();
 
-                String owner = catalog.ownerOf(schema, tableName);
+                String owner            = catalog.ownerOf(schema, tableName);
                 List<CatalogColumnDto> cols = extractColumns(tableDef);
 
                 tablesDto.put(tableName, new CatalogTableDto(owner, cols));
@@ -83,10 +80,8 @@ public final class CoordinatorInternalApi {
             }
         }
 
-        CatalogResponse resp = new CatalogResponse(snapshotId, schemasDto, placement);
-        sendJson(ex, 200, resp);
+        sendJson(ex, 200, new CatalogResponse(snapshotId, schemasDto, placement));
     }
-
 
     private static void sendJson(HttpExchange ex, int code, Object obj) throws IOException {
         byte[] bytes = MAPPER.writeValueAsBytes(obj);
@@ -98,6 +93,21 @@ public final class CoordinatorInternalApi {
         ex.close();
     }
 
+    /**
+     * Extracts column descriptors from a coordinator CatalogTable object via reflection.
+     *
+     * For each column we extract:
+     *   name     — via name() or getName()
+     *   type     — via type() or getType(), returned as the enum's toString()
+     *   byteSize — via byteSize() or getByteSize().
+     *             This is the exact byte width the column occupies in the VMS off-heap layout
+     *             (= DataType.value for that column's type in the VMS Schema).
+     *             For fixed-width numeric types (INT=4, LONG=8, FLOAT=4, DOUBLE=8, BOOL=1)
+     *             the gateway can derive the size from the type alone, so 0 is a safe fallback.
+     *             For VARCHAR/CHAR columns the gateway CANNOT derive the size from the type —
+     *             it must come from here. A 0 here means VmsResultIterator will output null
+     *             for that column rather than the real string value.
+     */
     private static List<CatalogColumnDto> extractColumns(Object catalogTable) {
         if (catalogTable == null) return List.of();
 
@@ -119,7 +129,16 @@ public final class CoordinatorInternalApi {
                     tryInvoke(col, "getType")
             ));
 
-            out.add(new CatalogColumnDto(name, type));
+            // byteSize: try byteSize() first (our updated CatalogColumn record method),
+            // then getByteSize() for any legacy bean-style accessor.
+            // Falls back to 0 if neither exists — safe for numeric types, produces null
+            // output for VARCHAR columns until the coordinator CatalogColumn is updated.
+            int byteSize = asInt(
+                    tryInvoke(col, "byteSize"),
+                    tryInvoke(col, "getByteSize")
+            );
+
+            out.add(new CatalogColumnDto(name, type, byteSize));
         }
         return out;
     }
@@ -144,5 +163,20 @@ public final class CoordinatorInternalApi {
             if (v != null) return String.valueOf(v);
         }
         return null;
+    }
+
+    /**
+     * Converts the first non-null value to int. Returns 0 if all values are null
+     * or cannot be parsed as an integer.
+     */
+    private static int asInt(Object... vals) {
+        for (Object v : vals) {
+            if (v instanceof Integer i) return i;
+            if (v instanceof Number  n) return n.intValue();
+            if (v instanceof String  s) {
+                try { return Integer.parseInt(s.trim()); } catch (NumberFormatException ignored) {}
+            }
+        }
+        return 0;
     }
 }

@@ -29,15 +29,19 @@ public final class CoordinatorCatalogBuilder {
         List<CatalogColumn> columns = new ArrayList<>(model.columnNames.length);
 
         IntStream.range(0, model.columnNames.length).forEach(i -> {
-            String columnName = model.columnNames[i];
-            DataType dataType = model.columnDataTypes[i];
-
-            boolean nullable = true;
+            String columnName   = model.columnNames[i];
+            DataType dataType   = model.columnDataTypes[i];
 
             columns.add(new CatalogColumn(
                     columnName,
                     mapType(dataType),
-                    nullable
+                    true,
+                    // Pass the exact VMS off-heap byte width for this column.
+                    // For fixed-width types (INT=4, LONG=8, etc.) CatalogColumn.byteSize()
+                    // derives the correct value from the type alone, so this is redundant
+                    // but harmless. For VARCHAR/CHAR types byteSize() returns this value
+                    // directly — it is the only place where the declared CHAR width is known.
+                    dataType != null ? dataType.value : 0
             ));
         });
 
@@ -50,22 +54,18 @@ public final class CoordinatorCatalogBuilder {
     }
 
     private CatalogType mapType(DataType dataType) {
-        if (dataType == null) {
-            return CatalogType.BYTES;
-        }
+        if (dataType == null) return CatalogType.BYTES;
 
         return switch (dataType) {
-            case BOOL -> CatalogType.BOOLEAN;
-            case INT -> CatalogType.INT;
-            case LONG -> CatalogType.BIGINT;
-            case FLOAT -> CatalogType.FLOAT;
-            case DOUBLE -> CatalogType.DOUBLE;
-            case CHAR, STRING, ENUM -> CatalogType.VARCHAR;
-            case DATE -> CatalogType.DATE;
-            case STRING_ARRAY,
-                 FLOAT_ARRAY,
-                 INT_ARRAY,
-                 COMPLEX -> CatalogType.BYTES;
+            case BOOL                                  -> CatalogType.BOOLEAN;
+            case INT                                   -> CatalogType.INT;
+            case LONG                                  -> CatalogType.BIGINT;
+            case FLOAT                                 -> CatalogType.FLOAT;
+            case DOUBLE                                -> CatalogType.DOUBLE;
+            case CHAR, STRING, ENUM                    -> CatalogType.VARCHAR;
+            case DATE                                  -> CatalogType.DATE;
+            case STRING_ARRAY, FLOAT_ARRAY,
+                 INT_ARRAY, COMPLEX                    -> CatalogType.BYTES;
         };
     }
 }

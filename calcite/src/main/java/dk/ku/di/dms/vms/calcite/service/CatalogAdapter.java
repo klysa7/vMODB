@@ -1,6 +1,5 @@
 package dk.ku.di.dms.vms.calcite.service;
 
-
 import dk.ku.di.dms.vms.calcite.olap.queryPlanner.catalog.CatalogColumn;
 import dk.ku.di.dms.vms.calcite.olap.queryPlanner.catalog.CatalogTable;
 import dk.ku.di.dms.vms.calcite.olap.queryPlanner.catalog.CatalogType;
@@ -33,7 +32,7 @@ public final class CatalogAdapter {
                 List<CatalogColumn> cols = new ArrayList<>();
                 if (catalogTableDto.columns() != null) {
                     for (CatalogColumnDto c : catalogTableDto.columns()) {
-                        cols.add(newCatalogColumn(c.name(), c.type()));
+                        cols.add(newCatalogColumn(c.name(), c.type(), c.byteSize()));
                     }
                 }
 
@@ -65,10 +64,20 @@ public final class CatalogAdapter {
         }
     }
 
-    private static CatalogColumn newCatalogColumn(String name, String type) {
+    /**
+     * Creates a CatalogColumn from wire DTO fields.
+     *
+     * dtoByteSize: from CatalogColumnDto.byteSize().
+     *   - For fixed-width numeric types (INT, LONG, FLOAT, DOUBLE, BOOL) CatalogColumn.byteSize()
+     *     derives the correct size from the type alone, so dtoByteSize is ignored.
+     *   - For VARCHAR/CHAR the coordinator must have set dtoByteSize to DataType.value of the
+     *     actual VMS schema column. If it is 0 (old coordinator), that column will be read
+     *     as null in VmsResultIterator — visible and safe rather than silently wrong.
+     */
+    private static CatalogColumn newCatalogColumn(String name, String type, int dtoByteSize) {
         String cleanName = sanitize(name);
         CatalogType ct = mapCatalogType(type);
-        return new CatalogColumn(cleanName, ct, true);
+        return new CatalogColumn(cleanName, ct, true, dtoByteSize);
     }
 
     private static String sanitize(String s) {
@@ -76,42 +85,26 @@ public final class CatalogAdapter {
         return s.replace("\r", "").replace("\n", "").trim();
     }
 
-    private static String mapType(String t) {
-        if (t == null) return "VARCHAR";
-        return switch (t.toUpperCase()) {
-            case "INT", "INTEGER" -> "INTEGER";
-            case "BIGINT", "LONG" -> "BIGINT";
-            case "FLOAT" -> "FLOAT";
-            case "DOUBLE" -> "DOUBLE";
-            case "DATE" -> "DATE";
-            case "TIMESTAMP" -> "TIMESTAMP";
-            case "VARCHAR", "STRING", "TEXT" -> "VARCHAR";
-            default -> "VARCHAR";
-        };
-    }
-
     private static Object defaultValueFor(Class<?> t) {
         if (t == boolean.class || t == Boolean.class) return true;
-        if (t == int.class || t == Integer.class) return 0;
-        if (t == long.class || t == Long.class) return 0L;
+        if (t == int.class    || t == Integer.class)  return 0;
+        if (t == long.class   || t == Long.class)     return 0L;
         if (t == String.class) return "";
         return null;
     }
 
     private static CatalogType mapCatalogType(String t) {
         if (t == null) return CatalogType.VARCHAR;
-
         return switch (sanitize(t).toUpperCase()) {
-            case "INT", "INTEGER" -> CatalogType.INT;
-            case "BIGINT", "LONG" -> CatalogType.BIGINT;
-            case "FLOAT" -> CatalogType.FLOAT;
-            case "DOUBLE" -> CatalogType.DOUBLE;
-            case "DECIMAL" -> null;
-            case "BOOLEAN", "BOOL" -> CatalogType.BOOLEAN;
-            case "DATE" -> CatalogType.DATE;
-            case "TIMESTAMP" -> CatalogType.TIMESTAMP;
-            case "VARCHAR", "STRING", "TEXT" -> CatalogType.VARCHAR;
-            default -> CatalogType.VARCHAR;
+            case "INT", "INTEGER"          -> CatalogType.INT;
+            case "BIGINT", "LONG"          -> CatalogType.BIGINT;
+            case "FLOAT"                   -> CatalogType.FLOAT;
+            case "DOUBLE"                  -> CatalogType.DOUBLE;
+            case "BOOLEAN", "BOOL"         -> CatalogType.BOOLEAN;
+            case "DATE"                    -> CatalogType.DATE;
+            case "TIMESTAMP"               -> CatalogType.TIMESTAMP;
+            case "VARCHAR", "STRING", "TEXT", "CHAR" -> CatalogType.VARCHAR;
+            default                        -> CatalogType.VARCHAR;
         };
     }
 }

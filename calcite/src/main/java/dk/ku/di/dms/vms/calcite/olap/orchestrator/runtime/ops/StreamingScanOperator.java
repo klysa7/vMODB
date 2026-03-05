@@ -1,5 +1,6 @@
 package dk.ku.di.dms.vms.calcite.olap.orchestrator.runtime.ops;
 
+import dk.ku.di.dms.vms.calcite.client.ColumnDescriptor;
 import dk.ku.di.dms.vms.calcite.client.VmsGatewayClient;
 import dk.ku.di.dms.vms.calcite.olap.orchestrator.planning.VmsSubplan;
 import dk.ku.di.dms.vms.calcite.olap.orchestrator.planning.ops.ScanAllOperation;
@@ -28,12 +29,10 @@ public class StreamingScanOperator implements CoordinatorOperator {
     private long rowCount = 0;
 
     public StreamingScanOperator(VmsGatewayClient client, VmsSubplan subplan, long snapshotId) {
-        this.client = client;
-        this.subplan = subplan;
+        this.client    = client;
+        this.subplan   = subplan;
         this.snapshotId = snapshotId;
     }
-
-
 
     @Override
     public void open() {
@@ -43,50 +42,54 @@ public class StreamingScanOperator implements CoordinatorOperator {
             throw new IllegalArgumentException("StreamingScanOperator only supports ScanAllOperation");
         }
         String tableName = ((ScanAllOperation) subplan.operation).table;
+        String host      = "localhost";
+        int    tcpPort   = resolveTpccPort(tableName);
 
-        String host = "localhost";
-        int tcpPort = resolveTpccPort(tableName);
-
-        LOGGER.log(INFO, "[StreamingScan] Opening Connection -> " + host + ":" + tcpPort + " | Table: " + tableName + " | Mode: " + subplan.mode);
-
-        List<Class<?>> types = new ArrayList<>();
-        for (String col : subplan.columnsInOrder) {
-            types.add(String.class);
-        }
+        LOGGER.log(INFO, "[StreamingScan] Opening Connection -> " + host + ":" + tcpPort
+                + " | Table: " + tableName + " | Mode: " + subplan.mode);
 
         try {
-            this.tcpIterator = client.scan(host, tcpPort, snapshotId, snapshotId, subplan.mode, tableName, types, subplan.predicates, subplan.routingData);
-
+            // Use descriptor-driven scan when the subplan carries column schema
+            // (join receivers). Fall back to the legacy path for simple scans.
+            if (subplan.columnDescriptors != null) {
+                // Join receiver: use schema-driven path so VmsResultIterator can
+                // deserialize every column including VARCHAR/CHAR by byte offset.
+                this.tcpIterator = client.scanWithSchema(
+                        host, tcpPort, snapshotId, snapshotId, subplan.mode,
+                        tableName, subplan.columnDescriptors,
+                        subplan.predicates, subplan.routingData);
+            } else {
+                // Simple scan: no column schema available yet — rows come back as
+                // null-filled Object[] (unchanged behaviour for single-table queries).
+                this.tcpIterator = client.scan(
+                        host, tcpPort, snapshotId, snapshotId, subplan.mode,
+                        tableName, List.<Class<?>>of(),
+                        subplan.predicates, subplan.routingData);
+            }
             LOGGER.log(INFO, "[StreamingScan] Connection Established. Iterator ready.");
         } catch (Exception e) {
-            throw new RuntimeException("Failed to open streaming connection to " + host + ":" + tcpPort, e);
+            throw new RuntimeException("Failed to open streaming connection to "
+                    + host + ":" + tcpPort, e);
         }
     }
 
-    /**
-     * Maps table names to the 800x ports currently used by the VMS listeners.
-     */
     private int resolveTpccPort(String tableName) {
         tableName = tableName.toLowerCase();
 
         if (tableName.contains("warehouse") ||
-                tableName.contains("district") ||
-                tableName.contains("customer") ||
+                tableName.contains("district")  ||
+                tableName.contains("customer")  ||
                 tableName.contains("history")) {
             return 8001;
         }
-
-        if (tableName.contains("item") ||
-                tableName.contains("stock")) {
+        if (tableName.contains("item") || tableName.contains("stock")) {
             return 8002;
         }
-
         if (tableName.contains("order") ||
                 tableName.contains("new_orders") ||
                 tableName.contains("order_line")) {
             return 8003;
         }
-
         try {
             if (subplan.url != null) {
                 return URI.create(subplan.url).getPort();
@@ -128,7 +131,6 @@ public class StreamingScanOperator implements CoordinatorOperator {
 
         List<Object[]> batch = new ArrayList<>(BATCH_SIZE);
         int count = 0;
-
         while (tcpIterator.hasNext() && count < BATCH_SIZE) {
             batch.add(tcpIterator.next());
             count++;
@@ -141,9 +143,8 @@ public class StreamingScanOperator implements CoordinatorOperator {
 
     @Override
     public void close() {
-        if (subplan != null && subplan.operation instanceof ScanAllOperation) {
-            String tableName = ((ScanAllOperation) subplan.operation).table;
-            LOGGER.log(INFO, "[StreamingScan] Closing operator for table: " + tableName);
+        if (subplan != null && subplan.operation instanceof ScanAllOperation op) {
+            LOGGER.log(INFO, "[StreamingScan] Closing operator for table: " + op.table);
         }
     }
 }

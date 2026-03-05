@@ -1,6 +1,7 @@
 package dk.ku.di.dms.vms.calcite.olap.queryPlanner.planner;
 
 import dk.ku.di.dms.vms.calcite.modb.convention.VModbConvention;
+import dk.ku.di.dms.vms.calcite.modb.rules.VModbAggregateRule;
 import dk.ku.di.dms.vms.calcite.modb.rules.VModbFilterRule;
 import dk.ku.di.dms.vms.calcite.modb.rules.VModbJoinRule;
 import dk.ku.di.dms.vms.calcite.modb.rules.VModbProjectRule;
@@ -32,7 +33,8 @@ public final class CalcitePlannerImpl implements CalcitePlanner {
             VModbTableAccessRule.INSTANCE,
             VModbProjectRule.INSTANCE,
             VModbFilterRule.INSTANCE,
-            VModbJoinRule.INSTANCE
+            VModbJoinRule.INSTANCE,
+            VModbAggregateRule.INSTANCE   // ← new
     );
 
     @Override
@@ -70,8 +72,8 @@ public final class CalcitePlannerImpl implements CalcitePlanner {
 
     private static String explainRel(String header, RelNode relTree) {
         StringWriter sw = new StringWriter();
-        sw.append(header).append(":\n");
-        RelWriterImpl writer = new RelWriterImpl(new PrintWriter(sw), SqlExplainLevel.ALL_ATTRIBUTES, true);
+        sw.append(header).append(": ");
+                RelWriterImpl writer = new RelWriterImpl(new PrintWriter(sw), SqlExplainLevel.ALL_ATTRIBUTES, true);
         relTree.explain(writer);
         return sw.toString();
     }

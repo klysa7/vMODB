@@ -1,49 +1,83 @@
 package dk.ku.di.dms.vms.calcite.client;
 
+import dk.ku.di.dms.vms.calcite.olap.queryPlanner.catalog.CatalogType;
+
 import java.io.BufferedInputStream;
 import java.io.DataInputStream;
 import java.io.EOFException;
 import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
-import java.util.Arrays;
+import java.nio.charset.StandardCharsets;
 import java.util.Iterator;
 import java.util.LinkedList;
+import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Queue;
 
-import static java.lang.System.Logger.Level.INFO;
 import static java.lang.System.Logger.Level.ERROR;
+import static java.lang.System.Logger.Level.INFO;
 
+/**
+ * Streams rows from a single VMS TCP connection and deserializes them into Object[].
+ *
+ * Row layout on the wire (after VmsQueryWorker writes it):
+ *   For a simple scan:  [dataPayload]               — Schema.RECORD_HEADER already stripped
+ *   For a join result:  [leftPayload | rightPayload] — both headers stripped
+ *
+ * Deserialization is driven by List<ColumnDescriptor>, which carries for each column:
+ *   - byteOffset: position within the payload (data-relative, 0-based)
+ *   - byteSize:   number of bytes to read
+ *   - type:       CatalogType used to pick the right read method
+ *
+ * If descriptors is null (simple scan, no schema provided) every column is returned as null.
+ * This is a safe fallback — the gap is visible rather than silently wrong.
+ */
 public class VmsResultIterator implements Iterator<Object[]> {
 
     private static final System.Logger LOGGER = System.getLogger(VmsResultIterator.class.getName());
 
     private final Socket socket;
     private final DataInputStream dataInputStream;
-    private final Class<?>[] columnTypes;
+    private final List<ColumnDescriptor> descriptors;
     private final String tableName;
     private final Queue<Object[]> rowBuffer = new LinkedList<>();
     private boolean isEos = false;
     private long recordsRead = 0;
 
-    public VmsResultIterator(Socket socket, Object inputStream, Class<?>[] columnTypes, String tableName) {
+    public VmsResultIterator(Socket socket, Object inputStream,
+                             List<ColumnDescriptor> descriptors, String tableName) {
         this.socket = socket;
-        if (inputStream instanceof BufferedInputStream) {
-            this.dataInputStream = new DataInputStream((BufferedInputStream) inputStream);
+        if (inputStream instanceof BufferedInputStream bis) {
+            this.dataInputStream = new DataInputStream(bis);
         } else {
-            this.dataInputStream = new DataInputStream(new BufferedInputStream((java.io.InputStream) inputStream, 65536));
+            this.dataInputStream = new DataInputStream(
+                    new BufferedInputStream((java.io.InputStream) inputStream, 65536));
         }
-        this.columnTypes = columnTypes;
-        this.tableName = tableName;
+        this.descriptors = descriptors;
+        this.tableName   = tableName;
     }
+
+    // ------------------------------------------------------------------
+    // Backward-compatible constructor for callers that pass Class<?>[]
+    // (simple scans from StreamingScanOperator before descriptor support).
+    // Descriptors are null → every column returns null.
+    // ------------------------------------------------------------------
+    public VmsResultIterator(Socket socket, Object inputStream,
+                             Class<?>[] columnTypes, String tableName) {
+        this(socket, inputStream, (List<ColumnDescriptor>) null, tableName);
+    }
+
+    // ------------------------------------------------------------------
+    // Wire protocol
+    // ------------------------------------------------------------------
 
     private void fetchNextBatch() {
         if (isEos) return;
         try {
             byte type = dataInputStream.readByte();
 
-            if (type == 101) {
+            if (type == 101) { // END_OF_STREAM
                 dataInputStream.readInt();
                 dataInputStream.readLong();
                 LOGGER.log(INFO, ">>> [ITERATOR] Clean End of stream reached. Total read: " + recordsRead);
@@ -51,20 +85,18 @@ public class VmsResultIterator implements Iterator<Object[]> {
                 return;
             }
 
-            if (type == 100) {
-                int dataSize = dataInputStream.readInt();
-                long queryId = dataInputStream.readLong();
-                int bytesRemainingInBatch = dataSize - 8;
+            if (type == 100) { // DATA_BATCH
+                int dataSize  = dataInputStream.readInt();
+                long queryId  = dataInputStream.readLong();
+                int remaining = dataSize - 8;
 
-                while (bytesRemainingInBatch > 0) {
-                    int rowSize = dataInputStream.readInt();
+                while (remaining > 0) {
+                    int    rowSize = dataInputStream.readInt();
                     byte[] rowData = new byte[rowSize];
                     dataInputStream.readFully(rowData);
-                    bytesRemainingInBatch -= (4 + rowSize);
+                    remaining -= (4 + rowSize);
 
-                    Object[] parsedRow = parseRowData(rowData);
-                    rowBuffer.add(parsedRow);
-
+                    rowBuffer.add(parseRowData(rowData));
                     recordsRead++;
                 }
             }
@@ -76,29 +108,95 @@ public class VmsResultIterator implements Iterator<Object[]> {
         }
     }
 
+    // ------------------------------------------------------------------
+    // Deserialization
+    // ------------------------------------------------------------------
+
+    /**
+     * Converts a raw byte array into Object[] using the column descriptors.
+     *
+     * Each descriptor specifies:
+     *   byteOffset — where in rowData the column starts (data-relative, 0-based)
+     *   byteSize   — how many bytes to read
+     *   type       — how to interpret those bytes
+     *
+     * For VARCHAR/STRING: the bytes are interpreted as UTF-8 text.
+     *   byteSize is the declared CHAR width; trailing null/space bytes are trimmed.
+     *   If byteSize is 0 (coordinator not yet upgraded to send sizes), the column
+     *   is returned as null — visible and safe rather than silently wrong.
+     *
+     * The returned array has one slot per descriptor. Callers (LocalProjectOperator)
+     * index into it using the projected column indices from the query plan.
+     */
     private Object[] parseRowData(byte[] rowData) {
-        Object[] row = new Object[columnTypes.length];
+        if (descriptors == null || descriptors.isEmpty()) {
+            // No schema available — return empty row.
+            return new Object[0];
+        }
 
-        ByteBuffer wrapper = ByteBuffer.wrap(rowData).order(ByteOrder.nativeOrder());
+        Object[] row = new Object[descriptors.size()];
+        ByteBuffer buf = ByteBuffer.wrap(rowData).order(ByteOrder.nativeOrder());
 
-        try {
-            if (rowData.length > 100) {
+        for (int i = 0; i < descriptors.size(); i++) {
+            ColumnDescriptor d = descriptors.get(i);
 
-                row[0] = wrapper.getInt(0);
-                row[3] = "";
-                int orderRecordSize = 36;
-                int orderStartOffset = rowData.length - orderRecordSize;
-                row[14] = wrapper.getInt(orderStartOffset);
-
-                return row;
+            if (!d.isReadable()) {
+                // byteSize == 0: coordinator did not send size for this column yet.
+                row[i] = null;
+                continue;
             }
-            Arrays.fill(row, "SINGLE_TABLE_NOT_SUPPORTED_HERE");
-        } catch (Exception e) {
-            Arrays.fill(row, "PARSE_ERROR");
+
+            int offset = d.byteOffset();
+            if (offset + d.byteSize() > rowData.length) {
+                // Descriptor points outside the actual row — schema mismatch, skip safely.
+                row[i] = null;
+                continue;
+            }
+
+            row[i] = switch (d.type()) {
+                case INT                -> buf.getInt(offset);
+                case LONG, BIGINT       -> buf.getLong(offset);
+                case FLOAT              -> buf.getFloat(offset);
+                case DOUBLE             -> buf.getDouble(offset);
+                case BOOLEAN, BOOL      -> buf.get(offset) != 0;
+                case DATE, TIMESTAMP    -> buf.getLong(offset);   // stored as epoch long
+                case VARCHAR, STRING, BYTES -> readString(rowData, offset, d.byteSize());
+                default                 -> null;
+            };
         }
 
         return row;
     }
+
+    /**
+     * Reads a fixed-width CHAR/VARCHAR field stored as raw bytes in the VMS off-heap layout.
+     * The VMS writes characters sequentially with no length prefix; unused trailing bytes are
+     * zero-filled. We trim trailing zeros and spaces to recover the original string value.
+     */
+    /**
+     * Reads a fixed-width CHAR field stored as UTF-16LE in the VMS off-heap layout.
+     * Each character occupies exactly 2 bytes. Unused trailing characters are
+     * zero-filled as 0x00 0x00 pairs. We trim in 2-byte steps to avoid splitting
+     * a code unit in half, then decode the trimmed slice as UTF-16LE.
+     */
+    private static String readString(byte[] data, int offset, int size) {
+        // Align down to 2-byte boundary — UTF-16LE code unit size.
+        int end = offset + (size & ~1);
+
+        // Walk backward two bytes at a time, skipping null (0x00 0x00) code units.
+        while (end >= offset + 2
+                && data[end - 1] == 0
+                && data[end - 2] == 0) {
+            end -= 2;
+        }
+        if (end <= offset) return "";
+        // VMS stores CHAR columns as UTF-16LE (2 bytes per character).
+        return new String(data, offset, end - offset, StandardCharsets.UTF_16LE);
+    }
+
+    // ------------------------------------------------------------------
+    // Iterator
+    // ------------------------------------------------------------------
 
     @Override
     public boolean hasNext() {
@@ -115,9 +213,9 @@ public class VmsResultIterator implements Iterator<Object[]> {
     }
 
     private void close() {
-        if(!isEos) {
+        if (!isEos) {
             isEos = true;
-            try { socket.close(); } catch(Exception ignored){}
+            try { socket.close(); } catch (Exception ignored) {}
         }
     }
 }

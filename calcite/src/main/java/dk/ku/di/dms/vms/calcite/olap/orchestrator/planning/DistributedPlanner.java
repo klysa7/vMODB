@@ -3,10 +3,14 @@ package dk.ku.di.dms.vms.calcite.olap.orchestrator.planning;
 import dk.ku.di.dms.vms.calcite.modb.rel.VModbFilter;
 import dk.ku.di.dms.vms.calcite.modb.rel.VModbJoin;
 import dk.ku.di.dms.vms.calcite.modb.rel.VModbProject;
+import dk.ku.di.dms.vms.calcite.modb.rel.VModbAggregate;
 import dk.ku.di.dms.vms.calcite.modb.rel.VModbTableAccess;
 import dk.ku.di.dms.vms.calcite.olap.orchestrator.Orchestrator;
 import dk.ku.di.dms.vms.calcite.olap.orchestrator.placement.PlacementResolver;
 import dk.ku.di.dms.vms.calcite.olap.orchestrator.planning.ops.*;
+import org.apache.calcite.rel.core.AggregateCall;
+import org.apache.calcite.sql.SqlKind;
+import dk.ku.di.dms.vms.calcite.olap.queryPlanner.catalog.CatalogColumn;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rex.RexCall;
 import org.apache.calcite.rex.RexInputRef;
@@ -61,6 +65,23 @@ public final class DistributedPlanner {
             if (filter.getInput() instanceof VModbTableAccess scan) {
                 return createScanSubplan(scan, filter.getCondition());
             }
+        }
+
+        if (node instanceof VModbAggregate agg) {
+            CoordinatorOperatorDefinition inputOp = relNodeToOperatorTree(agg.getInput());
+            int[] groupByIndices = agg.getGroupSet().toArray();
+            List<AggregateDefinition.AggCallDef> aggCalls = new ArrayList<>();
+            for (AggregateCall call : agg.getAggCallList()) {
+                String kind = call.getAggregation().getKind() == SqlKind.COUNT ? "COUNT"
+                        : call.getAggregation().getKind() == SqlKind.SUM    ? "SUM"
+                        : call.getAggregation().getKind() == SqlKind.AVG    ? "AVG"
+                        : call.getAggregation().getKind() == SqlKind.MIN    ? "MIN"
+                        : call.getAggregation().getKind() == SqlKind.MAX    ? "MAX"
+                        : call.getAggregation().getName();
+                int argIndex = call.getArgList().isEmpty() ? -1 : call.getArgList().get(0);
+                aggCalls.add(new AggregateDefinition.AggCallDef(kind, argIndex));
+            }
+            return new AggregateDefinition(inputOp, groupByIndices, aggCalls);
         }
 
         if (node instanceof VModbTableAccess scan) {
@@ -154,6 +175,16 @@ public final class DistributedPlanner {
     }
 
     public interface ColumnsResolver {
+        /**
+         * Returns the ordered list of column names for a table.
+         * Used for building VmsSubplan.columnsInOrder.
+         */
         List<String> columnsInOrder(String schema, String table);
+
+        /**
+         * Returns the ordered list of full column metadata for a table.
+         * Used by DistributedExecutor to compute byte offsets for JoinRoutingData.
+         */
+        List<CatalogColumn> columnMetas(String schema, String table);
     }
 }
