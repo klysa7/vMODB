@@ -8,6 +8,7 @@ import dk.ku.di.dms.vms.modb.common.schema.network.control.Presentation;
 import dk.ku.di.dms.vms.modb.common.schema.network.node.IdentifiableNode;
 import dk.ku.di.dms.vms.modb.common.schema.network.node.ServerNode;
 import dk.ku.di.dms.vms.modb.common.schema.network.node.VmsNode;
+import dk.ku.di.dms.vms.modb.common.schema.network.query.JoinRoutingData;
 import dk.ku.di.dms.vms.modb.common.schema.network.query.QueryRequestEvent;
 import dk.ku.di.dms.vms.modb.common.schema.network.transaction.TransactionAbort;
 import dk.ku.di.dms.vms.modb.common.schema.network.transaction.TransactionEvent;
@@ -32,13 +33,14 @@ import dk.ku.di.dms.vms.web_common.meta.ConnectionMetadata;
 import java.io.IOException;
 import java.nio.BufferUnderflowException;
 import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 import java.nio.channels.*;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
 
+import dk.ku.di.dms.vms.modb.common.memory.GeneralRowView;
+import static dk.ku.di.dms.vms.modb.common.memory.MemoryUtils.UNSAFE;
 import static dk.ku.di.dms.vms.modb.common.schema.network.Constants.*;
 import static dk.ku.di.dms.vms.modb.common.schema.network.query.QueryResultEvent.END_OF_STREAM_TYPE;
 import static dk.ku.di.dms.vms.modb.common.schema.network.query.QueryResultEvent.QUERY_RESULT_TYPE;
@@ -61,18 +63,46 @@ public final class VmsEventHandler extends ModbHttpServer {
     public static class JoinContext {
         public final QueryRequestEvent.QueryPayload payload;
         public final AsynchronousSocketChannel gatewayChannel;
-        public final int joinColumnIndex;
-        public final Map<Integer, byte[]> broadcastBuffer = new ConcurrentHashMap<>();
+        /** Byte offsets of each join column within the broadcast (remote) row payload. */
+        public final int[]  remoteColOffsets;
+        /** JoinRoutingData type code per join column (TYPE_INT, TYPE_LONG, ...). */
+        public final byte[] remoteColTypes;
+        /** Column indices in the local Schema that form the join key. */
+        public final int[]  localColIndices;
+        /**
+         * Global snapshot ID from the Coordinator at query time.
+         * Used as lastTid in TransactionContext so the probe scan reads only
+         * records committed up to this consistent global snapshot — not an
+         * unbounded Long.MAX_VALUE.
+         */
+        public final long snapshotId;
+        /** Build-side hash map: composite String key → raw broadcast row bytes. */
+        public final Map<String, byte[]> broadcastBuffer = new ConcurrentHashMap<>();
 
-        public JoinContext(QueryRequestEvent.QueryPayload payload, AsynchronousSocketChannel gatewayChannel, int joinColumnIndex) {
-            this.payload = payload;
-            this.gatewayChannel = gatewayChannel;
-            this.joinColumnIndex = joinColumnIndex;
+        public JoinContext(QueryRequestEvent.QueryPayload payload,
+                           AsynchronousSocketChannel gatewayChannel,
+                           JoinRoutingData jrd) {
+            this.payload          = payload;
+            this.gatewayChannel   = gatewayChannel;
+            this.remoteColOffsets = jrd.remoteColOffsets;
+            this.remoteColTypes   = jrd.remoteColTypes;
+            this.localColIndices  = jrd.localColIndices;
+            // snapshotId comes from the wire payload — the Gateway encodes the
+            // Coordinator's global snapshot ID so both VMSes read from the same
+            // consistent point in time.
+            this.snapshotId       = payload.snapshotId();
         }
     }
+    // -------------------------------------------------------------------------
+    // DTOs used when deserialising predicates sent by the gateway
+    // -------------------------------------------------------------------------
 
     public record ColRefDTO(int columnPosition) {}
     public record PredicateDTO(ColRefDTO columnReference, String expression, Object value) {}
+
+    // -------------------------------------------------------------------------
+    // State
+    // -------------------------------------------------------------------------
 
     private final Map<Long, JoinContext> activeJoins = new ConcurrentHashMap<>();
 
@@ -582,10 +612,11 @@ public final class VmsEventHandler extends ModbHttpServer {
                         System.out.println(">>> [ORDER VMS] Starting Join with local table: " + ctx.payload.tableName());
 
                         TransactionManager tm = (TransactionManager) transactionManager;
-                        Iterator<byte[]> joinIter = tm.getJoinIterator(ctx.payload.tableName(), ctx.broadcastBuffer, ctx.joinColumnIndex);
+                        Iterator<byte[]> joinIter = tm.getJoinIterator(
+                                ctx.payload.tableName(), ctx.broadcastBuffer, ctx.localColIndices, ctx.snapshotId);
                         VmsQueryWorker worker = new VmsQueryWorker(
-                                ctx.gatewayChannel, joinIter, ctx.payload, options.networkBufferSize, options.networkSendTimeout
-                        );
+                                ctx.gatewayChannel, joinIter, ctx.payload,
+                                options.networkBufferSize, options.networkSendTimeout);
                         Thread.ofPlatform().name("query-worker-join-" + queryId).start(worker);
                     }
                     try { channel.close(); } catch (Exception ignored) {}
@@ -608,45 +639,15 @@ public final class VmsEventHandler extends ModbHttpServer {
                         bytesRemaining -= (4 + rowSize);
 
                         if (ctx != null) {
-                            if (ctx.broadcastBuffer.size() == 0) {
-                                System.out.println(">>> [ORDER VMS] First broadcast packet received! Hash Join is now active.");
-                            }
-
-                            try {
-                                ByteBuffer rowBuf = ByteBuffer.wrap(rowData).order(ByteOrder.nativeOrder());
-
-                                int[] vals = new int[8];
-                                for (int i = 0; i < 8; i++) {
-                                    if (rowBuf.capacity() >= (i * 4) + 4) {
-                                        vals[i] = rowBuf.getInt(i * 4);
-                                    }
-                                }
-
-                                if (ctx.broadcastBuffer.size() < 3) {
-                                    System.out.println(">>> [DEBUG JOIN HASH] First 8 Ints in memory: " + java.util.Arrays.toString(vals));
-                                }
-
-                                int joinKey = -1;
-                                for (int i = 0; i < 8; i++) {
-                                    if (vals[i] > 10 && vals[i] <= 300000) {
-                                        joinKey = vals[i];
-                                        break;
-                                    }
-                                }
-
-                                if (joinKey == -1) joinKey = vals[2];
-
-                                ctx.broadcastBuffer.put(joinKey, rowData);
-
-                            } catch (Exception e) {
-                                if (ctx.broadcastBuffer.size() == 0) {
-                                    System.out.println(">>> [DEBUG JOIN HASH] Failed to parse row!");
-                                }
-                            }
+                            GeneralRowView rowView = GeneralRowView.threadLocal();
+                            rowView.wrap(rowData);
+                            String key = rowView.extractKey(ctx.remoteColOffsets, ctx.remoteColTypes);
+                            ctx.broadcastBuffer.put(key, rowData);
                         }
                     }
                 } else {
-                    readBuffer.reset(); break;
+                    readBuffer.reset();
+                    break;
                 }
             }
 
@@ -661,7 +662,8 @@ public final class VmsEventHandler extends ModbHttpServer {
 
         @Override
         public void failed(Throwable exc, Integer attachment) {
-            System.out.println("Broadcast receive failed"); exc.printStackTrace();
+            System.out.println("Broadcast receive failed");
+            exc.printStackTrace();
         }
     }
 
@@ -811,13 +813,13 @@ public final class VmsEventHandler extends ModbHttpServer {
                 }
             }
 
-            private void processQueryRequest(java.nio.ByteBuffer buffer) {
+            private void processQueryRequest(ByteBuffer buffer) {
                 try {
                     buffer.getInt();
                     var payload = QueryRequestEvent.read(buffer);
                     LOGGER.log(INFO, ">>> [VMS] Received Request | Table: " + payload.tableName() + " | Mode: " + payload.mode());
 
-                    TransactionManager transactionManagerGateway = (TransactionManager) transactionManager;
+                    TransactionManager tm = (TransactionManager) transactionManager;
 
                     List<TransactionManager.SimplePredicate> predicates = null;
                     if (payload.predicates() != null && payload.predicates().length > 0) {
@@ -837,7 +839,8 @@ public final class VmsEventHandler extends ModbHttpServer {
                     final List<TransactionManager.SimplePredicate> finalPredicates = predicates;
 
                     if (payload.mode() == QueryRequestEvent.MODE_SCAN_TO_GATEWAY) {
-                        executeStandardScan(payload, finalPredicates, transactionManagerGateway, (AsynchronousSocketChannel) connectionMetadata.channel);
+                        executeStandardScan(payload, finalPredicates, tm,
+                                (AsynchronousSocketChannel) connectionMetadata.channel);
                     }
                     else if (payload.mode() == QueryRequestEvent.MODE_BROADCAST_TO_VMS) {
                         String targetAddress = new String(payload.routingData(), StandardCharsets.UTF_8);
@@ -851,19 +854,20 @@ public final class VmsEventHandler extends ModbHttpServer {
 
                         targetChannel.connect(new java.net.InetSocketAddress(host, port), null, new CompletionHandler<Void, Void>() {
                             @Override
-                            public void completed(Void result, Void attachment) {
+                            public void completed(Void r, Void a) {
                                 LOGGER.log(INFO, ">>> [WAREHOUSE] CONNECTION SUCCESS! Starting Scan...");
-                                executeStandardScan(payload, finalPredicates, transactionManagerGateway, targetChannel);
+                                executeStandardScan(payload, finalPredicates, tm, targetChannel);
                             }
                             @Override
-                            public void failed(Throwable exc, Void attachment) {
+                            public void failed(Throwable exc, Void a) {
                                 LOGGER.log(ERROR, ">>> [WAREHOUSE] CONNECTION FAILED! Could not connect to Order VMS!", exc);
                             }
                         });
                     }
                     else if (payload.mode() == QueryRequestEvent.MODE_RECEIVE_AND_JOIN) {
-                        int localJoinColumn = Integer.parseInt(new String(payload.routingData(), StandardCharsets.UTF_8));
-                        activeJoins.put(payload.queryId(), new JoinContext(payload, (AsynchronousSocketChannel) connectionMetadata.channel, localJoinColumn));
+                        JoinRoutingData jrd = JoinRoutingData.fromBytes(payload.routingData());
+                        activeJoins.put(payload.queryId(),
+                                new JoinContext(payload, (AsynchronousSocketChannel) connectionMetadata.channel, jrd));
                         LOGGER.log(INFO, ">>> [ORDER VMS] JOIN MODE active. Awaiting broadcast...");
                     }
 
@@ -1242,15 +1246,11 @@ public final class VmsEventHandler extends ModbHttpServer {
         }
 
         private int getBufferSize() {
-            int bufferSize = Integer.MAX_VALUE;
-            // check if we can read an integer
-            if(this.readBuffer.remaining() > Integer.BYTES) {
-                // size of the batch
-                bufferSize = this.readBuffer.getInt();
-                // discard message type and size of batch from the total size since it has already been read
-                bufferSize -= 1 + Integer.BYTES;
+            if (this.readBuffer.remaining() > Integer.BYTES) {
+                int bufferSize = this.readBuffer.getInt();
+                return bufferSize - 1 - Integer.BYTES;
             }
-            return bufferSize;
+            return Integer.MAX_VALUE;
         }
 
         /**

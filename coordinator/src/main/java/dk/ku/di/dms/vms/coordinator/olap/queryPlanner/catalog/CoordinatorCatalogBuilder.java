@@ -32,12 +32,11 @@ public final class CoordinatorCatalogBuilder {
             String columnName = model.columnNames[i];
             DataType dataType = model.columnDataTypes[i];
 
-            boolean nullable = true;
-
             columns.add(new CatalogColumn(
                     columnName,
                     mapType(dataType),
-                    nullable
+                    true,
+                    dataType != null ? dataType.value : 0
             ));
         });
 
@@ -50,22 +49,18 @@ public final class CoordinatorCatalogBuilder {
     }
 
     private CatalogType mapType(DataType dataType) {
-        if (dataType == null) {
-            return CatalogType.BYTES;
-        }
+        if (dataType == null) return CatalogType.BYTES;
 
         return switch (dataType) {
-            case BOOL -> CatalogType.BOOLEAN;
-            case INT -> CatalogType.INT;
-            case LONG -> CatalogType.BIGINT;
-            case FLOAT -> CatalogType.FLOAT;
-            case DOUBLE -> CatalogType.DOUBLE;
-            case CHAR, STRING, ENUM -> CatalogType.VARCHAR;
-            case DATE -> CatalogType.DATE;
-            case STRING_ARRAY,
-                 FLOAT_ARRAY,
-                 INT_ARRAY,
-                 COMPLEX -> CatalogType.BYTES;
+            case BOOL                                  -> CatalogType.BOOLEAN;
+            case INT                                   -> CatalogType.INT;
+            case LONG                                  -> CatalogType.BIGINT;
+            case FLOAT                                 -> CatalogType.FLOAT;
+            case DOUBLE                                -> CatalogType.DOUBLE;
+            case CHAR, STRING, ENUM                    -> CatalogType.VARCHAR;
+            case DATE                                  -> CatalogType.DATE;
+            case STRING_ARRAY, FLOAT_ARRAY,
+                 INT_ARRAY, COMPLEX                    -> CatalogType.BYTES;
         };
     }
 }

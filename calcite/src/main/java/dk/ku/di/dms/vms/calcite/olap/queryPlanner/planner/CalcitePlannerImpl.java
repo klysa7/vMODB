@@ -1,6 +1,7 @@
 package dk.ku.di.dms.vms.calcite.olap.queryPlanner.planner;
 
 import dk.ku.di.dms.vms.calcite.modb.convention.VModbConvention;
+import dk.ku.di.dms.vms.calcite.modb.rules.VModbAggregateRule;
 import dk.ku.di.dms.vms.calcite.modb.rules.VModbFilterRule;
 import dk.ku.di.dms.vms.calcite.modb.rules.VModbJoinRule;
 import dk.ku.di.dms.vms.calcite.modb.rules.VModbProjectRule;
@@ -32,7 +33,8 @@ public final class CalcitePlannerImpl implements CalcitePlanner {
             VModbTableAccessRule.INSTANCE,
             VModbProjectRule.INSTANCE,
             VModbFilterRule.INSTANCE,
-            VModbJoinRule.INSTANCE
+            VModbJoinRule.INSTANCE,
+            VModbAggregateRule.INSTANCE
     );
 
     @Override

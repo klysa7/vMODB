@@ -9,6 +9,7 @@ import dk.ku.di.dms.vms.calcite.olap.orchestrator.runtime.DistributedExecutor;
 import dk.ku.di.dms.vms.calcite.olap.orchestrator.runtime.PushdownResponse;
 import dk.ku.di.dms.vms.calcite.olap.queryPlanner.QueryPlanner;
 import dk.ku.di.dms.vms.calcite.olap.queryPlanner.calcite.CalciteSchemaBuilder;
+import dk.ku.di.dms.vms.calcite.olap.queryPlanner.catalog.CatalogColumn;
 import dk.ku.di.dms.vms.calcite.olap.queryPlanner.catalog.CoordinatorCatalog;
 import dk.ku.di.dms.vms.calcite.olap.queryPlanner.planner.CalcitePlannerImpl;
 import dk.ku.di.dms.vms.modb.common.coordinator.api.CatalogResponse;
@@ -59,11 +60,20 @@ public final class OlapGatewayService {
         RelNode physical = (RelNode) out.vmodbPhysicalPlan();
 
         PlacementResolver placement = new PlacementResolver();
-        DistributedPlanner.ColumnsResolver columnsResolver =
-                (schema, table) -> resolveColumns(schema, table, catalog);
+        DistributedPlanner.ColumnsResolver columnsResolver = new DistributedPlanner.ColumnsResolver() {
+            @Override
+            public List<String> columnsInOrder(String schema, String table) {
+                return resolveColumnNames(schema, table, catalog);
+            }
+
+            @Override
+            public List<CatalogColumn> columnMetas(String schema, String table) {
+                return resolveColumnMetas(schema, table, catalog);
+            }
+        };
 
         DistributedPlanner distributedPlanner = new DistributedPlanner(placement, columnsResolver);
-        DistributedExecutor executor = new DistributedExecutor(this.gatewayClient);
+        DistributedExecutor executor = new DistributedExecutor(this.gatewayClient, columnsResolver);
 
         Orchestrator orchestrator = new Orchestrator(distributedPlanner, executor);
         PushdownResponse result = orchestrator.execute(physical, snapshot);
@@ -80,12 +90,20 @@ public final class OlapGatewayService {
         return jsonOutput;
     }
 
-    private List<String> resolveColumns(String schema, String table, CoordinatorCatalog catalog) {
+    private List<String> resolveColumnNames(String schema, String table, CoordinatorCatalog catalog) {
         var schemaObj = catalog.tablesInSchema(schema);
         if (schemaObj == null) throw new IllegalArgumentException("Schema not found: " + schema);
         var t = schemaObj.get(table);
         if (t == null) throw new IllegalArgumentException("Table not found: " + schema + "." + table);
-        return t.columns().stream().map(c -> c.name()).toList();
+        return t.columns().stream().map(CatalogColumn::name).toList();
+    }
+
+    private List<CatalogColumn> resolveColumnMetas(String schema, String table, CoordinatorCatalog catalog) {
+        var schemaObj = catalog.tablesInSchema(schema);
+        if (schemaObj == null) throw new IllegalArgumentException("Schema not found: " + schema);
+        var t = schemaObj.get(table);
+        if (t == null) throw new IllegalArgumentException("Table not found: " + schema + "." + table);
+        return t.columns();
     }
 
     private static String jsonValue(Object v) {
@@ -98,7 +116,7 @@ public final class OlapGatewayService {
 
     private static List<LinkedHashMap<String, Object>> rowsAsObjects(List<String> columns, List<List<Object>> rows) {
         return rows.stream().map(row -> {
-            var obj = new java.util.LinkedHashMap<String, Object>();
+            var obj = new LinkedHashMap<String, Object>();
             IntStream.range(0, columns.size()).forEach(i -> {
                 Object val = (row != null && i < row.size()) ? row.get(i) : null;
                 obj.put(columns.get(i), val);

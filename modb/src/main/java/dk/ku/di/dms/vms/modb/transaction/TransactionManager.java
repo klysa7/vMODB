@@ -5,6 +5,7 @@ import dk.ku.di.dms.vms.modb.api.query.statement.IStatement;
 import dk.ku.di.dms.vms.modb.api.query.statement.SelectStatement;
 import dk.ku.di.dms.vms.modb.common.data_structure.Tuple;
 import dk.ku.di.dms.vms.modb.common.memory.MemoryRefNode;
+import dk.ku.di.dms.vms.modb.common.schema.network.query.JoinRoutingData;
 import dk.ku.di.dms.vms.modb.common.transaction.ITransactionContext;
 import dk.ku.di.dms.vms.modb.common.transaction.ITransactionManager;
 import dk.ku.di.dms.vms.modb.definition.Table;
@@ -31,6 +32,9 @@ import dk.ku.di.dms.vms.modb.transaction.multiversion.index.UniqueSecondaryIndex
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
 
 import static dk.ku.di.dms.vms.modb.common.memory.MemoryUtils.UNSAFE;
 import static dk.ku.di.dms.vms.modb.definition.Schema.RECORD_HEADER;
@@ -202,28 +206,27 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
         Table table = this.catalog.get(tableName);
         if (table == null) throw new IllegalArgumentException("Table not found: " + tableName);
 
+        LOGGER.log(INFO, ">>> [SCAN] Table: " + tableName + " | predicates: "
+                + (predicates == null ? "none" : predicates.size() + " → " + predicates));
+
         var underlying = table.primaryKeyIndex().underlyingIndex();
 
         if (underlying instanceof UniqueHashBufferIndex rawIndex) {
             IRecordIterator<IKey> internalIterator = rawIndex.iterator();
-
             return new Iterator<Long>() {
                 Long nextMatch = null;
-
                 @Override
                 public boolean hasNext() {
                     if (nextMatch != null) return true;
-
                     while (internalIterator.hasNext()) {
                         internalIterator.next();
                         long currentAddr = internalIterator.address();
-
                         if (predicates == null || predicates.isEmpty()) {
                             nextMatch = currentAddr;
                             return true;
                         }
-
                         Object[] record = rawIndex.record(internalIterator);
+                        if (record == null) continue;
                         if (checkPredicates(record, predicates)) {
                             nextMatch = currentAddr;
                             return true;
@@ -231,7 +234,6 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
                     }
                     return false;
                 }
-
                 @Override
                 public Long next() {
                     if (nextMatch == null && !hasNext()) throw new NoSuchElementException();
@@ -255,94 +257,224 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
         for (SimplePredicate p : predicates) {
             Object val = row[p.columnPosition()];
             if (val == null) return false;
-
             int cmp = compareValues(val, p.value());
-
             switch (p.expression()) {
-                case EQUALS: if (cmp != 0) return false; break;
-                case GREATER_THAN: if (cmp <= 0) return false; break;
-                case LESS_THAN: if (cmp >= 0) return false; break;
-                case GREATER_THAN_OR_EQUAL: if (cmp < 0) return false; break;
-                case LESS_THAN_OR_EQUAL: if (cmp > 0) return false; break;
-                case NOT_EQUALS: if (cmp == 0) return false; break;
+                case EQUALS:                if (cmp != 0) return false; break;
+                case GREATER_THAN:          if (cmp <= 0) return false; break;
+                case LESS_THAN:             if (cmp >= 0) return false; break;
+                case GREATER_THAN_OR_EQUAL: if (cmp < 0)  return false; break;
+                case LESS_THAN_OR_EQUAL:    if (cmp > 0)  return false; break;
+                case NOT_EQUALS:            if (cmp == 0) return false; break;
             }
         }
         return true;
     }
 
-    public Iterator<byte[]> getJoinIterator(String tableName, Map<Integer, byte[]> broadcastBuffer, int localJoinColumnIndex) {
+    public Iterator<byte[]> getJoinIterator(String tableName,
+                                            Map<String, byte[]> broadcastBuffer,
+                                            int[] localColIndices,
+                                            long snapshotId) {
         Table table = this.catalog.get(tableName);
+        if (table == null) throw new IllegalArgumentException("Table not found: " + tableName);
+
         var underlying = table.primaryKeyIndex().underlyingIndex();
-
-        if (!(underlying instanceof UniqueHashBufferIndex rawIndex)) {
+        if (!(underlying instanceof UniqueHashBufferIndex rawIndex))
             throw new IllegalStateException("Joins currently require UniqueHashBufferIndex.");
-        }
 
-        IRecordIterator<IKey> internalIterator = rawIndex.iterator();
+        byte[] localColTypes      = resolveColumnTypes(rawIndex.schema(), localColIndices);
         final int localRecordSize = rawIndex.schema().getRecordSizeWithoutHeader();
+        final int[] allColOffsets = rawIndex.schema().columnOffset();
+
+        TransactionContext txCtx = new TransactionContext(0, snapshotId, true);
+        Iterator<Object[]> iter  = table.primaryKeyIndex().iterator(txCtx);
 
         return new Iterator<byte[]>() {
             byte[] nextMatch = null;
-            int debugCounter = 0;
 
             @Override
             public boolean hasNext() {
-                if (nextMatch != null) {
-                    return true;
-                }
+                if (nextMatch != null) return true;
+                try {
+                    while (iter.hasNext()) {
+                        Object[] localRow = iter.next();
+                        if (localRow == null) continue;
 
-                while (internalIterator.hasNext()) {
-                    internalIterator.next();
-                    long currentAddr = internalIterator.address();
+                        String key = extractKeyFromRow(localRow, localColIndices, localColTypes);
 
-                    Object[] record = rawIndex.record(internalIterator);
-                    if (record == null || record.length == 0 || (record[0] instanceof Number n && n.intValue() == 0)) {
-                        continue;
+                        byte[] remoteRow = broadcastBuffer.get(key);
+                        if (remoteRow != null) {
+                            byte[] localBytes = serializeRow(rawIndex.schema(), localRow,
+                                    allColOffsets, localRecordSize);
+
+                            nextMatch = new byte[remoteRow.length + localRecordSize];
+                            System.arraycopy(remoteRow, 0, nextMatch, 0, remoteRow.length);
+                            System.arraycopy(localBytes, 0, nextMatch, remoteRow.length, localRecordSize);
+                            return true;
+                        }
                     }
-
-                    Object joinKeyObj = record[localJoinColumnIndex];
-                    if (joinKeyObj == null) {
-                        continue;
-                    }
-
-                    int joinHash = (joinKeyObj instanceof Number n) ? Integer.hashCode(n.intValue()) : joinKeyObj.hashCode();
-                    if (debugCounter < 5) {
-                        System.out.println(">>> [DEBUG JOIN PROBE] Extracted Value: " + joinKeyObj + " from row: " + java.util.Arrays.toString(record));
-                        debugCounter++;
-                    }
-
-                    byte[] remoteBytes = broadcastBuffer.get(joinHash);
-                    if (remoteBytes != null) {
-                        System.out.println(">>> [DEBUG JOIN PROBE] MATCH FOUND! Hash: " + joinHash);
-
-                        byte[] localBytes = new byte[localRecordSize];
-                        UNSAFE.copyMemory(
-                                null,
-                                currentAddr + RECORD_HEADER,
-                                localBytes,
-                                UNSAFE.arrayBaseOffset(byte[].class),
-                                localRecordSize
-                        );
-
-                        nextMatch = new byte[remoteBytes.length + localRecordSize];
-                        System.arraycopy(remoteBytes, 0, nextMatch, 0, remoteBytes.length);
-                        System.arraycopy(localBytes, 0, nextMatch, remoteBytes.length, localRecordSize);
-                        return true;
-                    }
+                } catch (Exception e) {
+                    System.err.println(">>> [JOIN ITERATOR] EXCEPTION in hasNext(): " + e.getClass().getName() + ": " + e.getMessage());
+                    e.printStackTrace(System.err);
+                    throw e;
                 }
                 return false;
             }
 
             @Override
             public byte[] next() {
-                if (nextMatch == null && !hasNext()) {
-                    throw new NoSuchElementException();
-                }
+                if (nextMatch == null && !hasNext()) throw new NoSuchElementException();
                 byte[] result = nextMatch;
                 nextMatch = null;
                 return result;
             }
         };
+    }
+
+    public Iterator<byte[]> getJoinIteratorFast(String tableName,
+                                                Map<Long, byte[]> broadcastBuffer,
+                                                int[] localColIndices,
+                                                long snapshotId) {
+        Table table = this.catalog.get(tableName);
+        if (table == null) throw new IllegalArgumentException("Table not found: " + tableName);
+
+        var underlying = table.primaryKeyIndex().underlyingIndex();
+        if (!(underlying instanceof UniqueHashBufferIndex rawIndex))
+            throw new IllegalStateException("Joins currently require UniqueHashBufferIndex.");
+
+        byte[] localColTypes      = resolveColumnTypes(rawIndex.schema(), localColIndices);
+        final int localRecordSize = rawIndex.schema().getRecordSizeWithoutHeader();
+        final int[] allColOffsets = rawIndex.schema().columnOffset();
+
+        TransactionContext txCtx = new TransactionContext(0, snapshotId, true);
+        Iterator<Object[]> iter  = table.primaryKeyIndex().iterator(txCtx);
+
+        return new Iterator<byte[]>() {
+            byte[] nextMatch = null;
+
+            @Override
+            public boolean hasNext() {
+                if (nextMatch != null) return true;
+                try {
+                    while (iter.hasNext()) {
+                        Object[] localRow = iter.next();
+                        if (localRow == null) continue;
+
+                        long key = extractLongKeyFromRow(localRow, localColIndices, localColTypes);
+
+                        byte[] remoteRow = broadcastBuffer.get(key);
+                        if (remoteRow != null) {
+                            byte[] localBytes = serializeRow(rawIndex.schema(), localRow,
+                                    allColOffsets, localRecordSize);
+
+                            nextMatch = new byte[remoteRow.length + localRecordSize];
+                            System.arraycopy(remoteRow, 0, nextMatch, 0, remoteRow.length);
+                            System.arraycopy(localBytes, 0, nextMatch, remoteRow.length, localRecordSize);
+                            return true;
+                        }
+                    }
+                } catch (Exception e) {
+                    System.err.println(">>> [JOIN ITERATOR FAST] EXCEPTION in hasNext(): " + e.getClass().getName() + ": " + e.getMessage());
+                    e.printStackTrace(System.err);
+                    throw e;
+                }
+                return false;
+            }
+
+            @Override
+            public byte[] next() {
+                if (nextMatch == null && !hasNext()) throw new NoSuchElementException();
+                byte[] result = nextMatch;
+                nextMatch = null;
+                return result;
+            }
+        };
+    }
+
+
+    private static int[] resolveColumnOffsets(dk.ku.di.dms.vms.modb.definition.Schema schema,
+                                              int[] colIndices) {
+        int[] all = schema.columnOffset();
+        int[] result = new int[colIndices.length];
+        for (int i = 0; i < colIndices.length; i++) result[i] = all[colIndices[i]];
+        return result;
+    }
+
+    private static byte[] resolveColumnTypes(dk.ku.di.dms.vms.modb.definition.Schema schema,
+                                             int[] colIndices) {
+        byte[] result = new byte[colIndices.length];
+        for (int i = 0; i < colIndices.length; i++) {
+            result[i] = switch (schema.columnDataType(colIndices[i])) {
+                case INT    -> JoinRoutingData.TYPE_INT;
+                case LONG   -> JoinRoutingData.TYPE_LONG;
+                case DOUBLE -> JoinRoutingData.TYPE_DOUBLE;
+                case FLOAT  -> JoinRoutingData.TYPE_FLOAT;
+                default     -> JoinRoutingData.TYPE_INT;
+            };
+        }
+        return result;
+    }
+
+
+    private static String extractKeyFromRow(Object[] row, int[] colIndices, byte[] colTypes) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < colIndices.length; i++) {
+            Object val = row[colIndices[i]];
+            switch (colTypes[i]) {
+                case JoinRoutingData.TYPE_INT    -> sb.append(((Number) val).intValue());
+                case JoinRoutingData.TYPE_LONG   -> sb.append(((Number) val).longValue());
+                case JoinRoutingData.TYPE_DOUBLE -> sb.append(Double.doubleToRawLongBits(((Number) val).doubleValue()));
+                case JoinRoutingData.TYPE_FLOAT  -> sb.append(Float.floatToRawIntBits(((Number) val).floatValue()));
+                default                          -> sb.append(((Number) val).intValue());
+            }
+            if (i < colIndices.length - 1) sb.append('-');
+        }
+        return sb.toString();
+    }
+
+    private static long extractLongKeyFromRow(Object[] row, int[] colIndices, byte[] colTypes) {
+        if (colTypes.length == 1) {
+            Number val = (Number) row[colIndices[0]];
+            return colTypes[0] == JoinRoutingData.TYPE_LONG
+                    ? val.longValue()
+                    : (long) val.intValue();
+        }
+        int v0 = ((Number) row[colIndices[0]]).intValue();
+        int v1 = ((Number) row[colIndices[1]]).intValue();
+        return ((long) v0 << 32) | (v1 & 0xFFFFFFFFL);
+    }
+
+    private static byte[] serializeRow(dk.ku.di.dms.vms.modb.definition.Schema schema,
+                                       Object[] values,
+                                       int[] slotRelativeOffsets,
+                                       int size) {
+        byte[] bytes = new byte[size];
+        ByteBuffer buf = ByteBuffer.wrap(bytes).order(ByteOrder.nativeOrder());
+        for (int i = 0; i < values.length; i++) {
+            if (values[i] == null) continue;
+            int off = slotRelativeOffsets[i] - RECORD_HEADER;
+            if (off < 0 || off >= size) continue;
+            switch (schema.columnDataType(i)) {
+                case INT -> buf.putInt(off, ((Number) values[i]).intValue());
+                case LONG -> buf.putLong(off, ((Number) values[i]).longValue());
+                case FLOAT -> buf.putFloat(off, ((Number) values[i]).floatValue());
+                case DOUBLE -> buf.putDouble(off, ((Number) values[i]).doubleValue());
+                case DATE -> {
+                    long epoch = (values[i] instanceof java.util.Date d)
+                            ? d.getTime()
+                            : ((Number) values[i]).longValue();
+                    buf.putLong(off, epoch);
+                }
+                case CHAR -> {
+                    byte[] encoded = values[i].toString().getBytes(StandardCharsets.UTF_16LE);
+                    int maxLen = size - off;
+                    System.arraycopy(encoded, 0, bytes, off, Math.min(encoded.length, maxLen));
+                }
+                default -> {
+                    if (values[i] instanceof Number n) buf.putInt(off, n.intValue());
+                }
+            }
+        }
+        return bytes;
     }
 
     private int compareValues(Object val1, Object val2) {

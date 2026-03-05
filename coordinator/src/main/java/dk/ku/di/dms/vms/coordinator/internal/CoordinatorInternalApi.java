@@ -1,6 +1,5 @@
 package dk.ku.di.dms.vms.coordinator.internal;
 
-
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
@@ -41,7 +40,6 @@ public final class CoordinatorInternalApi {
         return api;
     }
 
-
     private void handleSnapshot(HttpExchange ex) throws IOException {
         if (!"GET".equalsIgnoreCase(ex.getRequestMethod())) {
             sendJson(ex, 405, Map.of("status", "error", "message", "Method not allowed. Use GET."));
@@ -57,7 +55,6 @@ public final class CoordinatorInternalApi {
         }
 
         long snapshotId = catalog.getSnapshotId();
-
         Map<String, Map<String, CatalogTableDto>> schemasDto = new HashMap<>();
 
         for (String schema : catalog.schemaNames()) {
@@ -83,10 +80,8 @@ public final class CoordinatorInternalApi {
             }
         }
 
-        CatalogResponse resp = new CatalogResponse(snapshotId, schemasDto, placement);
-        sendJson(ex, 200, resp);
+        sendJson(ex, 200, new CatalogResponse(snapshotId, schemasDto, placement));
     }
-
 
     private static void sendJson(HttpExchange ex, int code, Object obj) throws IOException {
         byte[] bytes = MAPPER.writeValueAsBytes(obj);
@@ -119,7 +114,12 @@ public final class CoordinatorInternalApi {
                     tryInvoke(col, "getType")
             ));
 
-            out.add(new CatalogColumnDto(name, type));
+            int byteSize = asInt(
+                    tryInvoke(col, "byteSize"),
+                    tryInvoke(col, "getByteSize")
+            );
+
+            out.add(new CatalogColumnDto(name, type, byteSize));
         }
         return out;
     }
@@ -144,5 +144,16 @@ public final class CoordinatorInternalApi {
             if (v != null) return String.valueOf(v);
         }
         return null;
+    }
+
+    private static int asInt(Object... vals) {
+        for (Object v : vals) {
+            if (v instanceof Integer i) return i;
+            if (v instanceof Number  n) return n.intValue();
+            if (v instanceof String  s) {
+                try { return Integer.parseInt(s.trim()); } catch (NumberFormatException ignored) {}
+            }
+        }
+        return 0;
     }
 }

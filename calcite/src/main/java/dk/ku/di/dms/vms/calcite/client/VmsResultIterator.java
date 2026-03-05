@@ -1,19 +1,23 @@
 package dk.ku.di.dms.vms.calcite.client;
 
+import dk.ku.di.dms.vms.calcite.olap.queryPlanner.catalog.CatalogType;
+
 import java.io.BufferedInputStream;
 import java.io.DataInputStream;
 import java.io.EOFException;
 import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
-import java.util.Arrays;
+import java.nio.charset.StandardCharsets;
 import java.util.Iterator;
 import java.util.LinkedList;
+import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Queue;
 
-import static java.lang.System.Logger.Level.INFO;
 import static java.lang.System.Logger.Level.ERROR;
+import static java.lang.System.Logger.Level.INFO;
+
 
 public class VmsResultIterator implements Iterator<Object[]> {
 
@@ -21,21 +25,28 @@ public class VmsResultIterator implements Iterator<Object[]> {
 
     private final Socket socket;
     private final DataInputStream dataInputStream;
-    private final Class<?>[] columnTypes;
+    private final List<ColumnDescriptor> descriptors;
     private final String tableName;
     private final Queue<Object[]> rowBuffer = new LinkedList<>();
     private boolean isEos = false;
     private long recordsRead = 0;
 
-    public VmsResultIterator(Socket socket, Object inputStream, Class<?>[] columnTypes, String tableName) {
+    public VmsResultIterator(Socket socket, Object inputStream,
+                             List<ColumnDescriptor> descriptors, String tableName) {
         this.socket = socket;
-        if (inputStream instanceof BufferedInputStream) {
-            this.dataInputStream = new DataInputStream((BufferedInputStream) inputStream);
+        if (inputStream instanceof BufferedInputStream bis) {
+            this.dataInputStream = new DataInputStream(bis);
         } else {
-            this.dataInputStream = new DataInputStream(new BufferedInputStream((java.io.InputStream) inputStream, 65536));
+            this.dataInputStream = new DataInputStream(
+                    new BufferedInputStream((java.io.InputStream) inputStream, 65536));
         }
-        this.columnTypes = columnTypes;
+        this.descriptors = descriptors;
         this.tableName = tableName;
+    }
+
+    public VmsResultIterator(Socket socket, Object inputStream,
+                             Class<?>[] columnTypes, String tableName) {
+        this(socket, inputStream, (List<ColumnDescriptor>) null, tableName);
     }
 
     private void fetchNextBatch() {
@@ -52,19 +63,17 @@ public class VmsResultIterator implements Iterator<Object[]> {
             }
 
             if (type == 100) {
-                int dataSize = dataInputStream.readInt();
-                long queryId = dataInputStream.readLong();
-                int bytesRemainingInBatch = dataSize - 8;
+                int dataSize  = dataInputStream.readInt();
+                long queryId  = dataInputStream.readLong();
+                int remaining = dataSize - 8;
 
-                while (bytesRemainingInBatch > 0) {
-                    int rowSize = dataInputStream.readInt();
+                while (remaining > 0) {
+                    int    rowSize = dataInputStream.readInt();
                     byte[] rowData = new byte[rowSize];
                     dataInputStream.readFully(rowData);
-                    bytesRemainingInBatch -= (4 + rowSize);
+                    remaining -= (4 + rowSize);
 
-                    Object[] parsedRow = parseRowData(rowData);
-                    rowBuffer.add(parsedRow);
-
+                    rowBuffer.add(parseRowData(rowData));
                     recordsRead++;
                 }
             }
@@ -77,27 +86,52 @@ public class VmsResultIterator implements Iterator<Object[]> {
     }
 
     private Object[] parseRowData(byte[] rowData) {
-        Object[] row = new Object[columnTypes.length];
+        if (descriptors == null || descriptors.isEmpty()) {
+            return new Object[0];
+        }
 
-        ByteBuffer wrapper = ByteBuffer.wrap(rowData).order(ByteOrder.nativeOrder());
+        Object[] row = new Object[descriptors.size()];
+        ByteBuffer buf = ByteBuffer.wrap(rowData).order(ByteOrder.nativeOrder());
 
-        try {
-            if (rowData.length > 100) {
+        for (int i = 0; i < descriptors.size(); i++) {
+            ColumnDescriptor d = descriptors.get(i);
 
-                row[0] = wrapper.getInt(0);
-                row[3] = "";
-                int orderRecordSize = 36;
-                int orderStartOffset = rowData.length - orderRecordSize;
-                row[14] = wrapper.getInt(orderStartOffset);
-
-                return row;
+            if (!d.isReadable()) {
+                row[i] = null;
+                continue;
             }
-            Arrays.fill(row, "SINGLE_TABLE_NOT_SUPPORTED_HERE");
-        } catch (Exception e) {
-            Arrays.fill(row, "PARSE_ERROR");
+
+            int offset = d.byteOffset();
+            if (offset + d.byteSize() > rowData.length) {
+                row[i] = null;
+                continue;
+            }
+
+            row[i] = switch (d.type()) {
+                case INT -> buf.getInt(offset);
+                case LONG, BIGINT -> buf.getLong(offset);
+                case FLOAT -> buf.getFloat(offset);
+                case DOUBLE -> buf.getDouble(offset);
+                case BOOLEAN, BOOL -> buf.get(offset) != 0;
+                case DATE, TIMESTAMP -> buf.getLong(offset);
+                case VARCHAR, STRING, BYTES -> readString(rowData, offset, d.byteSize());
+                default                 -> null;
+            };
         }
 
         return row;
+    }
+
+    private static String readString(byte[] data, int offset, int size) {
+        int end = offset + (size & ~1);
+
+        while (end >= offset + 2
+                && data[end - 1] == 0
+                && data[end - 2] == 0) {
+            end -= 2;
+        }
+        if (end <= offset) return "";
+        return new String(data, offset, end - offset, StandardCharsets.UTF_16LE);
     }
 
     @Override
@@ -115,9 +149,9 @@ public class VmsResultIterator implements Iterator<Object[]> {
     }
 
     private void close() {
-        if(!isEos) {
+        if (!isEos) {
             isEos = true;
-            try { socket.close(); } catch(Exception ignored){}
+            try { socket.close(); } catch (Exception ignored) {}
         }
     }
 }

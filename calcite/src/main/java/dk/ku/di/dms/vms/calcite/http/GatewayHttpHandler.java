@@ -1,6 +1,5 @@
 package dk.ku.di.dms.vms.calcite.http;
 
-
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import dk.ku.di.dms.vms.calcite.service.OlapGatewayService;
@@ -12,7 +11,11 @@ import java.nio.charset.StandardCharsets;
 public final class GatewayHttpHandler implements HttpHandler {
 
     static final String PATH_ORDERS = "/olap/orders";
-    static final String SQL = """
+    static final String PATH_COUNT  = "/olap/orders/count";
+    static final String PATH_SUM    = "/olap/orders/sum";
+    static final String PATH_AVG    = "/olap/orders/avg";
+
+    static final String SQL_JOIN = """
         SELECT c.c_id, c.c_first, o.o_id
         FROM warehouse.customer c
         JOIN "order".orders o
@@ -20,6 +23,39 @@ public final class GatewayHttpHandler implements HttpHandler {
         AND c.c_d_id = o.o_d_id
         AND c.c_id = o.o_c_id
         WHERE c.c_w_id = 1
+    """;
+
+    static final String SQL_COUNT = """
+        SELECT c.c_d_id, COUNT(*)
+        FROM warehouse.customer c
+        JOIN "order".orders o
+        ON c.c_w_id = o.o_w_id
+        AND c.c_d_id = o.o_d_id
+        AND c.c_id = o.o_c_id
+        WHERE c.c_w_id = 1
+        GROUP BY c.c_d_id
+    """;
+
+    static final String SQL_SUM = """
+        SELECT c.c_d_id, SUM(o.o_ol_cnt)
+        FROM warehouse.customer c
+        JOIN "order".orders o
+        ON c.c_w_id = o.o_w_id
+        AND c.c_d_id = o.o_d_id
+        AND c.c_id = o.o_c_id
+        WHERE c.c_w_id = 1
+        GROUP BY c.c_d_id
+    """;
+
+    static final String SQL_AVG = """
+        SELECT c.c_d_id, AVG(o.o_ol_cnt)
+        FROM warehouse.customer c
+        JOIN "order".orders o
+        ON c.c_w_id = o.o_w_id
+        AND c.c_d_id = o.o_d_id
+        AND c.c_id = o.o_c_id
+        WHERE c.c_w_id = 1
+        GROUP BY c.c_d_id
     """;
 
     private final OlapGatewayService service;
@@ -38,13 +74,24 @@ public final class GatewayHttpHandler implements HttpHandler {
             return;
         }
 
-        if (!PATH_ORDERS.equals(path)) {
-            send(exchange, 404, jsonError("Unknown endpoint. Use " + PATH_ORDERS));
+        String sql = switch (path) {
+            case PATH_ORDERS -> SQL_JOIN;
+            case PATH_COUNT  -> SQL_COUNT;
+            case PATH_SUM    -> SQL_SUM;
+            case PATH_AVG    -> SQL_AVG;
+            default          -> null;
+        };
+
+        if (sql == null) {
+            send(exchange, 404, jsonError(
+                    "Unknown endpoint. Available: "
+                            + PATH_ORDERS + ", " + PATH_COUNT + ", "
+                            + PATH_SUM    + ", " + PATH_AVG));
             return;
         }
 
         try {
-            String responseJson = service.execute(SQL);
+            String responseJson = service.execute(sql);
             send(exchange, 200, responseJson);
         } catch (Exception e) {
             send(exchange, 500, jsonError("Gateway error: " + e.getMessage()));
