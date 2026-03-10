@@ -306,9 +306,10 @@ public final class OrderHttpHandler extends DefaultHttpHandler {
         }
         try {
             for (int w_id = 1; w_id <= numWare; w_id++) futures[w_id - 1].get();
-            futures[0] = pool.submit(orderIndex::flush);
-            futures[1] = pool.submit(orderLineIndex::flush);
-            for (int i = 0; i < 2; i++) futures[i].get();
+            Future<?>[] flushFutures = new Future[2];
+            flushFutures[0] = pool.submit(orderIndex::flush);
+            flushFutures[1] = pool.submit(orderLineIndex::flush);
+            for (int i = 0; i < 2; i++) flushFutures[i].get();
             this.transactionManager.rebuildIndexes();
         } catch (ExecutionException | InterruptedException e) {
             LOGGER.log(ERROR, "Error:\n" + e);

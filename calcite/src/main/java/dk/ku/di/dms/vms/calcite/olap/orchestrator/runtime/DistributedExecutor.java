@@ -90,13 +90,18 @@ public final class DistributedExecutor {
             if (joinDef.left() instanceof ScanDefinition leftScan
                     && joinDef.right() instanceof ScanDefinition rightScan) {
 
-                LOGGER.log(INFO, "OPTIMIZATION: Converting to Distributed VMS-to-VMS Broadcast Join!");
-
                 VmsSubplan leftPlan = plan.subPlans.stream()
                         .filter(s -> s.exchangeId.equals(leftScan.exchangeId())).findFirst().get();
                 VmsSubplan rightPlan = plan.subPlans.stream()
                         .filter(s -> s.exchangeId.equals(rightScan.exchangeId())).findFirst().get();
 
+                // ── Co-location guard ────────────────────────────────────────────
+                // The broadcast join optimization is only valid when the two tables
+                // live on *different* VMSes. If both scans resolve to the same host
+                // and port (e.g., history + freshness are both on localhost:8003),
+                // fire the trigger would fail with "Connection refused" and hang the
+                // query. Fall through to LocalJoinOperator instead.
+                // ─────────────────────────────────────────────────────────────────
                 String leftTable  = ((ScanAllOperation) leftPlan.operation).table;
                 String leftSchema = ((ScanAllOperation) leftPlan.operation).schema;
                 String rightTable = ((ScanAllOperation) rightPlan.operation).table;
@@ -105,71 +110,80 @@ public final class DistributedExecutor {
                 int leftPort  = resolveTpccPort(leftTable);
                 int rightPort = resolveTpccPort(rightTable);
 
-                int[] leftKeys  = joinDef.leftKeys();
-                int[] rightKeys = joinDef.rightKeys();
+                boolean coLocated = leftPlan.url.equals(rightPlan.url) || leftPort == rightPort;
 
-                List<CatalogColumn> leftCols  = columnsResolver.columnMetas(leftSchema,  leftTable);
-                List<CatalogColumn> rightCols = columnsResolver.columnMetas(rightSchema, rightTable);
+                if (!coLocated) {
+                    LOGGER.log(INFO, "OPTIMIZATION: Converting to Distributed VMS-to-VMS Broadcast Join!");
 
-                int[] allLeftOffsets = computeDataOffsets(leftCols);
-                int   remoteRecordSize = sumByteSizes(leftCols);
+                    int[] leftKeys  = joinDef.leftKeys();
+                    int[] rightKeys = joinDef.rightKeys();
 
-                int[]  remoteColOffsets = new int[leftKeys.length];
-                byte[] remoteColTypes   = new byte[leftKeys.length];
-                for (int i = 0; i < leftKeys.length; i++) {
-                    remoteColOffsets[i] = allLeftOffsets[leftKeys[i]];
-                    remoteColTypes[i]   = catalogTypeToCode(leftCols.get(leftKeys[i]).type());
-                }
+                    List<CatalogColumn> leftCols  = columnsResolver.columnMetas(leftSchema,  leftTable);
+                    List<CatalogColumn> rightCols = columnsResolver.columnMetas(rightSchema, rightTable);
 
-                byte[] routingData = new JoinRoutingData(
-                        remoteColOffsets, remoteColTypes, rightKeys, remoteRecordSize
-                ).toBytes();
+                    int[] allLeftOffsets = computeDataOffsets(leftCols);
+                    int   remoteRecordSize = sumByteSizes(leftCols);
 
-                LOGGER.log(INFO, ">>> [GATEWAY] Scheduling Broadcast Trigger...");
-                String targetAddress = "localhost:" + rightPort;
-                java.util.concurrent.Executors.newSingleThreadScheduledExecutor().schedule(() -> {
-                    try {
-                        LOGGER.log(INFO, ">>> [TRIGGER THREAD] Firing Broadcast from " + leftTable + " to " + targetAddress);
-                        gatewayClient.triggerBroadcast(
-                                "localhost", leftPort, plan.snapshot, plan.snapshot,
-                                leftTable, leftPlan.predicates, targetAddress
-                        );
-                        LOGGER.log(INFO, ">>> [TRIGGER THREAD] Successfully signaled Warehouse VMS.");
-                    } catch (Exception e) {
-                        LOGGER.log(ERROR, ">>> [TRIGGER THREAD] Failed to signal Warehouse!", e);
+                    int[]  remoteColOffsets = new int[leftKeys.length];
+                    byte[] remoteColTypes   = new byte[leftKeys.length];
+                    for (int i = 0; i < leftKeys.length; i++) {
+                        remoteColOffsets[i] = allLeftOffsets[leftKeys[i]];
+                        remoteColTypes[i]   = catalogTypeToCode(leftCols.get(leftKeys[i]).type());
                     }
-                }, 100, java.util.concurrent.TimeUnit.MILLISECONDS);
 
-                int[]  allRightOffsets = computeDataOffsets(rightCols);
+                    byte[] routingData = new JoinRoutingData(
+                            remoteColOffsets, remoteColTypes, rightKeys, remoteRecordSize
+                    ).toBytes();
 
-                List<ColumnDescriptor> combinedDescriptors = new ArrayList<>();
-                List<String> combinedColumns = new ArrayList<>();
+                    LOGGER.log(INFO, ">>> [GATEWAY] Scheduling Broadcast Trigger...");
+                    String targetAddress = "localhost:" + rightPort;
+                    java.util.concurrent.Executors.newSingleThreadScheduledExecutor().schedule(() -> {
+                        try {
+                            LOGGER.log(INFO, ">>> [TRIGGER THREAD] Firing Broadcast from " + leftTable + " to " + targetAddress);
+                            gatewayClient.triggerBroadcast(
+                                    "localhost", leftPort, plan.snapshot, plan.snapshot,
+                                    leftTable, leftPlan.predicates, targetAddress
+                            );
+                            LOGGER.log(INFO, ">>> [TRIGGER THREAD] Successfully signaled Warehouse VMS.");
+                        } catch (Exception e) {
+                            LOGGER.log(ERROR, ">>> [TRIGGER THREAD] Failed to signal Warehouse!", e);
+                        }
+                    }, 100, java.util.concurrent.TimeUnit.MILLISECONDS);
 
-                for (int i = 0; i < leftCols.size(); i++) {
-                    CatalogColumn col = leftCols.get(i);
-                    combinedDescriptors.add(new ColumnDescriptor(
-                            col.name(), col.type(), allLeftOffsets[i], col.byteSize()));
-                    combinedColumns.add(col.name());
+                    int[]  allRightOffsets = computeDataOffsets(rightCols);
+
+                    List<ColumnDescriptor> combinedDescriptors = new ArrayList<>();
+                    List<String> combinedColumns = new ArrayList<>();
+
+                    for (int i = 0; i < leftCols.size(); i++) {
+                        CatalogColumn col = leftCols.get(i);
+                        combinedDescriptors.add(new ColumnDescriptor(
+                                col.name(), col.type(), allLeftOffsets[i], col.byteSize()));
+                        combinedColumns.add(col.name());
+                    }
+                    for (int i = 0; i < rightCols.size(); i++) {
+                        CatalogColumn col = rightCols.get(i);
+                        combinedDescriptors.add(new ColumnDescriptor(
+                                col.name(), col.type(),
+                                remoteRecordSize + allRightOffsets[i],
+                                col.byteSize()));
+                        combinedColumns.add(col.name());
+                    }
+
+                    VmsSubplan receiverJoinPlan = new VmsSubplan(
+                            rightPlan.vmsName, rightPlan.url, rightPlan.exchangeId, rightPlan.operation,
+                            combinedColumns,
+                            rightPlan.predicates,
+                            (byte) 2,
+                            routingData,
+                            combinedDescriptors
+                    );
+
+                    return new StreamingScanOperator(gatewayClient, receiverJoinPlan, plan.snapshot);
                 }
-                for (int i = 0; i < rightCols.size(); i++) {
-                    CatalogColumn col = rightCols.get(i);
-                    combinedDescriptors.add(new ColumnDescriptor(
-                            col.name(), col.type(),
-                            remoteRecordSize + allRightOffsets[i],
-                            col.byteSize()));
-                    combinedColumns.add(col.name());
-                }
 
-                VmsSubplan receiverJoinPlan = new VmsSubplan(
-                        rightPlan.vmsName, rightPlan.url, rightPlan.exchangeId, rightPlan.operation,
-                        combinedColumns,
-                        rightPlan.predicates,
-                        (byte) 2,
-                        routingData,
-                        combinedDescriptors
-                );
-
-                return new StreamingScanOperator(gatewayClient, receiverJoinPlan, plan.snapshot);
+                // Co-located: fall through to local join below
+                LOGGER.log(INFO, "OPTIMIZATION SKIPPED: both scans on same VMS (port " + leftPort + "), using LocalJoinOperator.");
             }
 
             return new LocalJoinOperator(

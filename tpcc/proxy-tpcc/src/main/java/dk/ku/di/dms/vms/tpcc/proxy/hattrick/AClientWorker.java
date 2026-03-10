@@ -141,15 +141,11 @@ public final class AClientWorker implements Runnable {
     }
 
     private String endpointFor(QueryRecord.QueryType type) {
-        // HATtrick COUNT+freshness queries go directly to the order VMS (port 8003).
-        // Reason: Calcite planner has no VModbJoin rule for same-VMS cross-joins,
-        // so the gateway cannot yet plan "orders CROSS JOIN freshness".
-        // The order VMS HTTP handler executes these in a single MVCC snapshot,
-        // giving atomically consistent (count, txnnum_1, txnnum_2).
-        return olapOrderUrl + switch (type) {
-            case CA1_ORDERS     -> "/query/CA1_ORDERS";
-            case CA2_ORDER_LINE -> "/query/CA2_ORDER_LINE";
-            case CA3_HISTORY    -> "/query/CA3_HISTORY";
+        // All OLAP goes through Calcite gateway (port 8095)
+        return gatewayBaseUrl + switch (type) {
+            case CA1_ORDERS     -> "/olap/ca1";
+            case CA2_ORDER_LINE -> "/olap/ca2";
+            case CA3_HISTORY    -> "/olap/ca3";
         };
     }
 

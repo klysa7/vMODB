@@ -94,15 +94,11 @@ public final class OrderService {
         HATtrickCounters.orderLineCount.addAndGet(in.itemsIds.length);
 
         // ── HATtrick: update freshness counter for this T-client ──────────
-        // client_id == 0 means the event came from WorkloadUtils (legacy path),
-        // which has no FRESHNESS row — skip the update safely.
+        // No read — incrementFreshness is lock-free and safe under @Transactional(W).
+        // Blind update writes the new value without a prior lookupByKey.
         if (in.client_id > 0) {
-            Freshness f = this.freshnessRepository.lookupByKey(in.client_id);
-            if (f != null) {
-                f.txnnum++;
-                this.freshnessRepository.update(f);
-                HATtrickCounters.setFreshness(in.client_id, f.txnnum);
-            }
+            long newTxnnum = HATtrickCounters.incrementFreshness(in.client_id);
+            this.freshnessRepository.update(new Freshness(in.client_id, newTxnnum));
         }
         // ─────────────────────────────────────────────────────────────────
     }
@@ -132,12 +128,8 @@ public final class OrderService {
 
         // ── HATtrick: update freshness counter for this T-client ──────────
         if (in.client_id > 0) {
-            Freshness f = this.freshnessRepository.lookupByKey(in.client_id);
-            if (f != null) {
-                f.txnnum++;
-                this.freshnessRepository.update(f);
-                HATtrickCounters.setFreshness(in.client_id, f.txnnum);
-            }
+            long newTxnnum = HATtrickCounters.incrementFreshness(in.client_id);
+            this.freshnessRepository.update(new Freshness(in.client_id, newTxnnum));
         }
         // ─────────────────────────────────────────────────────────────────
     }
@@ -160,8 +152,5 @@ public final class OrderService {
         List<OrderLineInfoDto> lines = this.orderLineRepository.getOrderLinesInfo(
                 lastOrder.o_id, in.d_id, lastOrder.o_w_id
         );
-
-        // Results are returned to the caller via the HTTP response path;
-        // no outbound event needed for order status.
     }
 }
