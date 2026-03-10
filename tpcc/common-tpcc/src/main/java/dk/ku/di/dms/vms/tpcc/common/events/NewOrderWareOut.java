@@ -23,37 +23,39 @@ public final class NewOrderWareOut {
     public double d_tax;
     public float c_discount;
 
-    public NewOrderWareOut(){}
+    /** HATtrick: propagated from NewOrderWareIn. */
+    public int client_id;
 
-    public NewOrderWareOut(int w_id, int d_id, int c_id, int[] itemsIds, int[] supWares, int[] qty, boolean allLocal, double w_tax, int d_next_o_id, double d_tax, float c_discount) {
-        this.w_id = w_id;
-        this.d_id = d_id;
-        this.c_id = c_id;
-        this.itemsIds = itemsIds;
-        this.supWares = supWares;
-        this.qty = qty;
-        this.allLocal = allLocal;
-        this.w_tax = w_tax;
-        this.d_next_o_id = d_next_o_id;
-        this.d_tax = d_tax;
-        this.c_discount = c_discount;
+    public NewOrderWareOut() {}
+
+    public NewOrderWareOut(int w_id, int d_id, int c_id,
+                           int[] itemsIds, int[] supWares, int[] qty, boolean allLocal,
+                           double w_tax, int d_next_o_id, double d_tax, float c_discount,
+                           int client_id) {
+        this.w_id         = w_id;
+        this.d_id         = d_id;
+        this.c_id         = c_id;
+        this.itemsIds     = itemsIds;
+        this.supWares     = supWares;
+        this.qty          = qty;
+        this.allLocal     = allLocal;
+        this.w_tax        = w_tax;
+        this.d_next_o_id  = d_next_o_id;
+        this.d_tax        = d_tax;
+        this.c_discount   = c_discount;
+        this.client_id    = client_id;
     }
 
     @SuppressWarnings("unused")
-    public Set<Integer> getId(){
-        if(this.allLocal) return Set.of(this.w_id);
+    public Set<Integer> getId() {
+        if (this.allLocal) return Set.of(this.w_id);
         Set<Integer> set = new HashSet<>(this.supWares.length);
-        for (int supWare : this.supWares) {
-            set.add(supWare);
-        }
+        for (int supWare : this.supWares) set.add(supWare);
         return set;
     }
 
-    /**
-     * Allows for finer-grained access to state
-     */
     @SuppressWarnings("unused")
-    public Set<WareItemId> getIds(){
+    public Set<WareItemId> getIds() {
         Set<WareItemId> set = new HashSet<>(this.itemsIds.length);
         for (int i = 0; i < this.itemsIds.length; i++) {
             set.add(new WareItemId(this.supWares[i], this.itemsIds[i]));
@@ -63,16 +65,15 @@ public final class NewOrderWareOut {
 
     @Override
     public boolean equals(Object o) {
-        if (o instanceof NewOrderWareIn that){
+        if (o instanceof NewOrderWareIn that) {
             if (this.w_id != that.w_id) return false;
             if (this.d_id != that.d_id) return false;
             if (this.c_id != that.c_id) return false;
             if (this.allLocal != that.allLocal) return false;
-            // have to do this because remaining fields are filled as -1
             int maxSize = Math.min(this.itemsIds.length, that.itemsIds.length);
             int idx = 0;
-            while(idx < maxSize){
-                if(this.itemsIds[idx] != that.itemsIds[idx]){
+            while (idx < maxSize) {
+                if (this.itemsIds[idx] != that.itemsIds[idx]) {
                     return this.itemsIds[idx] == -1 || that.itemsIds[idx] == -1;
                 }
                 idx++;
@@ -93,5 +94,4 @@ public final class NewOrderWareOut {
         result = 31 * result + (this.allLocal ? 1 : 0);
         return result;
     }
-
 }

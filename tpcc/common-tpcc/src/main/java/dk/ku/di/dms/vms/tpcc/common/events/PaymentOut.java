@@ -16,17 +16,26 @@ public final class PaymentOut {
 
     public String data;
 
-    @SuppressWarnings("unused")
-    public PaymentOut(){}
+    /**
+     * HATtrick: which T-client submitted this transaction.
+     * Propagated from PaymentIn by WarehouseService.
+     * OrderService reads this to update the correct FRESHNESS row.
+     */
+    public int client_id;
 
-    public PaymentOut(int w_id, int d_id, int c_id, int c_w_id, int c_d_id, float amount, String data) {
-        this.w_id = w_id;
-        this.d_id = d_id;
-        this.c_id = c_id;
-        this.c_w_id = c_w_id;
-        this.c_d_id = c_d_id;
-        this.amount = amount;
-        this.data = data;
+    @SuppressWarnings("unused")
+    public PaymentOut() {}
+
+    public PaymentOut(int w_id, int d_id, int c_id, int c_w_id, int c_d_id,
+                      float amount, String data, int client_id) {
+        this.w_id      = w_id;
+        this.d_id      = d_id;
+        this.c_id      = c_id;
+        this.c_w_id    = c_w_id;
+        this.c_d_id    = c_d_id;
+        this.amount    = amount;
+        this.data      = data;
+        this.client_id = client_id;
     }
 
     @Override
@@ -39,12 +48,13 @@ public final class PaymentOut {
                 + ",\"c_d_id\":" + c_d_id
                 + ",\"amount\":" + amount
                 + ",\"data\":\"" + data + "\""
+                + ",\"client_id\":" + client_id
                 + "}";
     }
 
     @Override
     public boolean equals(Object o) {
-        if(o instanceof PaymentOut that) {
+        if (o instanceof PaymentOut that) {
             if (this.w_id != that.w_id) return false;
             if (this.d_id != that.d_id) return false;
             if (this.c_id != that.c_id) return false;
@@ -66,5 +76,4 @@ public final class PaymentOut {
         result = (int) (31 * result + this.amount);
         return 31 * result + this.data.hashCode();
     }
-
 }

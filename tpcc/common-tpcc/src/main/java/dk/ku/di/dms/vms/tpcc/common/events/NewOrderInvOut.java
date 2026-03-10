@@ -21,22 +21,33 @@ public final class NewOrderInvOut {
     public float[] prices;
     public String[] ol_dist_info;
 
-    public NewOrderInvOut(){}
+    /**
+     * HATtrick: which T-client submitted this transaction.
+     * Propagated from NewOrderWareIn → NewOrderWareOut → here.
+     * OrderService reads this to update the correct FRESHNESS row.
+     */
+    public int client_id;
 
-    public NewOrderInvOut(int w_id, int d_id, int c_id, int[] itemsIds, int[] supWares, int[] qty, boolean allLocal, double w_tax, int d_next_o_id, double d_tax, float c_discount, float[] prices, String[] ol_dist_info) {
-        this.w_id = w_id;
-        this.d_id = d_id;
-        this.c_id = c_id;
-        this.itemsIds = itemsIds;
-        this.supWares = supWares;
-        this.qty = qty;
-        this.allLocal = allLocal;
-        this.w_tax = w_tax;
+    public NewOrderInvOut() {}
+
+    public NewOrderInvOut(int w_id, int d_id, int c_id,
+                          int[] itemsIds, int[] supWares, int[] qty, boolean allLocal,
+                          double w_tax, int d_next_o_id, double d_tax, float c_discount,
+                          float[] prices, String[] ol_dist_info,
+                          int client_id) {
+        this.w_id        = w_id;
+        this.d_id        = d_id;
+        this.c_id        = c_id;
+        this.itemsIds    = itemsIds;
+        this.supWares    = supWares;
+        this.qty         = qty;
+        this.allLocal    = allLocal;
+        this.w_tax       = w_tax;
         this.d_next_o_id = d_next_o_id;
-        this.d_tax = d_tax;
-        this.c_discount = c_discount;
-        this.prices = prices;
+        this.d_tax       = d_tax;
+        this.c_discount  = c_discount;
+        this.prices      = prices;
         this.ol_dist_info = ol_dist_info;
+        this.client_id   = client_id;
     }
-
 }

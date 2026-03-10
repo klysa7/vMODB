@@ -35,31 +35,34 @@ public final class VModbJoinRule extends RelOptRule {
         RelNode left = join.getLeft();
         RelNode right = join.getRight();
 
-        RelNode leftConverted = call.getPlanner().changeTraits(left, left.getTraitSet().replace(VModbConvention.INSTANCE));
-        RelNode rightConverted = call.getPlanner().changeTraits(right, right.getTraitSet().replace(VModbConvention.INSTANCE));
+        RelNode leftConverted = call.getPlanner().changeTraits(left,
+                left.getTraitSet().replace(VModbConvention.INSTANCE));
+        RelNode rightConverted = call.getPlanner().changeTraits(right,
+                right.getTraitSet().replace(VModbConvention.INSTANCE));
         if (leftConverted == null || rightConverted == null) return;
 
-        List<Integer> leftKeys = new ArrayList<>();
+        List<Integer> leftKeys  = new ArrayList<>();
         List<Integer> rightKeys = new ArrayList<>();
         int leftFieldCount = left.getRowType().getFieldCount();
-
         RexNode condition = join.getCondition();
 
-        // Extract multiple keys if it's an AND, or a single key if it's an EQUALS
-        if (condition.getKind() == SqlKind.AND) {
+        if (condition.isAlwaysTrue()) {
+            // cross join — empty key lists, executes as nested-loop product
+        } else if (condition.getKind() == SqlKind.AND) {
             for (RexNode op : ((RexCall) condition).getOperands()) {
                 if (!parseEquality(op, leftKeys, rightKeys, leftFieldCount)) return;
             }
         } else if (condition.getKind() == SqlKind.EQUALS) {
             if (!parseEquality(condition, leftKeys, rightKeys, leftFieldCount)) return;
         } else {
-            return; // Reject non-equi joins
+            return; // Reject other non-equi joins
         }
 
-        int[] leftJoinCols = leftKeys.stream().mapToInt(i -> i).toArray();
+        int[] leftJoinCols  = leftKeys.stream().mapToInt(i -> i).toArray();
         int[] rightJoinCols = rightKeys.stream().mapToInt(i -> i).toArray();
 
-        RelNode out = VModbJoin.create(leftConverted, rightConverted, join.getRowType(), leftJoinCols, rightJoinCols);
+        RelNode out = VModbJoin.create(leftConverted, rightConverted,
+                join.getRowType(), leftJoinCols, rightJoinCols);
         call.transformTo(out);
     }
 

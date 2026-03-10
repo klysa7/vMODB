@@ -585,7 +585,12 @@ public final class VmsEventHandler extends ModbHttpServer {
 
     private final class BroadcastReceiverHandler implements CompletionHandler<Integer, Integer> {
         private final AsynchronousSocketChannel channel;
-        private final ByteBuffer readBuffer;
+        private ByteBuffer readBuffer;
+
+        // Staging Variables
+        private boolean readingHeader = true;
+        private int expectedPayloadSize = -1;
+        private long currentQueryId = -1;
 
         public BroadcastReceiverHandler(AsynchronousSocketChannel channel, ByteBuffer readBuffer) {
             this.channel = channel;
@@ -595,43 +600,60 @@ public final class VmsEventHandler extends ModbHttpServer {
         @Override
         public void completed(Integer result, Integer attachment) {
             if (result == -1) return;
+
+            // FIX: UNCONDITIONAL FLIP
             readBuffer.flip();
 
             while (readBuffer.hasRemaining()) {
-                readBuffer.mark();
-                byte type = readBuffer.get();
+                if (readingHeader) {
+                    if (readBuffer.remaining() < 1) break;
 
-                if (type == END_OF_STREAM_TYPE) {
-                    if (readBuffer.remaining() < 12) { readBuffer.reset(); break; }
-                    readBuffer.getInt();
-                    long queryId = readBuffer.getLong();
+                    readBuffer.mark();
+                    byte type = readBuffer.get();
 
-                    JoinContext ctx = activeJoins.remove(queryId);
-                    if (ctx != null) {
-                        System.out.println(">>> [ORDER VMS] Broadcast END received. Hash Map size: " + ctx.broadcastBuffer.size());
-                        System.out.println(">>> [ORDER VMS] Starting Join with local table: " + ctx.payload.tableName());
+                    if (type == END_OF_STREAM_TYPE) {
+                        if (readBuffer.remaining() < 12) { readBuffer.reset(); break; }
+                        readBuffer.getInt();
+                        long queryId = readBuffer.getLong();
 
-                        TransactionManager tm = (TransactionManager) transactionManager;
-                        Iterator<byte[]> joinIter = tm.getJoinIterator(
-                                ctx.payload.tableName(), ctx.broadcastBuffer, ctx.localColIndices, ctx.snapshotId);
-                        VmsQueryWorker worker = new VmsQueryWorker(
-                                ctx.gatewayChannel, joinIter, ctx.payload,
-                                options.networkBufferSize, options.networkSendTimeout);
-                        Thread.ofPlatform().name("query-worker-join-" + queryId).start(worker);
+                        JoinContext ctx = activeJoins.remove(queryId);
+                        if (ctx != null) {
+                            System.out.println(">>> [ORDER VMS] Broadcast END received. Hash Map size: " + ctx.broadcastBuffer.size());
+                            System.out.println(">>> [ORDER VMS] Starting Join with local table: " + ctx.payload.tableName());
+
+                            // YOUR NEW LOGIC IS HERE:
+                            TransactionManager tm = (TransactionManager) transactionManager;
+                            Iterator<byte[]> joinIter = tm.getJoinIterator(
+                                    ctx.payload.tableName(), ctx.broadcastBuffer, ctx.localColIndices, ctx.snapshotId);
+                            VmsQueryWorker worker = new VmsQueryWorker(
+                                    ctx.gatewayChannel, joinIter, ctx.payload,
+                                    options.networkBufferSize(), options.networkSendTimeout());
+                            Thread.ofPlatform().name("query-worker-join-" + queryId).start(worker);
+                        }
+                        try { channel.close(); } catch (Exception ignored) {}
+                        return;
                     }
-                    try { channel.close(); } catch (Exception ignored) {}
-                    return;
+                    else if (type == QUERY_RESULT_TYPE) {
+                        if (readBuffer.remaining() < 12) { readBuffer.reset(); break; }
+                        expectedPayloadSize = readBuffer.getInt();
+                        currentQueryId = readBuffer.getLong();
+                        readingHeader = false;
+                    }
+                    else {
+                        readBuffer.reset();
+                        break;
+                    }
                 }
+                else {
+                    // TCP Staging Buffer: Ensure the full batch is ready in memory!
+                    // bytesRemaining = dataSize - 8 (because queryId took 8 bytes)
+                    if (readBuffer.remaining() < expectedPayloadSize - 8) {
+                        break;
+                    }
 
-                if (type == QUERY_RESULT_TYPE) {
-                    if (readBuffer.remaining() < 12) { readBuffer.reset(); break; }
-                    int dataSize = readBuffer.getInt();
-                    if (readBuffer.remaining() < dataSize) { readBuffer.reset(); break; }
+                    int bytesRemaining = expectedPayloadSize - 8;
+                    JoinContext ctx = activeJoins.get(currentQueryId);
 
-                    long queryId = readBuffer.getLong();
-                    JoinContext ctx = activeJoins.get(queryId);
-
-                    int bytesRemaining = dataSize - 8;
                     while (bytesRemaining > 0) {
                         int rowSize = readBuffer.getInt();
                         byte[] rowData = new byte[rowSize];
@@ -639,25 +661,29 @@ public final class VmsEventHandler extends ModbHttpServer {
                         bytesRemaining -= (4 + rowSize);
 
                         if (ctx != null) {
+                            // YOUR NEW LOGIC IS HERE:
                             GeneralRowView rowView = GeneralRowView.threadLocal();
                             rowView.wrap(rowData);
                             String key = rowView.extractKey(ctx.remoteColOffsets, ctx.remoteColTypes);
                             ctx.broadcastBuffer.put(key, rowData);
                         }
                     }
-                } else {
-                    readBuffer.reset();
-                    break;
+
+                    // Reset state to read the next batch header
+                    readingHeader = true;
                 }
             }
 
-            if (readBuffer.hasRemaining()) {
-                readBuffer.compact();
-                channel.read(readBuffer, readBuffer.position(), this);
+            // FIX: UNCONDITIONAL COMPACT - Safely expand or compact unread bytes
+            if (readBuffer.position() == 0 && readBuffer.limit() == readBuffer.capacity()) {
+                ByteBuffer newBuffer = ByteBuffer.allocate(readBuffer.capacity() * 2);
+                newBuffer.put(readBuffer);
+                readBuffer = newBuffer;
             } else {
-                readBuffer.clear();
-                channel.read(readBuffer, 0, this);
+                readBuffer.compact();
             }
+
+            channel.read(readBuffer, 0, this);
         }
 
         @Override
@@ -769,7 +795,11 @@ public final class VmsEventHandler extends ModbHttpServer {
         private final class GatewayReadCompletionHandler implements CompletionHandler<Integer, Integer> {
             private final IdentifiableNode gateway;
             private final ConnectionMetadata connectionMetadata;
-            private final ByteBuffer readBuffer;
+            private ByteBuffer readBuffer;
+
+            // Staging variables to ensure full TCP read
+            private boolean readingHeader = true;
+            private int expectedPayloadSize = -1;
 
             public GatewayReadCompletionHandler(IdentifiableNode gateway, ConnectionMetadata connectionMetadata, ByteBuffer readBuffer) {
                 this.gateway = gateway;
@@ -781,41 +811,56 @@ public final class VmsEventHandler extends ModbHttpServer {
             public void completed(Integer result, Integer startPos) {
                 if (result == -1) {
                     LOGGER.log(WARNING, me.identifier + ": Gateway disconnected.");
-                    try {
-                        connectionMetadata.channel.close();
-                    } catch (IOException ignored) {
-
-                    }
+                    try { connectionMetadata.channel.close(); } catch (IOException ignored) {}
                     return;
                 }
 
-                if (startPos == 0) readBuffer.flip();
-                LOGGER.log(INFO, ">>> [VMS] Received raw message from Gateway. Size: " + readBuffer.remaining() + " bytes");
+                // FIX: UNCONDITIONAL FLIP - Never rely on startPos for buffer states!
+                readBuffer.flip();
 
-                byte type = readBuffer.get();
+                while (readBuffer.hasRemaining()) {
+                    if (readingHeader) {
+                        if (readBuffer.remaining() < 5) break;
 
-                if (type == QueryRequestEvent.QUERY_REQUEST_TYPE) {
-                    try {
-                        processQueryRequest(readBuffer);
-                    } catch (Exception e) {
-                        LOGGER.log(ERROR, ">>> [VMS] FATAL ERROR processing QueryRequest!", e);
+                        readBuffer.mark();
+                        byte type = readBuffer.get();
+
+                        if (type == QueryRequestEvent.QUERY_REQUEST_TYPE) {
+                            expectedPayloadSize = readBuffer.getInt();
+                            readingHeader = false;
+                        } else {
+                            LOGGER.log(ERROR, ">>> [VMS] Unknown message type from Gateway: " + type);
+                            try { connectionMetadata.channel.close(); } catch (Exception ignored) {}
+                            return;
+                        }
+                    } else {
+                        // Staging Buffer - Wait for the entire JSON payload to arrive!
+                        if (readBuffer.remaining() < expectedPayloadSize) break;
+
+                        try {
+                            processQueryRequest(readBuffer);
+                        } catch (Exception e) {
+                            LOGGER.log(ERROR, ">>> [GATEWAY-RX] FATAL ERROR parsing JSON!", e);
+                        }
+                        readingHeader = true;
                     }
-                } else {
-                    LOGGER.log(ERROR, ">>> [VMS] Unknown message type from Gateway: " + type);
-                    readBuffer.position(readBuffer.limit());
                 }
 
-                if (readBuffer.hasRemaining()) {
-                    this.completed(result, readBuffer.position());
+                // FIX: UNCONDITIONAL COMPACT - Safely expand or compact unread bytes
+                if (readBuffer.position() == 0 && readBuffer.limit() == readBuffer.capacity()) {
+                    ByteBuffer newBuffer = ByteBuffer.allocate(readBuffer.capacity() * 2);
+                    newBuffer.put(readBuffer);
+                    readBuffer = newBuffer;
                 } else {
-                    readBuffer.clear();
-                    connectionMetadata.channel.read(readBuffer, 0, this);
+                    readBuffer.compact();
                 }
+
+                connectionMetadata.channel.read(readBuffer, 0, this);
             }
 
             private void processQueryRequest(ByteBuffer buffer) {
                 try {
-                    buffer.getInt();
+                    // Note: We removed buffer.getInt() here because the Staging Buffer logic already consumed it!
                     var payload = QueryRequestEvent.read(buffer);
                     LOGGER.log(INFO, ">>> [VMS] Received Request | Table: " + payload.tableName() + " | Mode: " + payload.mode());
 
@@ -865,6 +910,7 @@ public final class VmsEventHandler extends ModbHttpServer {
                         });
                     }
                     else if (payload.mode() == QueryRequestEvent.MODE_RECEIVE_AND_JOIN) {
+                        // YOUR NEW LOGIC IS HERE:
                         JoinRoutingData jrd = JoinRoutingData.fromBytes(payload.routingData());
                         activeJoins.put(payload.queryId(),
                                 new JoinContext(payload, (AsynchronousSocketChannel) connectionMetadata.channel, jrd));
@@ -876,7 +922,8 @@ public final class VmsEventHandler extends ModbHttpServer {
                 }
             }
 
-            private void executeStandardScan(QueryRequestEvent.QueryPayload payload, List<TransactionManager.SimplePredicate> predicates, TransactionManager tm, AsynchronousSocketChannel outputChannel) {                Object indexObj = tm.getIndex(payload.tableName());
+            private void executeStandardScan(QueryRequestEvent.QueryPayload payload, List<TransactionManager.SimplePredicate> predicates, TransactionManager tm, AsynchronousSocketChannel outputChannel) {
+                Object indexObj = tm.getIndex(payload.tableName());
                 Iterator<Long> addressIterator = tm.getScanIterator(payload.tableName(), predicates);
 
                 if (indexObj == null || addressIterator == null) return;

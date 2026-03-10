@@ -16,25 +16,38 @@ public final class NewOrderWareIn {
     public int[] qty;
     public boolean allLocal;
 
-    @SuppressWarnings("unused")
-    public NewOrderWareIn(){}
+    /**
+     * HATtrick: which T-client thread submitted this transaction.
+     * Threaded through WareOut → InvOut → OrderService so the terminal
+     * VMS can update the correct FRESHNESS row.
+     */
+    public int client_id;
 
-    public NewOrderWareIn(int w_id, int d_id, int c_id, int[] itemsIds, int[] supWares, int[] qty, boolean allLocal) {
-            this.w_id = w_id;
-            this.d_id = d_id;
-            this.c_id = c_id;
-            this.itemsIds = itemsIds;
-            this.supWares = supWares;
-            this.qty = qty;
-            this.allLocal = allLocal;
+    @SuppressWarnings("unused")
+    public NewOrderWareIn() {}
+
+    /** Backward-compatible constructor for WorkloadUtils / legacy call sites (client_id = 0). */
+    public NewOrderWareIn(int w_id, int d_id, int c_id,
+                          int[] itemsIds, int[] supWares, int[] qty,
+                          boolean allLocal) {
+        this(w_id, d_id, c_id, itemsIds, supWares, qty, allLocal, 0);
     }
 
-    /**
-     * In principle, it could be solely w_id. However, it is required that partition IDs from different transactions "match" in schema
-     * If this partition ID is only composed by w_id, processPayment would not be able to identify a conflict with a concurrent new order
-     */
+    public NewOrderWareIn(int w_id, int d_id, int c_id,
+                          int[] itemsIds, int[] supWares, int[] qty,
+                          boolean allLocal, int client_id) {
+        this.w_id      = w_id;
+        this.d_id      = d_id;
+        this.c_id      = c_id;
+        this.itemsIds  = itemsIds;
+        this.supWares  = supWares;
+        this.qty       = qty;
+        this.allLocal  = allLocal;
+        this.client_id = client_id;
+    }
+
     @SuppressWarnings("unused")
-    public WareDistId getId(){
+    public WareDistId getId() {
         return new WareDistId(this.w_id, 0);
     }
 
@@ -48,21 +61,21 @@ public final class NewOrderWareIn {
                 + ",\"supWares\":" + Arrays.toString(supWares)
                 + ",\"qty\":" + Arrays.toString(qty)
                 + ",\"allLocal\":" + allLocal
+                + ",\"client_id\":" + client_id
                 + "}";
     }
 
     @Override
     public boolean equals(Object o) {
-        if (o instanceof NewOrderWareIn that){
+        if (o instanceof NewOrderWareIn that) {
             if (this.w_id != that.w_id) return false;
             if (this.d_id != that.d_id) return false;
             if (this.c_id != that.c_id) return false;
             if (this.allLocal != that.allLocal) return false;
-            // have to do this because remaining fields are filled as -1
             int maxSize = Math.min(this.itemsIds.length, that.itemsIds.length);
             int idx = 0;
-            while(idx < maxSize){
-                if(this.itemsIds[idx] != that.itemsIds[idx]){
+            while (idx < maxSize) {
+                if (this.itemsIds[idx] != that.itemsIds[idx]) {
                     return this.itemsIds[idx] == -1 || that.itemsIds[idx] == -1;
                 }
                 idx++;
@@ -83,5 +96,4 @@ public final class NewOrderWareIn {
         result = 31 * result + (this.allLocal ? 1 : 0);
         return result;
     }
-
 }
