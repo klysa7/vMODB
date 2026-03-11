@@ -109,6 +109,17 @@ public final class VmsQueryWorker extends StoppableRunnable {
                 while (this.byteRecordIterator.hasNext()) {
                     byte[] joinedData = this.byteRecordIterator.next();
 
+                    // DEBUG: dump first row bytes so we can verify c_first is encoded
+                    if (count == 0) {
+                        StringBuilder hex = new StringBuilder();
+                        for (int i = 0; i < Math.min(joinedData.length, 80); i++) {
+                            hex.append(String.format("%02X ", joinedData[i]));
+                        }
+                        System.out.println(">>> [DEBUG WORKER] Table=" + queryPayload.tableName()
+                                + " | row[0] size=" + joinedData.length
+                                + " | bytes: " + hex);
+                    }
+
                     if (writeBuffer.remaining() < joinedData.length + 4) {
                         this.sendBuffer(writeBuffer);
                         writeBuffer = this.retrieveByteBuffer();

@@ -16,7 +16,7 @@ public final class GatewayHttpHandler implements HttpHandler {
     static final String PATH_AVG    = "/olap/orders/avg";
 
     static final String SQL_JOIN = """
-        SELECT c.c_id, c.c_first, o.o_id
+        SELECT c.c_id, c.c_last, o.o_id
         FROM warehouse.customer c
         JOIN "order".orders o
         ON c.c_w_id = o.o_w_id

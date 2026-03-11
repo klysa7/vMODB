@@ -30,6 +30,8 @@ public class VmsResultIterator implements Iterator<Object[]> {
     private final Queue<Object[]> rowBuffer = new LinkedList<>();
     private boolean isEos = false;
     private long recordsRead = 0;
+    // DEBUG: only log first 3 rows
+    private int debugRowCount = 0;
 
     public VmsResultIterator(Socket socket, Object inputStream,
                              List<ColumnDescriptor> descriptors, String tableName) {
@@ -73,6 +75,28 @@ public class VmsResultIterator implements Iterator<Object[]> {
                     dataInputStream.readFully(rowData);
                     remaining -= (4 + rowSize);
 
+                    // DEBUG: print first 3 raw rows received at gateway side
+                    if (debugRowCount < 3) {
+                        StringBuilder hex = new StringBuilder();
+                        for (int i = 0; i < Math.min(rowData.length, 80); i++) {
+                            hex.append(String.format("%02X ", rowData[i]));
+                        }
+                        System.out.println(">>> [DEBUG ITERATOR] table=" + tableName
+                                + " | row[" + debugRowCount + "] size=" + rowSize
+                                + " | bytes: " + hex);
+                        // Also dump descriptor layout so we know what offset c_first is expected at
+                        if (debugRowCount == 0 && descriptors != null) {
+                            for (int i = 0; i < descriptors.size(); i++) {
+                                ColumnDescriptor d = descriptors.get(i);
+                                System.out.println(">>> [DEBUG DESCRIPTOR] col[" + i + "] name=" + d.name()
+                                        + " type=" + d.type()
+                                        + " offset=" + d.byteOffset()
+                                        + " size=" + d.byteSize());
+                            }
+                        }
+                        debugRowCount++;
+                    }
+
                     rowBuffer.add(parseRowData(rowData));
                     recordsRead++;
                 }
@@ -115,7 +139,7 @@ public class VmsResultIterator implements Iterator<Object[]> {
                 case BOOLEAN, BOOL -> buf.get(offset) != 0;
                 case DATE, TIMESTAMP -> buf.getLong(offset);
                 case VARCHAR, STRING, BYTES -> readString(rowData, offset, d.byteSize());
-                default                 -> null;
+                default -> null;
             };
         }
 
@@ -123,15 +147,13 @@ public class VmsResultIterator implements Iterator<Object[]> {
     }
 
     private static String readString(byte[] data, int offset, int size) {
-        int end = offset + (size & ~1);
-
-        while (end >= offset + 2
-                && data[end - 1] == 0
-                && data[end - 2] == 0) {
-            end -= 2;
+        int end = offset;
+        int limit = Math.min(offset + size, data.length);
+        while (end < limit && data[end] != 0) {
+            end++;
         }
         if (end <= offset) return "";
-        return new String(data, offset, end - offset, StandardCharsets.UTF_16LE);
+        return new String(data, offset, end - offset, StandardCharsets.UTF_8);
     }
 
     @Override

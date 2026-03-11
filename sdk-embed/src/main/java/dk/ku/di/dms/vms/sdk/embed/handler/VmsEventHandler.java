@@ -876,17 +876,19 @@ public final class VmsEventHandler extends ModbHttpServer {
                 }
             }
 
-            private void executeStandardScan(QueryRequestEvent.QueryPayload payload, List<TransactionManager.SimplePredicate> predicates, TransactionManager tm, AsynchronousSocketChannel outputChannel) {                Object indexObj = tm.getIndex(payload.tableName());
-                Iterator<Long> addressIterator = tm.getScanIterator(payload.tableName(), predicates);
+            private void executeStandardScan(QueryRequestEvent.QueryPayload payload,
+                                             List<TransactionManager.SimplePredicate> predicates,
+                                             TransactionManager tm,
+                                             AsynchronousSocketChannel outputChannel) {
 
-                if (indexObj == null || addressIterator == null) return;
+                Iterator<byte[]> byteIterator = tm.getScanIterator(
+                        payload.tableName(), predicates, payload.snapshotId());
 
-                UniqueHashBufferIndex index = (UniqueHashBufferIndex) indexObj;
+                if (byteIterator == null) return;
 
                 VmsQueryWorker worker = new VmsQueryWorker(
                         outputChannel,
-                        index,
-                        addressIterator,
+                        byteIterator,
                         payload,
                         options.networkBufferSize(),
                         options.networkSendTimeout()

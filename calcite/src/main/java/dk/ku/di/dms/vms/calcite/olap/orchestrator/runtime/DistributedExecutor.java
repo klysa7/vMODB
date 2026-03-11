@@ -125,13 +125,34 @@ public final class DistributedExecutor {
                         remoteColOffsets, remoteColTypes, rightKeys, remoteRecordSize
                 ).toBytes();
 
-                LOGGER.log(INFO, ">>> [GATEWAY] Scheduling Broadcast Trigger...");
+                // -----------------------------------------------------------------
+                // B3 FIX: allocate queryId ONCE and share it with both the probe
+                // scan and the broadcast trigger.
+                //
+                // Root cause of the hang: the probe StreamingScanOperator.open()
+                // was auto-incrementing the counter (→ queryId=1) and storing
+                // JoinContext at key 1 in activeJoins. Then triggerBroadcast was
+                // called with plan.snapshot (e.g. =2) as queryId, so warehouse
+                // tagged every row and the EndOfStream marker with queryId=2.
+                // activeJoins.get(2) returned null → all 30,000 rows silently
+                // dropped → join never started → gateway blocked forever.
+                //
+                // Fix: allocate joinQueryId here via StreamingScanOperator.nextQueryId(),
+                // pass it explicitly to the 4-arg StreamingScanOperator constructor
+                // (so open() uses it instead of auto-incrementing) and to
+                // triggerBroadcast as the first id argument. snapshotId stays
+                // plan.snapshot in both calls.
+                // -----------------------------------------------------------------
+                long joinQueryId = StreamingScanOperator.nextQueryId();
+
+                LOGGER.log(INFO, ">>> [GATEWAY] Scheduling Broadcast Trigger... joinQueryId=" + joinQueryId);
                 String targetAddress = "localhost:" + rightPort;
                 java.util.concurrent.Executors.newSingleThreadScheduledExecutor().schedule(() -> {
                     try {
-                        LOGGER.log(INFO, ">>> [TRIGGER THREAD] Firing Broadcast from " + leftTable + " to " + targetAddress);
+                        LOGGER.log(INFO, ">>> [TRIGGER THREAD] Firing Broadcast from " + leftTable
+                                + " to " + targetAddress + " queryId=" + joinQueryId);
                         gatewayClient.triggerBroadcast(
-                                "localhost", leftPort, plan.snapshot, plan.snapshot,
+                                "localhost", leftPort, joinQueryId, plan.snapshot,
                                 leftTable, leftPlan.predicates, targetAddress
                         );
                         LOGGER.log(INFO, ">>> [TRIGGER THREAD] Successfully signaled Warehouse VMS.");
@@ -140,7 +161,7 @@ public final class DistributedExecutor {
                     }
                 }, 100, java.util.concurrent.TimeUnit.MILLISECONDS);
 
-                int[]  allRightOffsets = computeDataOffsets(rightCols);
+                int[] allRightOffsets = computeDataOffsets(rightCols);
 
                 List<ColumnDescriptor> combinedDescriptors = new ArrayList<>();
                 List<String> combinedColumns = new ArrayList<>();
@@ -169,7 +190,9 @@ public final class DistributedExecutor {
                         combinedDescriptors
                 );
 
-                return new StreamingScanOperator(gatewayClient, receiverJoinPlan, plan.snapshot);
+                // Pass joinQueryId explicitly so the probe operator and the
+                // broadcast trigger share the same activeJoins routing key.
+                return new StreamingScanOperator(gatewayClient, receiverJoinPlan, plan.snapshot, joinQueryId);
             }
 
             return new LocalJoinOperator(
