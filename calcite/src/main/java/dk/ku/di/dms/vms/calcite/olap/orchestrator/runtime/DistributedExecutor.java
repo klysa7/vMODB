@@ -4,7 +4,8 @@ import dk.ku.di.dms.vms.calcite.client.ColumnDescriptor;
 import dk.ku.di.dms.vms.calcite.client.VmsGatewayClient;
 import dk.ku.di.dms.vms.calcite.olap.orchestrator.planning.DistributedPlan;
 import dk.ku.di.dms.vms.calcite.olap.orchestrator.planning.DistributedPlanner;
-import dk.ku.di.dms.vms.calcite.olap.orchestrator.planning.VmsSubplan;
+import dk.ku.di.dms.vms.calcite.olap.orchestrator.planning.JoinSubPlan;
+import dk.ku.di.dms.vms.calcite.olap.orchestrator.planning.ScanSubPlan;
 import dk.ku.di.dms.vms.calcite.olap.orchestrator.planning.ops.*;
 import dk.ku.di.dms.vms.calcite.olap.orchestrator.planning.ops.AggregateDefinition;
 import dk.ku.di.dms.vms.calcite.olap.orchestrator.runtime.ops.LocalAggregateOperator;
@@ -15,6 +16,7 @@ import dk.ku.di.dms.vms.calcite.olap.queryPlanner.catalog.CatalogColumn;
 import dk.ku.di.dms.vms.calcite.olap.queryPlanner.catalog.CatalogType;
 import dk.ku.di.dms.vms.modb.common.schema.network.query.JoinRoutingData;
 
+import java.net.URI;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -40,21 +42,16 @@ public final class DistributedExecutor {
         LOGGER.log(INFO, ">>> [EXECUTOR] Starting Execution for Snapshot #" + distributedPlan.snapshot);
 
         CoordinatorOperator root = buildOperatorTree(distributedPlan.root, distributedPlan);
-
-        LOGGER.log(INFO, "--> [EXECUTOR] Opening Pipeline...");
         root.open();
 
         List<List<Object>> allRows = new ArrayList<>();
         List<Object[]> batch;
         long totalRows = 0;
 
-        LOGGER.log(INFO, "--> [EXECUTOR] Entering Fetch Loop...");
         try {
             while ((batch = root.nextBatch()) != null) {
                 totalRows += batch.size();
-                for (Object[] row : batch) {
-                    allRows.add(Arrays.asList(row));
-                }
+                for (Object[] row : batch) allRows.add(Arrays.asList(row));
             }
         } catch (Exception e) {
             LOGGER.log(ERROR, "Error during execution", e);
@@ -66,13 +63,12 @@ public final class DistributedExecutor {
 
         long endNano = System.nanoTime();
         double durationMs = (endNano - startNano) / 1_000_000.0;
-        double throughput = (durationMs > 0) ? (totalRows / (durationMs / 1000.0)) : 0.0;
-
-        System.out.println("========================================================");
+        System.out.printf("========================================================%n");
         System.out.printf("   Total Rows Returned : %d%n", totalRows);
         System.out.printf("   Total Latency (ms)  : %.3f ms%n", durationMs);
-        System.out.printf("   Throughput (rows/s) : %.2f rows/sec%n", throughput);
-        System.out.println("========================================================\n");
+        System.out.printf("   Throughput (rows/s) : %.2f rows/sec%n",
+                durationMs > 0 ? totalRows / (durationMs / 1000.0) : 0.0);
+        System.out.printf("========================================================%n%n");
 
         return new PushdownResponse("gateway", distributedPlan.snapshot, null, allRows);
     }
@@ -80,8 +76,10 @@ public final class DistributedExecutor {
     private CoordinatorOperator buildOperatorTree(CoordinatorOperatorDefinition def, DistributedPlan plan) {
 
         if (def instanceof ScanDefinition scanDef) {
-            VmsSubplan subplan = plan.subPlans.stream()
-                    .filter(s -> s.exchangeId.equals(scanDef.exchangeId()))
+            // A7: find the typed subplan — it's a ScanSubplan for plain scans
+            ScanSubPlan subplan = plan.subPlans.stream()
+                    .filter(s -> s instanceof ScanSubPlan ss && ss.exchangeId().equals(scanDef.exchangeId()))
+                    .map(s -> (ScanSubPlan) s)
                     .findFirst().orElseThrow();
             return new StreamingScanOperator(gatewayClient, subplan, plan.snapshot);
         }
@@ -92,26 +90,30 @@ public final class DistributedExecutor {
 
                 LOGGER.log(INFO, "OPTIMIZATION: Converting to Distributed VMS-to-VMS Broadcast Join!");
 
-                VmsSubplan leftPlan = plan.subPlans.stream()
-                        .filter(s -> s.exchangeId.equals(leftScan.exchangeId())).findFirst().get();
-                VmsSubplan rightPlan = plan.subPlans.stream()
-                        .filter(s -> s.exchangeId.equals(rightScan.exchangeId())).findFirst().get();
+                // A7: both sides start as ScanSubplans from the planner
+                ScanSubPlan leftPlan = plan.subPlans.stream()
+                        .filter(s -> s instanceof ScanSubPlan ss && ss.exchangeId().equals(leftScan.exchangeId()))
+                        .map(s -> (ScanSubPlan) s).findFirst().get();
+                ScanSubPlan rightPlan = plan.subPlans.stream()
+                        .filter(s -> s instanceof ScanSubPlan ss && ss.exchangeId().equals(rightScan.exchangeId()))
+                        .map(s -> (ScanSubPlan) s).findFirst().get();
 
-                String leftTable  = ((ScanAllOperation) leftPlan.operation).table;
-                String leftSchema = ((ScanAllOperation) leftPlan.operation).schema;
-                String rightTable = ((ScanAllOperation) rightPlan.operation).table;
-                String rightSchema= ((ScanAllOperation) rightPlan.operation).schema;
+                String leftTable  = ((ScanAllOperation) leftPlan.operation()).table;
+                String leftSchema = ((ScanAllOperation) leftPlan.operation()).schema;
+                String rightTable = ((ScanAllOperation) rightPlan.operation()).table;
+                String rightSchema= ((ScanAllOperation) rightPlan.operation()).schema;
 
-                int leftPort  = resolveTpccPort(leftTable);
-                int rightPort = resolveTpccPort(rightTable);
+                // A1+A7: parse ports from URL, no hardcoded maps
+                int leftPort  = URI.create(leftPlan.url()).getPort();
+                int rightPort = URI.create(rightPlan.url()).getPort();
 
                 int[] leftKeys  = joinDef.leftKeys();
                 int[] rightKeys = joinDef.rightKeys();
 
-                List<CatalogColumn> leftCols  = columnsResolver.columnMetas(leftSchema,  leftTable);
+                List<CatalogColumn> leftCols  = columnsResolver.columnMetas(leftSchema, leftTable);
                 List<CatalogColumn> rightCols = columnsResolver.columnMetas(rightSchema, rightTable);
 
-                int[] allLeftOffsets = computeDataOffsets(leftCols);
+                int[] allLeftOffsets   = computeDataOffsets(leftCols);
                 int   remoteRecordSize = sumByteSizes(leftCols);
 
                 int[]  remoteColOffsets = new int[leftKeys.length];
@@ -122,27 +124,8 @@ public final class DistributedExecutor {
                 }
 
                 byte[] routingData = new JoinRoutingData(
-                        remoteColOffsets, remoteColTypes, rightKeys, remoteRecordSize
-                ).toBytes();
+                        remoteColOffsets, remoteColTypes, rightKeys, remoteRecordSize).toBytes();
 
-                // -----------------------------------------------------------------
-                // B3 FIX: allocate queryId ONCE and share it with both the probe
-                // scan and the broadcast trigger.
-                //
-                // Root cause of the hang: the probe StreamingScanOperator.open()
-                // was auto-incrementing the counter (→ queryId=1) and storing
-                // JoinContext at key 1 in activeJoins. Then triggerBroadcast was
-                // called with plan.snapshot (e.g. =2) as queryId, so warehouse
-                // tagged every row and the EndOfStream marker with queryId=2.
-                // activeJoins.get(2) returned null → all 30,000 rows silently
-                // dropped → join never started → gateway blocked forever.
-                //
-                // Fix: allocate joinQueryId here via StreamingScanOperator.nextQueryId(),
-                // pass it explicitly to the 4-arg StreamingScanOperator constructor
-                // (so open() uses it instead of auto-incrementing) and to
-                // triggerBroadcast as the first id argument. snapshotId stays
-                // plan.snapshot in both calls.
-                // -----------------------------------------------------------------
                 long joinQueryId = StreamingScanOperator.nextQueryId();
 
                 LOGGER.log(INFO, ">>> [GATEWAY] Scheduling Broadcast Trigger... joinQueryId=" + joinQueryId);
@@ -153,8 +136,7 @@ public final class DistributedExecutor {
                                 + " to " + targetAddress + " queryId=" + joinQueryId);
                         gatewayClient.triggerBroadcast(
                                 "localhost", leftPort, joinQueryId, plan.snapshot,
-                                leftTable, leftPlan.predicates, targetAddress
-                        );
+                                leftTable, leftPlan.predicates(), targetAddress);
                         LOGGER.log(INFO, ">>> [TRIGGER THREAD] Successfully signaled Warehouse VMS.");
                     } catch (Exception e) {
                         LOGGER.log(ERROR, ">>> [TRIGGER THREAD] Failed to signal Warehouse!", e);
@@ -168,45 +150,41 @@ public final class DistributedExecutor {
 
                 for (int i = 0; i < leftCols.size(); i++) {
                     CatalogColumn col = leftCols.get(i);
-                    combinedDescriptors.add(new ColumnDescriptor(
-                            col.name(), col.type(), allLeftOffsets[i], col.byteSize()));
+                    combinedDescriptors.add(new ColumnDescriptor(col.name(), col.type(), allLeftOffsets[i], col.byteSize()));
                     combinedColumns.add(col.name());
                 }
                 for (int i = 0; i < rightCols.size(); i++) {
                     CatalogColumn col = rightCols.get(i);
-                    combinedDescriptors.add(new ColumnDescriptor(
-                            col.name(), col.type(),
-                            remoteRecordSize + allRightOffsets[i],
-                            col.byteSize()));
+                    combinedDescriptors.add(new ColumnDescriptor(col.name(), col.type(), remoteRecordSize + allRightOffsets[i], col.byteSize()));
                     combinedColumns.add(col.name());
                 }
 
-                VmsSubplan receiverJoinPlan = new VmsSubplan(
-                        rightPlan.vmsName, rightPlan.url, rightPlan.exchangeId, rightPlan.operation,
+                // A7: the probe side becomes a JoinSubplan — its role is now
+                // explicit. No mode byte, no null check on columnDescriptors.
+                JoinSubPlan receiverJoinPlan = new JoinSubPlan(
+                        rightPlan.vmsName(),
+                        rightPlan.url(),
+                        rightPlan.exchangeId(),
+                        rightPlan.operation(),
                         combinedColumns,
-                        rightPlan.predicates,
-                        (byte) 2,
+                        rightPlan.predicates(),
                         routingData,
                         combinedDescriptors
                 );
 
-                // Pass joinQueryId explicitly so the probe operator and the
-                // broadcast trigger share the same activeJoins routing key.
                 return new StreamingScanOperator(gatewayClient, receiverJoinPlan, plan.snapshot, joinQueryId);
             }
 
             return new LocalJoinOperator(
                     buildOperatorTree(joinDef.left(), plan),
                     buildOperatorTree(joinDef.right(), plan),
-                    joinDef.leftKeys(), joinDef.rightKeys()
-            );
+                    joinDef.leftKeys(), joinDef.rightKeys());
         }
 
         if (def instanceof AggregateDefinition aggDef) {
             return new LocalAggregateOperator(
                     buildOperatorTree(aggDef.input(), plan),
-                    aggDef.groupByIndices(),
-                    aggDef.aggCalls());
+                    aggDef.groupByIndices(), aggDef.aggCalls());
         }
 
         if (def instanceof ProjectDefinition projDef) {
@@ -220,10 +198,7 @@ public final class DistributedExecutor {
     private static int[] computeDataOffsets(List<CatalogColumn> cols) {
         int[] offsets = new int[cols.size()];
         int acc = 0;
-        for (int i = 0; i < cols.size(); i++) {
-            offsets[i] = acc;
-            acc += cols.get(i).byteSize();
-        }
+        for (int i = 0; i < cols.size(); i++) { offsets[i] = acc; acc += cols.get(i).byteSize(); }
         return offsets;
     }
 
@@ -235,18 +210,11 @@ public final class DistributedExecutor {
 
     private static byte catalogTypeToCode(CatalogType type) {
         return switch (type) {
-            case INT                -> JoinRoutingData.TYPE_INT;
-            case LONG, BIGINT       -> JoinRoutingData.TYPE_LONG;
-            case DOUBLE             -> JoinRoutingData.TYPE_DOUBLE;
-            case FLOAT              -> JoinRoutingData.TYPE_FLOAT;
-            default                 -> JoinRoutingData.TYPE_INT;
+            case INT            -> JoinRoutingData.TYPE_INT;
+            case LONG, BIGINT   -> JoinRoutingData.TYPE_LONG;
+            case DOUBLE         -> JoinRoutingData.TYPE_DOUBLE;
+            case FLOAT          -> JoinRoutingData.TYPE_FLOAT;
+            default             -> JoinRoutingData.TYPE_INT;
         };
-    }
-
-    private int resolveTpccPort(String tableName) {
-        tableName = tableName.toLowerCase();
-        if (tableName.contains("warehouse") || tableName.contains("customer")) return 8001;
-        if (tableName.contains("item") || tableName.contains("stock")) return 8002;
-        return 8003;
     }
 }
