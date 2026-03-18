@@ -108,6 +108,11 @@ public final class VmsEventHandler extends ModbHttpServer {
             Executors.newSingleThreadScheduledExecutor(
                     r -> Thread.ofPlatform().name("join-cleaner").daemon(true).unstarted(r));
 
+
+    private final java.util.concurrent.ExecutorService olapExecutor =
+            Executors.newFixedThreadPool(2,
+                    r -> Thread.ofPlatform().name("olap-query").daemon(true).unstarted(r));
+
     /** SERVER SOCKET **/
     private final AsynchronousServerSocketChannel serverSocket;
     private final AsynchronousChannelGroup group;
@@ -697,19 +702,26 @@ public final class VmsEventHandler extends ModbHttpServer {
 
                 byte type = readBuffer.get();
                 if (type == QueryRequestEvent.QUERY_REQUEST_TYPE) {
-                    try {
-                        processQueryRequest(readBuffer);
-                    } catch (Exception e) {
-                        LOGGER.log(ERROR, ">>> [VMS] FATAL ERROR processing QueryRequest!", e);
-                    }
+                    // Copy remaining buffer bytes so the network thread can
+                    // immediately proceed to the next read while the OLAP
+                    // executor processes the query on its own thread.
+                    // Without this copy, processQueryRequest would run inline
+                    // on the channel group thread, blocking OLTP I/O.
+                    ByteBuffer queryCopy = ByteBuffer.allocate(readBuffer.remaining());
+                    queryCopy.put(readBuffer);
+                    queryCopy.flip();
+                    olapExecutor.submit(() -> {
+                        try {
+                            processQueryRequest(queryCopy);
+                        } catch (Exception e) {
+                            LOGGER.log(ERROR, ">>> [VMS] FATAL ERROR processing QueryRequest!", e);
+                        }
+                    });
+                    // Don't wait for query — immediately set up next read
+                    readBuffer.clear();
+                    connectionMetadata.channel.read(readBuffer, 0, this);
                 } else {
                     LOGGER.log(ERROR, ">>> [VMS] Unknown message type from Gateway: " + type);
-                    readBuffer.position(readBuffer.limit());
-                }
-
-                if (readBuffer.hasRemaining()) {
-                    this.completed(result, readBuffer.position());
-                } else {
                     readBuffer.clear();
                     connectionMetadata.channel.read(readBuffer, 0, this);
                 }
@@ -1150,7 +1162,8 @@ public final class VmsEventHandler extends ModbHttpServer {
 
     public void close() {
         this.stop();
-        this.joinCleaner.shutdownNow(); // A3: stop the cleanup task on shutdown
+        this.joinCleaner.shutdownNow();
+        this.olapExecutor.shutdownNow();
         for(var consumer : this.consumerVmsContainerMap.entrySet()){
             consumer.getValue().stop();
         }
