@@ -47,6 +47,7 @@ public final class HATtrickRunner {
     private final int                       numWare;
     private final Tuple<Integer, String>[]  txRatio;
     private final Map<String, Integer>      txRatioMap;
+    private final String                    queryPath;  // e.g. "/olap/q1.1"
 
     // ── Result record ─────────────────────────────────────────────────────────
 
@@ -64,7 +65,8 @@ public final class HATtrickRunner {
                           int measurementSecs,
                           int numWare,
                           Tuple<Integer, String>[] txRatio,
-                          Map<String, Integer> txRatioMap) {
+                          Map<String, Integer> txRatioMap,
+                          String queryPath) {
         this.coordinator    = coordinator;
         this.gatewayBaseUrl = gatewayBaseUrl;
         this.tauValues      = tauValues;
@@ -74,6 +76,21 @@ public final class HATtrickRunner {
         this.numWare        = numWare;
         this.txRatio        = txRatio;
         this.txRatioMap     = txRatioMap;
+        this.queryPath      = queryPath;
+    }
+
+    /** Backwards-compatible constructor — defaults to Q1 */
+    public HATtrickRunner(Coordinator coordinator,
+                          String gatewayBaseUrl,
+                          int[] tauValues,
+                          int[] alphaValues,
+                          int warmupSecs,
+                          int measurementSecs,
+                          int numWare,
+                          Tuple<Integer, String>[] txRatio,
+                          Map<String, Integer> txRatioMap) {
+        this(coordinator, gatewayBaseUrl, tauValues, alphaValues,
+                warmupSecs, measurementSecs, numWare, txRatio, txRatioMap, "/olap/q1");
     }
 
     // ── Main entry ────────────────────────────────────────────────────────────
@@ -83,9 +100,11 @@ public final class HATtrickRunner {
 
         System.out.println("\n========================================================");
         System.out.println("  HATtrick Throughput Frontier Experiment");
+        System.out.printf ("  Query:  %s%n", queryPath);
         System.out.printf ("  Grid: τ∈%s  α∈%s%n",
                 Arrays.toString(tauValues), Arrays.toString(alphaValues));
         System.out.printf ("  Warmup=%ds  Measurement=%ds%n", warmupSecs, measurementSecs);
+        System.out.println("  Note: longer measurement windows reduce batch boundary noise.");
         System.out.println("========================================================\n");
 
         // ── Generate workload input files ─────────────────────────────────
@@ -187,21 +206,25 @@ public final class HATtrickRunner {
             );
         }
 
-        // ── Start A-clients ────────────────────────────────────────────────
+        // ── Warmup ────────────────────────────────────────────────────────
+        // T-workers run during warmup (already started above).
+        // A-clients are NOT started yet — they should only run during
+        // the measurement window, not waste queries on warmup time.
+        System.out.printf("  Warmup %ds...%n", warmupSecs);
+        Thread.sleep(warmupSecs * 1_000L);
+
+        // ── Start A-clients at the beginning of measurement window ────────
         AtomicBoolean aRunning = new AtomicBoolean(true);
         ExecutorService aPool = alpha > 0
                 ? Executors.newFixedThreadPool(alpha)
                 : null;
         List<HATtrickAClientWorker> aWorkers = new ArrayList<>(alpha);
         for (int i = 0; i < alpha; i++) {
-            HATtrickAClientWorker w = new HATtrickAClientWorker(i, gatewayBaseUrl, aRunning);
+            HATtrickAClientWorker w = new HATtrickAClientWorker(
+                    i, gatewayBaseUrl, queryPath, aRunning);
             aWorkers.add(w);
             aPool.submit(w);
         }
-
-        // ── Warmup ────────────────────────────────────────────────────────
-        System.out.printf("  Warmup %ds...%n", warmupSecs);
-        Thread.sleep(warmupSecs * 1_000L);
 
         // ── Snapshot at start of measurement window ───────────────────────
         long tStart      = lastCommittedTid.get();
@@ -334,7 +357,8 @@ public final class HATtrickRunner {
 
     private void writeCsv(List<GridPoint> results) throws IOException {
         String ts = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"));
-        String filename = "hattrick_frontier_" + ts + ".csv";
+        String queryLabel = queryPath.replace("/olap/", "").replace(".", "_");
+        String filename = "hattrick_" + queryLabel + "_" + ts + ".csv";
         try (BufferedWriter w = new BufferedWriter(new FileWriter(filename))) {
             w.write("tau,alpha,t_tps,a_qps");
             w.newLine();

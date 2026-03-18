@@ -564,13 +564,16 @@ public final class PrimaryIndex implements IMultiVersionIndex {
     private final class PrimaryIndexIteratorDisk implements Iterator<Object[]> {
         private final TransactionContext txCtx;
         private final IRecordIterator<IKey> iterator;
-        private final Set<IKey> updatesPerKeyMapCopy;
         private Object[] currRecord;
 
         public PrimaryIndexIteratorDisk(TransactionContext txCtx) {
             this.txCtx = txCtx;
             this.iterator = rawIndex.iterator();
-            this.updatesPerKeyMapCopy = new HashSet<>(updatesPerKeyMap.keySet());
+            // No copy of updatesPerKeyMap — use direct ConcurrentHashMap.get() instead.
+            // The copy was O(n) where n = all entries ever written to this index.
+            // After 70,000 new_orders × 10 order_lines = 700,000 entries, every scan
+            // allocated a 700,000-entry HashSet before reading a single row.
+            // ConcurrentHashMap.get() is O(1) and thread-safe without copying.
         }
 
         @SuppressWarnings("unchecked")
@@ -580,18 +583,29 @@ public final class PrimaryIndex implements IMultiVersionIndex {
                 long address = this.iterator.address();
                 this.currRecord = ((ReadOnlyBufferIndex<IKey>)rawIndex).readFromIndex(address + Schema.RECORD_HEADER);
                 IKey nextKey = KeyUtils.buildRecordKey(rawIndex.schema().getPrimaryKeyColumns(), this.currRecord);
-                if(this.updatesPerKeyMapCopy.remove(nextKey)){
-                    OperationSetOfKey opSet = updatesPerKeyMap.get(nextKey);
-                    if(opSet == null) {
+
+                // Fast path: if snapshotId=0 (all current OLAP queries), no OLTP
+                // version can be visible (TIDs start at 1). Skip the map lookup entirely.
+                // This avoids 300,000 ConcurrentHashMap.get() calls under heavy write
+                // contention, which was causing Q1.1 to take >30 seconds at τ>0.
+                long snapshotToUse = this.txCtx.readOnly ? this.txCtx.lastTid : this.txCtx.tid;
+                if (snapshotToUse == 0) {
+                    // rawIndex version is the only visible version at snapshot 0
+                    return true;
+                }
+
+                OperationSetOfKey opSet = updatesPerKeyMap.get(nextKey);
+                if(opSet != null) {
+                    Entry<Long, TransactionWrite> entry = opSet.floorEntry(snapshotToUse);
+                    if(entry == null) {
+                        // No version at or before snapshotId in the version chain.
+                        // The row exists in rawIndex (we just read it), so use that —
+                        // it represents the state before any OLTP touched this key.
+                        // currRecord is already set to the rawIndex version above.
                         return true;
                     }
-                    Entry<Long, TransactionWrite> entry = opSet.floorEntry(this.txCtx.readOnly ? this.txCtx.lastTid : this.txCtx.tid);
-                    if(entry == null || entry.val().type == WriteType.DELETE) {
-                        if(this.iterator.hasNext()) {
-                            continue;
-                        } else {
-                            return false;
-                        }
+                    if(entry.val().type == WriteType.DELETE) {
+                        continue;  // deleted at or before snapshotId — not visible
                     }
                     this.currRecord = entry.val().record;
                 }

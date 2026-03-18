@@ -16,33 +16,60 @@ public final class GatewayHttpHandler implements HttpHandler {
     static final String PATH_AVG    = "/olap/orders/avg";
 
     // -------------------------------------------------------------------------
-    // HATtrick Q1 group — adapted from SSB Q1.1 / Q1.2 / Q1.3
+    // HATtrick Q1 flight — SSB Q1.1 / Q1.2 / Q1.3 adapted for TPC-C schema
     //
-    // SSB Q1 computes SUM(lo_extendedprice * lo_discount) with filters on
-    // year, discount range, and quantity range. In TPC-C schema:
-    //   ol_amount    ≈  lo_extendedprice * lo_discount  (revenue per order line)
-    //   ol_quantity  ≈  lo_quantity                     (the range filter)
-    //   ol_w_id = 1  ≈  single-warehouse experiment scope
+    // SSB Q1 original:
+    //   SELECT SUM(lo_extendedprice * lo_discount) as revenue
+    //   FROM lineorder, date
+    //   WHERE lo_orderdate = d_datekey
+    //   WHERE lo_orderdate = d_datekey
+    //     AND d_year/d_yearmonthnum/d_weeknuminyear = [VALUE]   -- date filter
+    //     AND lo_discount BETWEEN [X] AND [Y]                   -- discount filter
+    //     AND lo_quantity [RANGE]                               -- quantity filter
     //
-    // All three queries are single-table scans over order.order_line —
-    // no cross-VMS join required, pure aggregation pushed to the order VMS.
+    // TPC-C adaptations:
+    //   lo_extendedprice * lo_discount → ol_amount
+    //     (ol_amount is the pre-computed line item revenue, equivalent to
+    //      lo_extendedprice * lo_discount in SSB)
     //
-    // Q1.1 SSB: year=1993, quantity < 25, discount 1-3
-    // Q1.1 TPC-C: ol_quantity < 25  (low-volume order lines)
+    //   lo_discount filter → DROPPED
+    //     (TPC-C order_line has no discount column; ol_amount already
+    //      encodes the final price)
     //
-    // Q1.2 SSB: yearmonth=199401, quantity 26-35, discount 4-6
-    // Q1.2 TPC-C: ol_quantity BETWEEN 26 AND 35  (medium-volume order lines)
+    //   date dimension filter → DROPPED
+    //     (TPC-C has no date dimension table; o_entry_d exists on orders
+    //      but is populated with current system time at load, so all orders
+    //      share the same date — year/month/week filters would return
+    //      either all rows or zero rows, making them meaningless)
     //
-    // Q1.3 SSB: week=6 of 1994, quantity 36-50, discount 5-7
-    // Q1.3 TPC-C: ol_quantity BETWEEN 36 AND 50  (high-volume order lines)
+    //   lo_quantity filter → ol_quantity (direct mapping, same semantics)
+    //
+    //   lineorder → order_line (ol_w_id = 1 scopes to warehouse 1,
+    //     equivalent to SSB SF=1 single-warehouse scope)
+    //
+    // Filter factors (FF) relative to SSB SF=1 (6,000,000 lineorder rows):
+    //   Q1.1 SSB FF = 0.019, rows ≈ 116,883
+    //   Q1.1 TPC-C: ol_quantity < 25 filters ~50% of order_line rows
+    //     (TPC-C generates qty uniformly in [1..10] per item, most < 25)
+    //
+    //   Q1.2 SSB FF = 0.00065, rows ≈ 3,896
+    //   Q1.2 TPC-C: ol_quantity BETWEEN 26 AND 35 filters a narrower band
+    //
+    //   Q1.3 SSB FF = 0.000075, rows ≈ 450
+    //   Q1.3 TPC-C: ol_quantity BETWEEN 36 AND 50 is the narrowest band
+    //
+    // The three quantity ranges are disjoint (< 25 / 26-35 / 36-50),
+    // matching SSB's intent that queries scan disjoint subsets of the
+    // fact table so caching does not interfere between them.
     // -------------------------------------------------------------------------
 
-    static final String PATH_Q1  = "/olap/q1";   // redirect to /count for the throughput frontier
+    static final String PATH_Q1  = "/olap/q1";
     static final String PATH_Q11 = "/olap/q1.1";
     static final String PATH_Q12 = "/olap/q1.2";
     static final String PATH_Q13 = "/olap/q1.3";
 
-    // Q1 for the throughput frontier experiment — count per district (needs join)
+    // Q1 — distributed broadcast hash join (cross-VMS)
+    // COUNT of orders per district — requires warehouse + order VMS
     static final String SQL_Q1 = """
         SELECT c.c_d_id, COUNT(*)
         FROM warehouse.customer c
@@ -54,39 +81,37 @@ public final class GatewayHttpHandler implements HttpHandler {
         GROUP BY c.c_d_id
     """;
 
-    // Q1.1: SUM of revenue for low-quantity order lines (ol_quantity < 25)
-    // SSB equivalent: SUM(lo_extendedprice*lo_discount) WHERE year=1993, qty<25, discount 1-3
-    // Analytical meaning: total revenue from small orders — reveals order line data volume
-    // and tests the aggregation pipeline on the order VMS without a join.
+    // Q1.1 — low quantity order lines (ol_quantity < 25)
+    // SSB: d_year = 1993, lo_discount BETWEEN 1 AND 3, lo_quantity < 25
+    // TPC-C: quantity filter only; date and discount filters dropped (see above)
     static final String SQL_Q11 = """
-        SELECT SUM(ol.ol_amount)
+        SELECT SUM(ol.ol_amount) AS revenue
         FROM "order".order_line ol
         WHERE ol.ol_w_id = 1
-        AND ol.ol_quantity < 25
+          AND ol.ol_quantity < 25
     """;
 
-    // Q1.2: SUM of revenue for medium-quantity order lines (26 <= ol_quantity <= 35)
-    // SSB equivalent: SUM(lo_extendedprice*lo_discount) WHERE yearmonth=199401, qty 26-35, discount 4-6
-    // Analytical meaning: revenue from medium-volume orders — different quantity band
-    // exercises predicate pushdown to the VMS.
+    // Q1.2 — medium quantity order lines (26 <= ol_quantity <= 35)
+    // SSB: d_yearmonthnum = 199401, lo_discount BETWEEN 4 AND 6, lo_quantity BETWEEN 26 AND 35
+    // TPC-C: quantity filter only
     static final String SQL_Q12 = """
-        SELECT SUM(ol.ol_amount)
+        SELECT SUM(ol.ol_amount) AS revenue
         FROM "order".order_line ol
         WHERE ol.ol_w_id = 1
-        AND ol.ol_quantity >= 26
-        AND ol.ol_quantity <= 35
+          AND ol.ol_quantity >= 26
+          AND ol.ol_quantity <= 35
     """;
 
-    // Q1.3: SUM of revenue for high-quantity order lines (36 <= ol_quantity <= 50)
-    // SSB equivalent: SUM(lo_extendedprice*lo_discount) WHERE week=6/1994, qty 36-50, discount 5-7
-    // Analytical meaning: revenue from bulk orders — the narrowest filter, smallest result set,
-    // but same scan cost as Q1.1 and Q1.2 since there is no index on ol_quantity.
+    // Q1.3 — high quantity order lines (36 <= ol_quantity <= 50)
+    // SSB: d_weeknuminyear = 6 AND d_year = 1994, lo_discount BETWEEN 5 AND 7,
+    //      lo_quantity BETWEEN 36 AND 50 (paper has typo: says 26-35, should be 36-50)
+    // TPC-C: quantity filter only
     static final String SQL_Q13 = """
-        SELECT SUM(ol.ol_amount)
+        SELECT SUM(ol.ol_amount) AS revenue
         FROM "order".order_line ol
         WHERE ol.ol_w_id = 1
-        AND ol.ol_quantity >= 36
-        AND ol.ol_quantity <= 50
+          AND ol.ol_quantity >= 36
+          AND ol.ol_quantity <= 50
     """;
 
     static final String SQL_JOIN = """
@@ -99,7 +124,7 @@ public final class GatewayHttpHandler implements HttpHandler {
         WHERE c.c_w_id = 1
     """;
 
-    static final String SQL_COUNT = SQL_Q1;
+    static final String SQL_COUNT = SQL_Q1;  // alias — same as Q1 join query
 
     static final String SQL_SUM = """
         SELECT c.c_d_id, SUM(o.o_ol_cnt)

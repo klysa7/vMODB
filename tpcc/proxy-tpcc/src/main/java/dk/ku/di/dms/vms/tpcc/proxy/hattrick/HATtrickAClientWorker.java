@@ -8,18 +8,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * HATtrick A-client for the throughput frontier experiment.
+ * HATtrick A-client worker.
  *
- * Issues GET /olap/q1 requests to the Calcite gateway in a tight loop.
- * Q1 = count of orders per district (GROUP BY c_d_id COUNT(*)) — the
- * analytical query that requires the distributed broadcast hash join
- * between customer (warehouse VMS) and orders (order VMS).
+ * Issues GET requests to the Calcite gateway in a tight loop.
+ * The query path is configurable — pass "/olap/q1", "/olap/q1.1",
+ * "/olap/q1.2", or "/olap/q1.3" depending on the experiment.
  *
- * Throughput is measured by the caller via getCompletedCount() sampled
- * at the start and end of the measurement window.
- *
- * No freshness measurement — the professor confirmed it is not needed
- * because vMODB always reads live MVCC data (freshness = 0 by design).
+ * Throughput is measured by the caller via getCompletedCount()
+ * sampled at the start and end of the measurement window.
  */
 public final class HATtrickAClientWorker implements Runnable {
 
@@ -27,33 +23,43 @@ public final class HATtrickAClientWorker implements Runnable {
             System.getLogger(HATtrickAClientWorker.class.getName());
 
     private final int           clientId;
-    private final String        q1Url;       // e.g. "http://localhost:8095/olap/q1"
+    private final String        queryUrl;
     private final AtomicBoolean running;
+    private final AtomicLong    completed = new AtomicLong(0L);
 
-    // completed query count — incremented on every successful HTTP 200
-    private final AtomicLong completed = new AtomicLong(0L);
-
-    // one HttpClient per worker — reuses persistent connections (HTTP/1.1
-    // keep-alive) so TCP overhead is not measured in the QPS number
     private final HttpClient http = HttpClient.newBuilder()
             .version(HttpClient.Version.HTTP_1_1)
             .build();
 
+    /**
+     * @param clientId      worker index (for logging)
+     * @param gatewayBaseUrl  e.g. "http://localhost:8095"
+     * @param queryPath     e.g. "/olap/q1.1"
+     * @param running       set to false to stop the worker
+     */
+    public HATtrickAClientWorker(int clientId,
+                                 String gatewayBaseUrl,
+                                 String queryPath,
+                                 AtomicBoolean running) {
+        this.clientId  = clientId;
+        this.queryUrl  = gatewayBaseUrl + queryPath;
+        this.running   = running;
+    }
+
+    /** Backwards-compatible constructor — defaults to Q1 (broadcast join) */
     public HATtrickAClientWorker(int clientId,
                                  String gatewayBaseUrl,
                                  AtomicBoolean running) {
-        this.clientId = clientId;
-        this.q1Url    = gatewayBaseUrl + "/olap/q1";
-        this.running  = running;
+        this(clientId, gatewayBaseUrl, "/olap/q1", running);
     }
 
     @Override
     public void run() {
         LOG.log(System.Logger.Level.INFO,
-                "A-client {0} started -> {1}", clientId, q1Url);
+                "A-client {0} started -> {1}", clientId, queryUrl);
 
         HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(q1Url))
+                .uri(URI.create(queryUrl))
                 .header("Accept", "application/json")
                 .GET()
                 .build();
@@ -62,21 +68,19 @@ public final class HATtrickAClientWorker implements Runnable {
             try {
                 HttpResponse<String> resp =
                         http.send(request, HttpResponse.BodyHandlers.ofString());
-
                 if (resp.statusCode() == 200) {
                     completed.incrementAndGet();
                 } else {
                     LOG.log(System.Logger.Level.WARNING,
                             "A-client {0}: gateway returned HTTP {1}",
                             clientId, resp.statusCode());
-                    // brief pause to avoid hammering a failing gateway
                     Thread.sleep(200);
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 break;
             } catch (Exception e) {
-                if (!running.get()) break; // normal shutdown
+                if (!running.get()) break;
                 LOG.log(System.Logger.Level.WARNING,
                         "A-client {0} query error: {1}", clientId, e.getMessage());
                 try { Thread.sleep(100); } catch (InterruptedException ie) {
@@ -91,9 +95,5 @@ public final class HATtrickAClientWorker implements Runnable {
                 clientId, completed.get());
     }
 
-    /** Snapshot of completed query count — call at start and end of
-     *  measurement window and subtract to get queries in window. */
-    public long getCompletedCount() {
-        return completed.get();
-    }
+    public long getCompletedCount() { return completed.get(); }
 }

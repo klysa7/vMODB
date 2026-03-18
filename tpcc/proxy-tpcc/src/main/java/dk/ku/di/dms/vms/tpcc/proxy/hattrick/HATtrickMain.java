@@ -16,6 +16,10 @@ public final class HATtrickMain {
     // Phase 1 creates it; Phases 2 and 3 reuse it.
     private static Coordinator sharedCoordinator = null;
 
+    // Track whether Phase 1 has run in this session — if yes, warn before Phase 3
+    // because Phase 1 adds ~700,000 order_line rows that slow OLAP queries.
+    private static boolean phase1WasRun = false;
+
     @SuppressWarnings("unchecked")
     public static void run(Coordinator existingCoordinator) {
         // If the caller already has a coordinator (from a previous option 4 run),
@@ -25,6 +29,14 @@ public final class HATtrickMain {
         Scanner scanner = new Scanner(System.in);
 
         System.out.println("\n=== HATtrick Experiment ===");
+        System.out.println("  Recommended run order on a FRESH system:");
+        System.out.println("    1. Populate VMSes (option 1 in main menu)");
+        System.out.println("    2. Phase 2 — Pure OLAP  (starts coordinator, no writes)");
+        System.out.println("    3. Phase 3 — Full grid  (table still at initial size)");
+        System.out.println("    4. Phase 1 — Pure OLTP  (runs last, table size irrelevant)");
+        System.out.println("  WARNING: running Phase 1 before Phase 3 adds ~700,000");
+        System.out.println("  order_line rows which slows Q1.1/Q1.2/Q1.3 significantly.");
+        System.out.println();
         System.out.println("  1. Phase 1 — Pure OLTP  (verify T-tps)");
         System.out.println("  2. Phase 2 — Pure OLAP  (verify A-qps)");
         System.out.println("  3. Phase 3 — Full grid  (frontier)");
@@ -63,7 +75,7 @@ public final class HATtrickMain {
         switch (phase) {
             case "1" -> runPhase1(props, scanner,
                     txRatio, txRatioMap, numTxInputPerType, numWare);
-            case "2" -> runPhase2(scanner, gatewayUrl);
+            case "2" -> runPhase2(scanner, gatewayUrl, props);
             case "3" -> runPhase3(props, scanner,
                     txRatio, txRatioMap, numTxInputPerType, numWare, gatewayUrl);
             default  -> System.out.println("Invalid choice.");
@@ -144,14 +156,32 @@ public final class HATtrickMain {
             try { Thread.sleep(3000); } catch (InterruptedException ignored) {}
         }
         System.out.println("\nPhase 1 complete. Note down your X^T values above.");
+        phase1WasRun = true;
     }
 
     // ── Phase 2: Pure OLAP ────────────────────────────────────────────────────
     // Uses HATtrickAClientWorker only. No coordinator needed.
     // Iterates over α = {1, 2} to find X^A.
 
-    private static void runPhase2(Scanner scanner, String gatewayUrl) {
+    private static void runPhase2(Scanner scanner, String gatewayUrl,
+                                  Properties props) {
         System.out.println("\n--- Phase 2: Pure OLAP ---");
+        System.out.println("  (Coordinator will be started if not already running");
+        System.out.println("   so the gateway can fetch the catalog.)");
+
+        // Gateway fetches catalog from coordinator on first query.
+        // If coordinator is not running, every query returns HTTP 500.
+        sharedCoordinator = loadCoordinator(sharedCoordinator, props);
+
+        System.out.println("  Available queries:");
+        System.out.println("    q1   — distributed broadcast join (customer + orders)");
+        System.out.println("    q1.1 — SUM(ol_amount) WHERE ol_quantity < 25");
+        System.out.println("    q1.2 — SUM(ol_amount) WHERE ol_quantity 26-35");
+        System.out.println("    q1.3 — SUM(ol_amount) WHERE ol_quantity 36-50");
+        System.out.print("  Query to run [default: q1.1]: ");
+        String queryChoice = scanner.nextLine().trim();
+        String queryPath = queryChoice.isEmpty() ? "/olap/q1.1" : "/olap/" + queryChoice;
+
         System.out.print("A-client counts α (comma-separated) [default: 1,2]: ");
         int[] alphaValues = parseInts(scanner.nextLine().trim(), new int[]{1, 2});
 
@@ -176,12 +206,17 @@ public final class HATtrickMain {
             var aWorkers = new ArrayList<HATtrickAClientWorker>();
 
             for (int i = 0; i < alpha; i++) {
-                var w = new HATtrickAClientWorker(i, gatewayUrl, aRunning);
+                var w = new HATtrickAClientWorker(i, gatewayUrl, queryPath, aRunning);
                 aWorkers.add(w);
                 aPool.submit(w);
             }
 
             try {
+                // Warmup: let first query complete before measuring
+                // (gateway is cold on first request — takes longer than steady state)
+                System.out.println("  Warmup 10s (letting first query complete)...");
+                Thread.sleep(10_000);
+
                 System.out.printf("  Measuring %ds...%n", measurementSecs);
                 long aStart = aWorkers.stream()
                         .mapToLong(HATtrickAClientWorker::getCompletedCount).sum();
@@ -220,6 +255,16 @@ public final class HATtrickMain {
                                   Map<String, Integer> numTxInputPerType,
                                   int numWare, String gatewayUrl) {
         System.out.println("\n--- Phase 3: Full Grid ---");
+
+        System.out.println("  Available queries:");
+        System.out.println("    q1   — distributed broadcast join");
+        System.out.println("    q1.1 — SUM(ol_amount) WHERE ol_quantity < 25");
+        System.out.println("    q1.2 — SUM(ol_amount) WHERE ol_quantity 26-35");
+        System.out.println("    q1.3 — SUM(ol_amount) WHERE ol_quantity 36-50");
+        System.out.print("  Query to run [default: q1.1]: ");
+        String queryChoice = scanner.nextLine().trim();
+        String queryPath = queryChoice.isEmpty() ? "/olap/q1.1" : "/olap/" + queryChoice;
+
         System.out.print("T-client counts τ (comma-separated) [default: 0,1,2]: ");
         int[] tauValues = parseInts(scanner.nextLine().trim(), new int[]{0, 1, 2});
 
@@ -237,8 +282,19 @@ public final class HATtrickMain {
         System.out.print("Proceed? [y/n]: ");
         if (!scanner.nextLine().trim().equalsIgnoreCase("y")) return;
 
-        // Reuse coordinator from Phase 1 if available — avoids "Address already in use"
-        sharedCoordinator = loadCoordinator(sharedCoordinator, props);
+        // Warn if Phase 1 already ran — order_line table is now much larger
+        // than the initial populated state, which will slow Q1.1/Q1.2/Q1.3.
+        if (phase1WasRun) {
+            System.out.println();
+            System.out.println("  *** WARNING ***");
+            System.out.println("  Phase 1 ran earlier in this session and added ~700,000");
+            System.out.println("  order_line rows. Q1.1/Q1.2/Q1.3 will scan a much larger");
+            System.out.println("  table than intended, giving lower A-qps than a fresh run.");
+            System.out.println("  For accurate results: restart all VMSes, repopulate,");
+            System.out.println("  and run Phase 2 → Phase 3 → Phase 1 in that order.");
+            System.out.print("  Continue anyway? [y/n]: ");
+            if (!scanner.nextLine().trim().equalsIgnoreCase("y")) return;
+        }
         if (sharedCoordinator == null) return;
 
         try {
@@ -246,7 +302,7 @@ public final class HATtrickMain {
                     sharedCoordinator, gatewayUrl,
                     tauValues, alphaValues,
                     warmupSecs, measurementSecs,
-                    numWare, txRatio, numTxInputPerType);
+                    numWare, txRatio, numTxInputPerType, queryPath);
             runner.run();
         } catch (Exception e) {
             System.out.println("Phase 3 failed: " + e.getMessage());
