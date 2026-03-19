@@ -5,6 +5,7 @@ import dk.ku.di.dms.vms.modb.common.data_structure.Tuple;
 import dk.ku.di.dms.vms.modb.common.utils.ConfigUtils;
 import dk.ku.di.dms.vms.tpcc.proxy.dataload.DataLoadUtils;
 import dk.ku.di.dms.vms.tpcc.proxy.experiment.ExperimentUtils;
+import dk.ku.di.dms.vms.tpcc.proxy.hattrick.HATtrickMain;
 import dk.ku.di.dms.vms.tpcc.proxy.infra.MinimalHttpClient;
 import dk.ku.di.dms.vms.tpcc.proxy.workload.WorkloadUtils;
 
@@ -162,6 +163,9 @@ public final class Main {
                     DataLoadUtils.cleanup(true);
                     System.out.println("VMS states reset.");
                     break;
+                case "7":
+                    HATtrickMain.run(coordinator);
+                    break;
                 case "q":
                     System.out.println("Exiting the application...");
                     running = false;
@@ -241,6 +245,8 @@ public final class Main {
         System.out.println("4. Submit workload");
         System.out.println("5. Cleanup VMS states");
         System.out.println("6. Reset VMS states");
+        System.out.println("7. HATtrick throughput frontier experiment");
+
         System.out.println("q. Quit program");
     }
 

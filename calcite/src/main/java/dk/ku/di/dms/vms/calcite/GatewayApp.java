@@ -10,6 +10,7 @@ import dk.ku.di.dms.vms.calcite.service.OlapGatewayService;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
+import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 
@@ -37,7 +38,7 @@ public final class GatewayApp {
         );
 
         server.createContext("/", new GatewayHttpHandler(service));
-        server.setExecutor(null);
+        server.setExecutor(Executors.newFixedThreadPool(4));
         server.start();
         System.out.println("Gateway started on " + bindHost + ":" + port);
         System.out.println(" - Catalog Client: " + httpUrl);

@@ -15,7 +15,20 @@ import java.util.Iterator;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.TimeUnit;
 
+import static java.lang.System.Logger.Level.ERROR;
+
 public final class VmsQueryWorker extends StoppableRunnable {
+
+    private static final System.Logger LOGGER = System.getLogger(VmsQueryWorker.class.getName());
+
+    // A4 FIX: maximum number of spin iterations before we give up waiting
+    // for the write lock. At ~1ns per spin this is roughly 50ms of tolerance.
+    // Exceeding this almost certainly means the gateway dropped the connection.
+    private static final int MAX_SPIN_RETRIES = 50_000;
+
+    // A4: type 102 signals "worker aborted" to VmsResultIterator so it can
+    // throw immediately instead of blocking on the next read forever.
+    static final byte WORKER_ABORT_TYPE = 102;
 
     private static final VarHandle WRITE_SYNCHRONIZER;
 
@@ -40,7 +53,13 @@ public final class VmsQueryWorker extends StoppableRunnable {
     private final Iterator<Long> recordAddressIterator;
     private final Iterator<byte[]> byteRecordIterator;
 
-    public VmsQueryWorker(AsynchronousSocketChannel channel, UniqueHashBufferIndex index, Iterator<Long> recordAddressIterator, QueryRequestEvent.QueryPayload queryPayload, int bufferSize, int timeout) {
+    // A4 FIX: volatile error flag so BatchWriteCompletionHandler.failed()
+    // can signal the run() loop to abort cleanly.
+    private volatile boolean writeError = false;
+
+    public VmsQueryWorker(AsynchronousSocketChannel channel, UniqueHashBufferIndex index,
+                          Iterator<Long> recordAddressIterator,
+                          QueryRequestEvent.QueryPayload queryPayload, int bufferSize, int timeout) {
         this.channel = channel;
         this.index = index;
         this.recordAddressIterator = recordAddressIterator;
@@ -53,7 +72,8 @@ public final class VmsQueryWorker extends StoppableRunnable {
         this.writeBufferPool.add(MemoryManager.getTemporaryDirectBuffer(this.bufferSize));
     }
 
-    public VmsQueryWorker(AsynchronousSocketChannel channel, Iterator<byte[]> byteRecordIterator, QueryRequestEvent.QueryPayload queryPayload, int bufferSize, int timeout) {
+    public VmsQueryWorker(AsynchronousSocketChannel channel, Iterator<byte[]> byteRecordIterator,
+                          QueryRequestEvent.QueryPayload queryPayload, int bufferSize, int timeout) {
         this.channel = channel;
         this.index = null;
         this.recordAddressIterator = null;
@@ -66,18 +86,19 @@ public final class VmsQueryWorker extends StoppableRunnable {
         this.writeBufferPool.add(MemoryManager.getTemporaryDirectBuffer(this.bufferSize));
     }
 
-    public boolean tryAcquireLock(){
+    public boolean tryAcquireLock() {
         return WRITE_SYNCHRONIZER.compareAndSet(this, 0, 1);
     }
 
-    public void releaseLock(){
+    public void releaseLock() {
         WRITE_SYNCHRONIZER.setVolatile(this, 0);
     }
 
     @Override
     public void run() {
         long start = System.nanoTime();
-        System.out.println("Starting Worker for QueryID: " + queryPayload.queryId() + " Table: " + queryPayload.tableName());
+        System.out.println("Starting Worker for QueryID: " + queryPayload.queryId()
+                + " Table: " + queryPayload.tableName());
 
         ByteBuffer writeBuffer = this.retrieveByteBuffer();
         QueryResultEvent.initBatch(writeBuffer, queryPayload.queryId());
@@ -85,11 +106,12 @@ public final class VmsQueryWorker extends StoppableRunnable {
 
         try {
             if (this.recordAddressIterator != null) {
-                while (this.recordAddressIterator.hasNext()) {
+                while (this.recordAddressIterator.hasNext() && !writeError) {
                     Long recordAddress = this.recordAddressIterator.next();
 
                     if (writeBuffer.remaining() < 1024) {
                         this.sendBuffer(writeBuffer);
+                        if (writeError) break;
                         writeBuffer = this.retrieveByteBuffer();
                         QueryResultEvent.initBatch(writeBuffer, queryPayload.queryId());
                     }
@@ -102,15 +124,16 @@ public final class VmsQueryWorker extends StoppableRunnable {
                     writeBuffer.putInt(lengthPos, dataEnd - dataStart);
 
                     count++;
-                    if (count % 5000 == 0) System.out.println(">>> [VMS WORKER] Scanned " + count + " rows from " + queryPayload.tableName());
+                    if (count % 5000 == 0)
+                        System.out.println(">>> [VMS WORKER] Scanned " + count + " rows from " + queryPayload.tableName());
                 }
-            }
-            else if (this.byteRecordIterator != null) {
-                while (this.byteRecordIterator.hasNext()) {
+            } else if (this.byteRecordIterator != null) {
+                while (this.byteRecordIterator.hasNext() && !writeError) {
                     byte[] joinedData = this.byteRecordIterator.next();
 
                     if (writeBuffer.remaining() < joinedData.length + 4) {
                         this.sendBuffer(writeBuffer);
+                        if (writeError) break;
                         writeBuffer = this.retrieveByteBuffer();
                         QueryResultEvent.initBatch(writeBuffer, queryPayload.queryId());
                     }
@@ -119,11 +142,19 @@ public final class VmsQueryWorker extends StoppableRunnable {
                     writeBuffer.put(joinedData);
 
                     count++;
-                    if (count % 5000 == 0) System.out.println(">>> [VMS WORKER] Joined and sent " + count + " rows from " + queryPayload.tableName());
+                    if (count % 5000 == 0)
+                        System.out.println(">>> [VMS WORKER] Joined and sent " + count + " rows from " + queryPayload.tableName());
                 }
             }
 
-            System.out.println(">>> [VMS WORKER] " + queryPayload.tableName() + " scan loop finished. Total rows: " + count);
+            System.out.println(">>> [VMS WORKER] " + queryPayload.tableName()
+                    + " scan loop finished. Total rows: " + count);
+
+            if (writeError) {
+                // A4: write already failed, nothing left to send
+                LOGGER.log(ERROR, ">>> [VMS WORKER] Aborting after write error. Rows sent: " + count);
+                return;
+            }
 
             if (writeBuffer.position() > QueryResultEvent.HEADER_SIZE) {
                 this.sendBuffer(writeBuffer);
@@ -135,23 +166,46 @@ public final class VmsQueryWorker extends StoppableRunnable {
             this.sendEndOfStream();
 
         } catch (Exception e) {
-            System.out.println("CRITICAL ERROR in VmsQueryWorker");
+            LOGGER.log(ERROR, "CRITICAL ERROR in VmsQueryWorker: " + e.getMessage(), e);
         }
 
         long end = System.nanoTime();
         double durationMs = (end - start) / 1_000_000.0;
-        System.out.println(String.format(">>> [VMS WORKER] Finished. Mode: %d | Total Rows: %d | Time: %.2f ms", queryPayload.mode(), count, durationMs));
+        System.out.printf(">>> [VMS WORKER] Finished. Mode: %d | Total Rows: %d | Time: %.2f ms%n",
+                queryPayload.mode(), count, durationMs);
     }
 
     private void sendBuffer(ByteBuffer buffer) {
         QueryResultEvent.finalizeBatch(buffer);
         buffer.flip();
 
+        // A4 FIX: bounded spin with retry limit.
+        //
+        // OLD: the CAS loop retried forever. If AsynchronousSocketChannel.write()
+        // silently failed (e.g. gateway dropped the connection), the
+        // BatchWriteCompletionHandler.failed() called stop() but the writeSynchronizer
+        // was never released and the CAS spun indefinitely, burning a thread.
+        //
+        // NEW: after MAX_SPIN_RETRIES iterations we set writeError=true, send a
+        // type-102 abort frame, and return. VmsResultIterator detects type 102
+        // and throws instead of blocking forever on the next read.
         int retries = 0;
         while (!this.tryAcquireLock()) {
+            if (writeError) return;
             try {
-                if (retries < 10) { Thread.onSpinWait(); } else { Thread.sleep(1); }
+                if (retries < 10) {
+                    Thread.onSpinWait();
+                } else {
+                    Thread.sleep(1);
+                }
                 retries++;
+                if (retries >= MAX_SPIN_RETRIES) {
+                    LOGGER.log(ERROR,
+                            ">>> [VMS WORKER] Write lock spin limit reached. Gateway likely dead. Aborting.");
+                    writeError = true;
+                    sendAbortFrame();
+                    return;
+                }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 return;
@@ -167,9 +221,21 @@ public final class VmsQueryWorker extends StoppableRunnable {
 
         int retries = 0;
         while (!this.tryAcquireLock()) {
+            if (writeError) return;
             try {
-                if (retries < 10) { Thread.onSpinWait(); } else { Thread.sleep(1); }
+                if (retries < 10) {
+                    Thread.onSpinWait();
+                } else {
+                    Thread.sleep(1);
+                }
                 retries++;
+                if (retries >= MAX_SPIN_RETRIES) {
+                    LOGGER.log(ERROR,
+                            ">>> [VMS WORKER] Write lock spin limit reached (EndOfStream). Aborting.");
+                    writeError = true;
+                    sendAbortFrame();
+                    return;
+                }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 return;
@@ -178,9 +244,25 @@ public final class VmsQueryWorker extends StoppableRunnable {
         this.channel.write(buffer, timeout, TimeUnit.MILLISECONDS, buffer, this.batchWriteCompletionHandler);
     }
 
+    // A4: sends a single-byte abort frame (type 102) to the gateway so
+    // VmsResultIterator stops blocking and throws an IOException.
+    private void sendAbortFrame() {
+        try {
+            ByteBuffer abortBuf = this.retrieveByteBuffer();
+            abortBuf.put(WORKER_ABORT_TYPE);
+            abortBuf.flip();
+            // fire-and-forget — we don't care about completion at this point
+            this.channel.write(abortBuf, timeout, TimeUnit.MILLISECONDS, abortBuf,
+                    new CompletionHandler<Integer, ByteBuffer>() {
+                        @Override public void completed(Integer r, ByteBuffer b) { returnByteBuffer(b); }
+                        @Override public void failed(Throwable e, ByteBuffer b)  { returnByteBuffer(b); }
+                    });
+        } catch (Exception ignored) {}
+    }
+
     private ByteBuffer retrieveByteBuffer() {
         ByteBuffer bb = this.writeBufferPool.poll();
-        if(bb != null) { bb.clear(); return bb; }
+        if (bb != null) { bb.clear(); return bb; }
         return MemoryManager.getTemporaryDirectBuffer(this.bufferSize);
     }
 
@@ -201,7 +283,11 @@ public final class VmsQueryWorker extends StoppableRunnable {
 
         @Override
         public void failed(Throwable exc, ByteBuffer byteBuffer) {
-            System.out.println(">>> [VMS WORKER WRITE] FAILED TO WRITE TO NETWORK!");
+            // A4 FIX: set writeError so the run() loop exits cleanly on next check.
+            // OLD: just called stop() which set isRunning=false but the spin loop
+            // kept spinning because writeSynchronizer was never released.
+            LOGGER.log(ERROR, ">>> [VMS WORKER WRITE] Write failed: " + exc.getMessage());
+            writeError = true;
             releaseLock();
             returnByteBuffer(byteBuffer);
             stop();

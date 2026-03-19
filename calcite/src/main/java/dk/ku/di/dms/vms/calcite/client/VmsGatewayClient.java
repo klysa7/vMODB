@@ -12,14 +12,14 @@ import java.util.List;
 
 public class VmsGatewayClient {
 
-    private static final byte GATEWAY_TYPE      = 12;
+    private static final byte GATEWAY_TYPE       = 12;
     private static final byte QUERY_REQUEST_TYPE = 99;
 
     public Iterator<Object[]> scan(String host, int port, long queryId, long snapshotId,
                                    byte mode, String tableName,
                                    List<Class<?>> columnTypes,
                                    byte[] predicates, byte[] routingData) {
-        return scan(host, port, queryId, snapshotId, mode, tableName,
+        return scanWithSchema(host, port, queryId, snapshotId, mode, tableName,
                 null, predicates, routingData);
     }
 
@@ -48,6 +48,27 @@ public class VmsGatewayClient {
         }
     }
 
+    // -------------------------------------------------------------------------
+    // B4 FIX: Replace the 5-second sleep with immediate socket close.
+    //
+    // OLD: after flushing the mode=1 (BROADCAST_TO_VMS) command, the gateway
+    //      slept for 5000 ms as a timing workaround, then closed the socket.
+    //      If the VMS takes longer than 5 s the gateway closes mid-broadcast.
+    //      If it finishes faster, 5 s of wall time is wasted per query.
+    //
+    // NEW: close the socket immediately after flush. The VMS has already
+    //      received the complete command payload. It independently opens its
+    //      own AsynchronousSocketChannel connection to the probe VMS and
+    //      streams rows there — the original gateway socket is not used for
+    //      data transfer at all. No sleep is needed.
+    //
+    //      The DistributedExecutor already calls scanWithSchema (mode=2) on
+    //      the probe VMS before triggerBroadcast, so the probe VMS has its
+    //      JoinContext registered and is ready to receive rows. The gateway's
+    //      VmsResultIterator on that second connection blocks naturally on
+    //      VmsResultIterator.fetchNextBatch() until the join result flows —
+    //      no timing assumption anywhere in the pipeline.
+    // -------------------------------------------------------------------------
     public void triggerBroadcast(String host, int port, long queryId, long snapshotId,
                                  String tableName, byte[] predicates, String targetHostPort) {
         try {
@@ -63,11 +84,12 @@ public class VmsGatewayClient {
             out.write(buffer.array(), 0, buffer.limit());
             out.flush();
 
-            System.out.println(">>> [GATEWAY] Trigger sent! Waiting 5 seconds for VMS to finish...");
-            Thread.sleep(5000);
-
+            // B4 FIX: close immediately — the VMS received the full command and
+            // will independently connect to the probe VMS. No sleep needed.
             socket.close();
-            System.out.println(">>> [GATEWAY] Socket closed cleanly.");
+            System.out.println(">>> [GATEWAY] Broadcast trigger sent to " + host + ":" + port
+                    + " for table " + tableName + " (queryId=" + queryId + ")");
+
         } catch (Exception e) {
             System.err.println("Broadcast trigger failed: " + e.getMessage());
         }
