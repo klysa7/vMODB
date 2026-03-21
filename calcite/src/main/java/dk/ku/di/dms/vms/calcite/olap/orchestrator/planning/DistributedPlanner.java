@@ -151,8 +151,8 @@ public final class DistributedPlanner {
             case EQUALS              -> "EQUALS";
             case GREATER_THAN        -> "GREATER_THAN";
             case LESS_THAN           -> "LESS_THAN";
-            case GREATER_THAN_OR_EQUAL -> "GREATER_THAN_OR_EQUALS";
-            case LESS_THAN_OR_EQUAL  -> "LESS_THAN_OR_EQUALS";
+            case GREATER_THAN_OR_EQUAL -> "GREATER_THAN_OR_EQUAL";
+            case LESS_THAN_OR_EQUAL    -> "LESS_THAN_OR_EQUAL";
             case NOT_EQUALS          -> "NOT_EQUALS";
             default                  -> null;
         };

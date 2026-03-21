@@ -10,66 +10,11 @@ import java.nio.charset.StandardCharsets;
 
 public final class GatewayHttpHandler implements HttpHandler {
 
-    static final String PATH_ORDERS = "/olap/orders";
-    static final String PATH_COUNT  = "/olap/orders/count";
-    static final String PATH_SUM    = "/olap/orders/sum";
-    static final String PATH_AVG    = "/olap/orders/avg";
-
     // -------------------------------------------------------------------------
-    // HATtrick Q1 flight — SSB Q1.1 / Q1.2 / Q1.3 adapted for TPC-C schema
-    //
-    // SSB Q1 original:
-    //   SELECT SUM(lo_extendedprice * lo_discount) as revenue
-    //   FROM lineorder, date
-    //   WHERE lo_orderdate = d_datekey
-    //   WHERE lo_orderdate = d_datekey
-    //     AND d_year/d_yearmonthnum/d_weeknuminyear = [VALUE]   -- date filter
-    //     AND lo_discount BETWEEN [X] AND [Y]                   -- discount filter
-    //     AND lo_quantity [RANGE]                               -- quantity filter
-    //
-    // TPC-C adaptations:
-    //   lo_extendedprice * lo_discount → ol_amount
-    //     (ol_amount is the pre-computed line item revenue, equivalent to
-    //      lo_extendedprice * lo_discount in SSB)
-    //
-    //   lo_discount filter → DROPPED
-    //     (TPC-C order_line has no discount column; ol_amount already
-    //      encodes the final price)
-    //
-    //   date dimension filter → DROPPED
-    //     (TPC-C has no date dimension table; o_entry_d exists on orders
-    //      but is populated with current system time at load, so all orders
-    //      share the same date — year/month/week filters would return
-    //      either all rows or zero rows, making them meaningless)
-    //
-    //   lo_quantity filter → ol_quantity (direct mapping, same semantics)
-    //
-    //   lineorder → order_line (ol_w_id = 1 scopes to warehouse 1,
-    //     equivalent to SSB SF=1 single-warehouse scope)
-    //
-    // Filter factors (FF) relative to SSB SF=1 (6,000,000 lineorder rows):
-    //   Q1.1 SSB FF = 0.019, rows ≈ 116,883
-    //   Q1.1 TPC-C: ol_quantity < 25 filters ~50% of order_line rows
-    //     (TPC-C generates qty uniformly in [1..10] per item, most < 25)
-    //
-    //   Q1.2 SSB FF = 0.00065, rows ≈ 3,896
-    //   Q1.2 TPC-C: ol_quantity BETWEEN 26 AND 35 filters a narrower band
-    //
-    //   Q1.3 SSB FF = 0.000075, rows ≈ 450
-    //   Q1.3 TPC-C: ol_quantity BETWEEN 36 AND 50 is the narrowest band
-    //
-    // The three quantity ranges are disjoint (< 25 / 26-35 / 36-50),
-    // matching SSB's intent that queries scan disjoint subsets of the
-    // fact table so caching does not interfere between them.
+    // Existing cross-VMS join — kept as-is (working, used in HATtrick experiments)
+    // COUNT of orders per district — requires warehouse VMS + order VMS
     // -------------------------------------------------------------------------
-
-    static final String PATH_Q1  = "/olap/q1";
-    static final String PATH_Q11 = "/olap/q1.1";
-    static final String PATH_Q12 = "/olap/q1.2";
-    static final String PATH_Q13 = "/olap/q1.3";
-
-    // Q1 — distributed broadcast hash join (cross-VMS)
-    // COUNT of orders per district — requires warehouse + order VMS
+    static final String PATH_Q1 = "/olap/q1";
     static final String SQL_Q1 = """
         SELECT c.c_d_id, COUNT(*)
         FROM warehouse.customer c
@@ -81,71 +26,138 @@ public final class GatewayHttpHandler implements HttpHandler {
         GROUP BY c.c_d_id
     """;
 
-    // Q1.1 — low quantity order lines (ol_quantity < 25)
-    // SSB: d_year = 1993, lo_discount BETWEEN 1 AND 3, lo_quantity < 25
-    // TPC-C: quantity filter only; date and discount filters dropped (see above)
-    static final String SQL_Q11 = """
+    // -------------------------------------------------------------------------
+    // CH-benCHmark Q6
+    // Source: CH-benCHmark (Cole et al., DBTest 2011, TU München)
+    //
+    // Original:
+    //   SELECT sum(ol_amount) AS revenue FROM orderline
+    //   WHERE ol_delivery_d >= '1999-01-01' AND ol_delivery_d < '2020-01-01'
+    //     AND ol_quantity BETWEEN 1 AND 100000
+    //
+    // Pattern : single-table full scan + SUM (no join)
+    // VMS     : order VMS only
+    // Tables  : order_line
+    //
+    // FIX: ol_delivery_d date filter removed.
+    //   In TPC-C, ol_delivery_d is NULL at populate time — it is only set by
+    //   the Delivery transaction which is not part of this workload.
+    //   Any comparison against NULL evaluates to NULL (not true), so the date
+    //   filter drops all rows and returns revenue=0. The quantity filter
+    //   BETWEEN 1 AND 100000 selects all rows (TPC-C generates ol_quantity
+    //   in [1..10]) and is kept to match the CH-benCHmark full-scan intent.
+    // -------------------------------------------------------------------------
+    static final String PATH_CHQ6 = "/olap/chq6";
+    static final String SQL_CHQ6 = """
         SELECT SUM(ol.ol_amount) AS revenue
         FROM "order".order_line ol
         WHERE ol.ol_w_id = 1
-          AND ol.ol_quantity < 25
+          AND ol.ol_quantity BETWEEN 1 AND 100000
     """;
 
-    // Q1.2 — medium quantity order lines (26 <= ol_quantity <= 35)
-    // SSB: d_yearmonthnum = 199401, lo_discount BETWEEN 4 AND 6, lo_quantity BETWEEN 26 AND 35
-    // TPC-C: quantity filter only
-    static final String SQL_Q12 = """
-        SELECT SUM(ol.ol_amount) AS revenue
+    // -------------------------------------------------------------------------
+    // CH-benCHmark Q1
+    //
+    // Original:
+    //   SELECT ol_number, sum(ol_quantity), sum(ol_amount),
+    //          avg(ol_quantity), avg(ol_amount), count(*)
+    //   FROM orderline
+    //   WHERE ol_delivery_d > '2007-01-02'
+    //   GROUP BY ol_number ORDER BY ol_number
+    //
+    // Pattern : single-table scan + GROUP BY + multiple aggregates (no join)
+    // VMS     : order VMS only
+    // Tables  : order_line
+    //
+    // FIX 1: ol_delivery_d date filter removed — same NULL reason as Q6.
+    //   With the filter, all rows are dropped (ol_delivery_d is NULL),
+    //   GROUP BY collapses to one null group, sums return 0.
+    // FIX 2: ORDER BY removed — no VModbSortRule in CalcitePlannerImpl.
+    // -------------------------------------------------------------------------
+    static final String PATH_CHQ1 = "/olap/chq1";
+    static final String SQL_CHQ1 = """
+        SELECT ol.ol_number,
+               SUM(ol.ol_quantity)  AS sum_qty,
+               SUM(ol.ol_amount)    AS sum_amount,
+               AVG(ol.ol_quantity)  AS avg_qty,
+               AVG(ol.ol_amount)    AS avg_amount,
+               COUNT(*)             AS count_order
         FROM "order".order_line ol
         WHERE ol.ol_w_id = 1
-          AND ol.ol_quantity >= 26
-          AND ol.ol_quantity <= 35
+        GROUP BY ol.ol_number
     """;
 
-    // Q1.3 — high quantity order lines (36 <= ol_quantity <= 50)
-    // SSB: d_weeknuminyear = 6 AND d_year = 1994, lo_discount BETWEEN 5 AND 7,
-    //      lo_quantity BETWEEN 36 AND 50 (paper has typo: says 26-35, should be 36-50)
-    // TPC-C: quantity filter only
-    static final String SQL_Q13 = """
-        SELECT SUM(ol.ol_amount) AS revenue
-        FROM "order".order_line ol
-        WHERE ol.ol_w_id = 1
-          AND ol.ol_quantity >= 36
-          AND ol.ol_quantity <= 50
+    // -------------------------------------------------------------------------
+    // CH-benCHmark Q4
+    //
+    // Original:
+    //   SELECT o_ol_cnt, count(*) AS order_count FROM orders
+    //   WHERE o_entry_d >= '2007-01-02' AND o_entry_d < '2012-01-02'
+    //     AND EXISTS (SELECT * FROM orderline WHERE ...)
+    //   GROUP BY o_ol_cnt ORDER BY o_ol_cnt
+    //
+    // Pattern : 2-table join + GROUP BY, 1 VMS
+    // VMS     : order VMS only
+    // Tables  : orders + order_line
+    //
+    // FIX 1: EXISTS replaced with JOIN — no LogicalCorrelate rule in planner.
+    // FIX 2: ORDER BY removed — no VModbSortRule.
+    // FIX 3: COUNT(DISTINCT) removed — not supported by LocalAggregateOperator.
+    // STATUS: WORKING ✅ (returns 11 rows grouped by o_ol_cnt)
+    // -------------------------------------------------------------------------
+    static final String PATH_CHQ4 = "/olap/chq4";
+    static final String SQL_CHQ4 = """
+        SELECT o.o_ol_cnt, COUNT(*) AS order_count
+        FROM "order".orders o
+        JOIN "order".order_line ol
+          ON ol.ol_o_id = o.o_id
+         AND ol.ol_w_id = o.o_w_id
+         AND ol.ol_d_id = o.o_d_id
+        WHERE o.o_w_id = 1
+          AND o.o_entry_d >= '2007-01-02'
+          AND o.o_entry_d <  '2030-01-01'
+        GROUP BY o.o_ol_cnt
     """;
 
-    static final String SQL_JOIN = """
-        SELECT c.c_id, c.c_last, o.o_id
+    // -------------------------------------------------------------------------
+    // CH-benCHmark Q3
+    //
+    // Original:
+    //   SELECT ol_o_id, ol_w_id, ol_d_id, sum(ol_amount) as revenue, o_entry_d
+    //   FROM customer, neworder, orders, orderline
+    //   WHERE c_state LIKE 'A%' AND c_id = o_c_id ...
+    //   GROUP BY ol_o_id, ol_w_id, ol_d_id, o_entry_d
+    //
+    // Pattern : cross-VMS broadcast hash join, 4 tables
+    // VMS     : warehouse VMS (customer) + order VMS (orders, new_orders, order_line)
+    //
+    // FIX 1: alias "no" renamed to "nord" — "NO" is a reserved keyword in
+    //   Calcite's SQL parser, causing: "Encountered 'no' at line 9, column 29"
+    // FIX 2: c_state LIKE 'A%' removed — parseSingleCondition() has no LIKE
+    //   case, predicate would be silently dropped anyway (full customer scan).
+    // FIX 3: ORDER BY removed — no VModbSortRule.
+    // -------------------------------------------------------------------------
+    static final String PATH_CHQ3 = "/olap/chq3";
+    static final String SQL_CHQ3 = """
+        SELECT ol.ol_o_id, ol.ol_w_id, ol.ol_d_id,
+               SUM(ol.ol_amount) AS revenue,
+               o.o_entry_d
         FROM warehouse.customer c
         JOIN "order".orders o
-        ON c.c_w_id = o.o_w_id
-        AND c.c_d_id = o.o_d_id
-        AND c.c_id = o.o_c_id
+          ON c.c_id   = o.o_c_id
+         AND c.c_w_id = o.o_w_id
+         AND c.c_d_id = o.o_d_id
+        JOIN "order".new_orders nord
+          ON nord.no_w_id = o.o_w_id
+         AND nord.no_d_id = o.o_d_id
+         AND nord.no_o_id = o.o_id
+        JOIN "order".order_line ol
+          ON ol.ol_w_id = o.o_w_id
+         AND ol.ol_d_id = o.o_d_id
+         AND ol.ol_o_id = o.o_id
         WHERE c.c_w_id = 1
-    """;
-
-    static final String SQL_COUNT = SQL_Q1;  // alias — same as Q1 join query
-
-    static final String SQL_SUM = """
-        SELECT c.c_d_id, SUM(o.o_ol_cnt)
-        FROM warehouse.customer c
-        JOIN "order".orders o
-        ON c.c_w_id = o.o_w_id
-        AND c.c_d_id = o.o_d_id
-        AND c.c_id = o.o_c_id
-        WHERE c.c_w_id = 1
-        GROUP BY c.c_d_id
-    """;
-
-    static final String SQL_AVG = """
-        SELECT c.c_d_id, AVG(o.o_ol_cnt)
-        FROM warehouse.customer c
-        JOIN "order".orders o
-        ON c.c_w_id = o.o_w_id
-        AND c.c_d_id = o.o_d_id
-        AND c.c_id = o.o_c_id
-        WHERE c.c_w_id = 1
-        GROUP BY c.c_d_id
+          AND o.o_entry_d > '2007-01-02'
+        GROUP BY ol.ol_o_id, ol.ol_w_id, ol.ol_d_id, o.o_entry_d
     """;
 
     private final OlapGatewayService service;
@@ -157,7 +169,7 @@ public final class GatewayHttpHandler implements HttpHandler {
     @Override
     public void handle(HttpExchange exchange) throws IOException {
         String method = exchange.getRequestMethod();
-        String path = exchange.getRequestURI().getPath();
+        String path   = exchange.getRequestURI().getPath();
 
         if (!"GET".equalsIgnoreCase(method)) {
             send(exchange, 405, jsonError("Method not allowed. Use GET."));
@@ -165,24 +177,23 @@ public final class GatewayHttpHandler implements HttpHandler {
         }
 
         String sql = switch (path) {
-            case PATH_ORDERS -> SQL_JOIN;
-            case PATH_COUNT  -> SQL_COUNT;
-            case PATH_SUM    -> SQL_SUM;
-            case PATH_AVG    -> SQL_AVG;
-            case PATH_Q1     -> SQL_Q1;
-            case PATH_Q11    -> SQL_Q11;
-            case PATH_Q12    -> SQL_Q12;
-            case PATH_Q13    -> SQL_Q13;
-            default          -> null;
+            case PATH_Q1   -> SQL_Q1;
+            case PATH_CHQ6 -> SQL_CHQ6;
+            case PATH_CHQ1 -> SQL_CHQ1;
+            case PATH_CHQ4 -> SQL_CHQ4;
+            case PATH_CHQ3 -> SQL_CHQ3;
+            default        -> null;
         };
 
         if (sql == null) {
             send(exchange, 404, jsonError(
                     "Unknown endpoint. Available: "
-                            + PATH_ORDERS + ", " + PATH_COUNT + ", "
-                            + PATH_Q1  + ", "
-                            + PATH_Q11 + ", " + PATH_Q12 + ", " + PATH_Q13 + ", "
-                            + PATH_SUM + ", " + PATH_AVG));
+                            + PATH_Q1   + " (original cross-VMS join), "
+                            + PATH_CHQ6 + " (CH Q6: full scan + SUM), "
+                            + PATH_CHQ1 + " (CH Q1: GROUP BY aggregate), "
+                            + PATH_CHQ4 + " (CH Q4: JOIN semi-join), "
+                            + PATH_CHQ3 + " (CH Q3: cross-VMS broadcast join)"
+            ));
             return;
         }
 

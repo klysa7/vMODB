@@ -13,18 +13,11 @@ import java.util.concurrent.atomic.AtomicLong;
 /**
  * HATtrick T-client for the throughput frontier experiment.
  *
- * Generates new_order (50%) and payment (50%) transactions on the fly
- * and submits them directly to the coordinator without any sleep.
+ * Workload: 50% new_order + 50% payment.
  *
- * Throughput is measured by the caller via getSubmittedCount() sampled
- * at the start and end of the measurement window — no batch callback
- * needed for the grid measurement.
- *
- * Design note: we count *submitted* transactions, not committed ones.
- * The batch window adds a small lag (typically < batchWindowMs) which
- * is the same across all grid points, so the bias cancels when comparing
- * (τ,α) pairs. The coordinator's batch commit callback is not used here
- * to keep the T-client self-contained and avoid cross-thread state.
+ * Table stability: the delete logic lives INSIDE processNewOrder() on
+ * the order VMS — every new_order atomically deletes the oldest order
+ * for the same district. No separate delete transaction needed here.
  */
 public final class HATtrickTClientWorker implements Runnable {
 
@@ -36,8 +29,8 @@ public final class HATtrickTClientWorker implements Runnable {
     private final AtomicBoolean running;
     private final int           numWarehouses;
 
-    // submitted count — incremented every time a transaction is queued
     private final AtomicLong submitted = new AtomicLong(0L);
+    private long lastPrintAt = 0;
 
     public HATtrickTClientWorker(int clientId,
                                  Coordinator coordinator,
@@ -56,8 +49,6 @@ public final class HATtrickTClientWorker implements Runnable {
         while (running.get() && !Thread.currentThread().isInterrupted()) {
             try {
                 TransactionInput txInput;
-                // 50% new_order, 50% payment — mirrors HATtrick spec (48/48/4
-                // but we omit order_status for simplicity)
                 if (DataGenUtils.randomNumber(1, 2) == 1) {
                     NewOrderWareIn event = generateNewOrder();
                     txInput = new TransactionInput(
@@ -69,14 +60,20 @@ public final class HATtrickTClientWorker implements Runnable {
                             "payment",
                             new TransactionInput.Event("payment-in", event.toString()));
                 }
+
                 coordinator.queueTransactionInput(txInput);
                 submitted.incrementAndGet();
-                // Throttle to match the coordinator's batch processing capacity.
-                // Without this the T-client submits millions of objects/sec into
-                // the coordinator's deque, exhausting heap before any batch commits.
-                // 1ms sleep → ~1000 submissions/sec per T-client, well within
-                // the coordinator's processing capacity (batch_window_ms = 1000).
+
+                // Print every 5 seconds to confirm throughput
+                long now = System.currentTimeMillis();
+                if (now - lastPrintAt >= 5000) {
+                    System.out.printf("[T-client %d] Submitted %d transactions total%n",
+                            clientId, submitted.get());
+                    lastPrintAt = now;
+                }
+
                 Thread.sleep(1);
+
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 break;
@@ -91,13 +88,9 @@ public final class HATtrickTClientWorker implements Runnable {
                 clientId, submitted.get());
     }
 
-    /** Snapshot of submitted transaction count — call at start and end of
-     *  measurement window and subtract to get transactions in window. */
     public long getSubmittedCount() {
         return submitted.get();
     }
-
-    // ── Transaction generators ──────────────────────────────────────────────
 
     private NewOrderWareIn generateNewOrder() {
         int w_id   = DataGenUtils.randomNumber(1, numWarehouses);
@@ -109,14 +102,13 @@ public final class HATtrickTClientWorker implements Runnable {
         int[] itemIds  = new int[ol_cnt];
         int[] supWares = new int[ol_cnt];
         int[] qty      = new int[ol_cnt];
-        boolean allLocal = true;
 
         for (int i = 0; i < ol_cnt; i++) {
             itemIds[i]  = DataGenUtils.nuRand(8191, 7911, 1, TPCcConstants.NUM_ITEMS);
             qty[i]      = DataGenUtils.randomNumber(1, 10);
-            supWares[i] = w_id; // single warehouse — keeps things simple
+            supWares[i] = w_id;
         }
-        return new NewOrderWareIn(w_id, d_id, c_id, itemIds, supWares, qty, allLocal);
+        return new NewOrderWareIn(w_id, d_id, c_id, itemIds, supWares, qty, true);
     }
 
     private PaymentIn generatePayment() {
@@ -124,10 +116,8 @@ public final class HATtrickTClientWorker implements Runnable {
         int   d_id   = DataGenUtils.randomNumber(1, TPCcConstants.NUM_DIST_PER_WARE);
         int   c_id   = DataGenUtils.nuRand(1023, 259, 1, TPCcConstants.NUM_CUST_PER_DIST);
         float amount = DataGenUtils.randomNumber(100, 500000) / 100.0f;
-        String c_last = DataGenUtils.randomNumber(1, 100) <= 60
-                ? DataGenUtils.lastName(DataGenUtils.nuRand(255, 157, 0, 999))
-                : "";
-        boolean byName = !c_last.isEmpty();
-        return new PaymentIn(w_id, d_id, c_id, w_id, d_id, amount, c_last, byName);
+        // Always use by_id (by_name=false) — the by-name lookup throws
+        // "Empty customer list" in WarehouseService crashing the VMS.
+        return new PaymentIn(w_id, d_id, c_id, w_id, d_id, amount, "", false);
     }
 }

@@ -135,7 +135,11 @@ public class VmsResultIterator implements Iterator<Object[]> {
                 case FLOAT              -> buf.getFloat(offset);
                 case DOUBLE             -> buf.getDouble(offset);
                 case BOOLEAN, BOOL      -> buf.get(offset) != 0;
-                case DATE, TIMESTAMP    -> buf.getLong(offset);
+                case DATE, TIMESTAMP -> {
+                    long epoch = buf.getLong(offset);
+                    yield new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss")
+                            .format(new java.util.Date(epoch));
+                }
                 case VARCHAR, STRING, BYTES -> readString(rowData, offset, d.byteSize());
                 default                 -> null;
             };

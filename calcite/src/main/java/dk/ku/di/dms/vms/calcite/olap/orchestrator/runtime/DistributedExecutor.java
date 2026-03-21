@@ -76,12 +76,54 @@ public final class DistributedExecutor {
     private CoordinatorOperator buildOperatorTree(CoordinatorOperatorDefinition def, DistributedPlan plan) {
 
         if (def instanceof ScanDefinition scanDef) {
-            // A7: find the typed subplan — it's a ScanSubplan for plain scans
             ScanSubPlan subplan = plan.subPlans.stream()
                     .filter(s -> s instanceof ScanSubPlan ss && ss.exchangeId().equals(scanDef.exchangeId()))
                     .map(s -> (ScanSubPlan) s)
                     .findFirst().orElseThrow();
-            return new StreamingScanOperator(gatewayClient, subplan, plan.snapshot);
+
+            // -----------------------------------------------------------------
+            // FIX: Build ColumnDescriptors for the plain scan path.
+            //
+            // Bug: openScan() called client.scan() which passed null descriptors
+            // to VmsResultIterator. parseRowData() then returned Object[0] for
+            // every row because:
+            //   if (descriptors == null || descriptors.isEmpty()) return new Object[0];
+            //
+            // Result: COUNT(*) worked (counts rows regardless of content) but
+            // GROUP BY and SUM received null for all column values — every row
+            // collapsed into one null group with zero aggregates.
+            //
+            // Fix: compute ColumnDescriptors here using computeDataOffsets()
+            // (same method used for joins) and inject into the ScanSubPlan.
+            // StreamingScanOperator.openScan() already calls scanWithSchema()
+            // if descriptors are present in the subplan.
+            //
+            // Offset correctness: computeDataOffsets() sums col.byteSize()
+            // sequentially. serializeRow() on the VMS side writes using
+            // schema.columnOffset()[i] - RECORD_HEADER, which is also a
+            // sequential layout with the same type sizes. Both sides agree.
+            // -----------------------------------------------------------------
+            String schemaName = ((ScanAllOperation) subplan.operation()).schema;
+            String tableName  = ((ScanAllOperation) subplan.operation()).table;
+            List<CatalogColumn> cols    = columnsResolver.columnMetas(schemaName, tableName);
+            int[]               offsets = computeDataOffsets(cols);
+
+            List<ColumnDescriptor> descriptors = new ArrayList<>(cols.size());
+            for (int i = 0; i < cols.size(); i++) {
+                CatalogColumn col = cols.get(i);
+                descriptors.add(new ColumnDescriptor(col.name(), col.type(), offsets[i], col.byteSize()));
+            }
+
+            ScanSubPlan subplanWithDescriptors = new ScanSubPlan(
+                    subplan.vmsName(),
+                    subplan.url(),
+                    subplan.exchangeId(),
+                    subplan.operation(),
+                    subplan.columnsInOrder(),
+                    subplan.predicates(),
+                    descriptors);
+
+            return new StreamingScanOperator(gatewayClient, subplanWithDescriptors, plan.snapshot);
         }
 
         if (def instanceof JoinDefinition joinDef) {
@@ -90,7 +132,6 @@ public final class DistributedExecutor {
 
                 LOGGER.log(INFO, "OPTIMIZATION: Converting to Distributed VMS-to-VMS Broadcast Join!");
 
-                // A7: both sides start as ScanSubplans from the planner
                 ScanSubPlan leftPlan = plan.subPlans.stream()
                         .filter(s -> s instanceof ScanSubPlan ss && ss.exchangeId().equals(leftScan.exchangeId()))
                         .map(s -> (ScanSubPlan) s).findFirst().get();
@@ -98,12 +139,11 @@ public final class DistributedExecutor {
                         .filter(s -> s instanceof ScanSubPlan ss && ss.exchangeId().equals(rightScan.exchangeId()))
                         .map(s -> (ScanSubPlan) s).findFirst().get();
 
-                String leftTable  = ((ScanAllOperation) leftPlan.operation()).table;
-                String leftSchema = ((ScanAllOperation) leftPlan.operation()).schema;
-                String rightTable = ((ScanAllOperation) rightPlan.operation()).table;
-                String rightSchema= ((ScanAllOperation) rightPlan.operation()).schema;
+                String leftTable   = ((ScanAllOperation) leftPlan.operation()).table;
+                String leftSchema  = ((ScanAllOperation) leftPlan.operation()).schema;
+                String rightTable  = ((ScanAllOperation) rightPlan.operation()).table;
+                String rightSchema = ((ScanAllOperation) rightPlan.operation()).schema;
 
-                // A1+A7: parse ports from URL, no hardcoded maps
                 int leftPort  = URI.create(leftPlan.url()).getPort();
                 int rightPort = URI.create(rightPlan.url()).getPort();
 
@@ -159,8 +199,6 @@ public final class DistributedExecutor {
                     combinedColumns.add(col.name());
                 }
 
-                // A7: the probe side becomes a JoinSubplan — its role is now
-                // explicit. No mode byte, no null check on columnDescriptors.
                 JoinSubPlan receiverJoinPlan = new JoinSubPlan(
                         rightPlan.vmsName(),
                         rightPlan.url(),
@@ -169,8 +207,7 @@ public final class DistributedExecutor {
                         combinedColumns,
                         rightPlan.predicates(),
                         routingData,
-                        combinedDescriptors
-                );
+                        combinedDescriptors);
 
                 return new StreamingScanOperator(gatewayClient, receiverJoinPlan, plan.snapshot, joinQueryId);
             }

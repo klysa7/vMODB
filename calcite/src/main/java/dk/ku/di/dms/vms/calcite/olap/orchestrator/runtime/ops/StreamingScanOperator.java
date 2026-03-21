@@ -92,9 +92,10 @@ public class StreamingScanOperator implements CoordinatorOperator {
 
         try {
             // plain scan: no columnDescriptors yet (scan mode doesn't need them at this layer)
-            this.tcpIterator = client.scan(
+            this.tcpIterator = client.scanWithSchema(
                     host, port, queryId, snapshotId, (byte) 0,
-                    tableName, List.of(), scanSubplan.predicates(), new byte[0]);
+                    tableName, scanSubplan.columnDescriptors(),   // ← now non-null
+                    scanSubplan.predicates(), new byte[0]);
             LOGGER.log(INFO, "[StreamingScan] Connection Established (scan).");
         } catch (Exception e) {
             throw new RuntimeException("Failed scan connection to " + host + ":" + port, e);

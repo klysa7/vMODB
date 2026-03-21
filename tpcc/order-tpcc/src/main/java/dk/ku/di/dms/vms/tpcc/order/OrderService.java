@@ -36,7 +36,10 @@ public final class OrderService {
     private final IOrderLineRepository orderLineRepository;
     private final IHistoryRepository historyRepository;
 
-    public OrderService(IOrderRepository orderRepository, INewOrderRepository newOrderRepository, IOrderLineRepository orderLineRepository, IHistoryRepository historyRepository) {
+    public OrderService(IOrderRepository orderRepository,
+                        INewOrderRepository newOrderRepository,
+                        IOrderLineRepository orderLineRepository,
+                        IHistoryRepository historyRepository) {
         this.orderRepository = orderRepository;
         this.newOrderRepository = newOrderRepository;
         this.orderLineRepository = orderLineRepository;
@@ -46,37 +49,40 @@ public final class OrderService {
     @Inbound(values = "payment-out")
     @Transactional(type = W)
     @Parallel
-    public void processPayment(PaymentOut out){
-        History history = new History(out.c_id, out.c_d_id, out.c_w_id, out.d_id, out.w_id, new Date(), out.amount, out.data);
+    public void processPayment(PaymentOut out) {
+        History history = new History(
+                out.c_id, out.c_d_id, out.c_w_id,
+                out.d_id, out.w_id,
+                new Date(), out.amount, out.data);
         this.historyRepository.insert(history);
     }
 
     @Inbound(values = "order-status-out")
     @Transactional(type = R)
-    public void processOrderStatus(OrderStatusOut in){
+    public void processOrderStatus(OrderStatusOut in) {
         Order order = this.orderRepository.getLastOrderByCustomerId(in.c_id);
-        if(order == null){
-            LOGGER.log(DEBUG, "No order found for customer "+in.c_id+"\n"+in);
+        if (order == null) {
+            LOGGER.log(DEBUG, "No order found for customer " + in.c_id + "\n" + in);
             return;
         }
-        List<OrderLineInfoDto> orderLinesInfo = this.orderLineRepository.getOrderLinesInfo(order.o_id, order.o_d_id, order.o_w_id);
-        if(orderLinesInfo.isEmpty()){
-            LOGGER.log(ERROR, "Input event OrderStatusOut led to empty order lines info:\n"+in);
+        List<OrderLineInfoDto> orderLinesInfo = this.orderLineRepository.getOrderLinesInfo(
+                order.o_id, order.o_d_id, order.o_w_id);
+        if (orderLinesInfo.isEmpty()) {
+            LOGGER.log(ERROR, "Input event OrderStatusOut led to empty order lines info:\n" + in);
         }
     }
 
     @Inbound(values = "new-order-inv-out")
     @Transactional(type = W)
     @Parallel
-    public void processNewOrder(NewOrderInvOut in){
-
+    public void processNewOrder(NewOrderInvOut in) {
         Order order = new Order(
                 in.d_next_o_id,
                 in.d_id,
                 in.w_id,
                 in.c_id,
                 new Date(),
-                -1, // set in delivery tx
+                -1,
                 in.itemsIds.length,
                 in.allLocal ? 1 : 0
         );
@@ -86,14 +92,14 @@ public final class OrderService {
         this.newOrderRepository.insert(newOrder);
 
         List<OrderLine> orderLinesToInsert = new ArrayList<>(in.itemsIds.length);
-
-        for(int i = 0; i < in.itemsIds.length; i++){
-            float ol_amount = (float) (in.qty[i] * in.itemsIds[i] * (1 + in.w_tax + in.d_tax) * (1 - in.c_discount));
+        for (int i = 0; i < in.itemsIds.length; i++) {
+            float ol_amount = (float) (in.qty[i] * in.itemsIds[i]
+                    * (1 + in.w_tax + in.d_tax) * (1 - in.c_discount));
             OrderLine orderLine = new OrderLine(
                     in.d_next_o_id,
                     in.d_id,
                     in.w_id,
-                    i+1,
+                    i + 1,
                     in.itemsIds[i],
                     in.supWares[i],
                     null,
@@ -105,5 +111,4 @@ public final class OrderService {
         }
         this.orderLineRepository.insertAll(orderLinesToInsert);
     }
-
 }
