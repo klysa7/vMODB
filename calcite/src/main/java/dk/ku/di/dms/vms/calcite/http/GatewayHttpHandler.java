@@ -6,13 +6,16 @@ import dk.ku.di.dms.vms.calcite.service.OlapGatewayService;
 
 import java.io.IOException;
 import java.io.OutputStream;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 
 public final class GatewayHttpHandler implements HttpHandler {
 
     // -------------------------------------------------------------------------
-    // Existing cross-VMS join — kept as-is (working, used in HATtrick experiments)
-    // COUNT of orders per district — requires warehouse VMS + order VMS
+    // Existing cross-VMS join — kept as-is
     // -------------------------------------------------------------------------
     static final String PATH_Q1 = "/olap/q1";
     static final String SQL_Q1 = """
@@ -27,25 +30,7 @@ public final class GatewayHttpHandler implements HttpHandler {
     """;
 
     // -------------------------------------------------------------------------
-    // CH-benCHmark Q6
-    // Source: CH-benCHmark (Cole et al., DBTest 2011, TU München)
-    //
-    // Original:
-    //   SELECT sum(ol_amount) AS revenue FROM orderline
-    //   WHERE ol_delivery_d >= '1999-01-01' AND ol_delivery_d < '2020-01-01'
-    //     AND ol_quantity BETWEEN 1 AND 100000
-    //
-    // Pattern : single-table full scan + SUM (no join)
-    // VMS     : order VMS only
-    // Tables  : order_line
-    //
-    // FIX: ol_delivery_d date filter removed.
-    //   In TPC-C, ol_delivery_d is NULL at populate time — it is only set by
-    //   the Delivery transaction which is not part of this workload.
-    //   Any comparison against NULL evaluates to NULL (not true), so the date
-    //   filter drops all rows and returns revenue=0. The quantity filter
-    //   BETWEEN 1 AND 100000 selects all rows (TPC-C generates ol_quantity
-    //   in [1..10]) and is kept to match the CH-benCHmark full-scan intent.
+    // CH-benCHmark Q6 — live order VMS (Experiment I)
     // -------------------------------------------------------------------------
     static final String PATH_CHQ6 = "/olap/chq6";
     static final String SQL_CHQ6 = """
@@ -57,22 +42,6 @@ public final class GatewayHttpHandler implements HttpHandler {
 
     // -------------------------------------------------------------------------
     // CH-benCHmark Q1
-    //
-    // Original:
-    //   SELECT ol_number, sum(ol_quantity), sum(ol_amount),
-    //          avg(ol_quantity), avg(ol_amount), count(*)
-    //   FROM orderline
-    //   WHERE ol_delivery_d > '2007-01-02'
-    //   GROUP BY ol_number ORDER BY ol_number
-    //
-    // Pattern : single-table scan + GROUP BY + multiple aggregates (no join)
-    // VMS     : order VMS only
-    // Tables  : order_line
-    //
-    // FIX 1: ol_delivery_d date filter removed — same NULL reason as Q6.
-    //   With the filter, all rows are dropped (ol_delivery_d is NULL),
-    //   GROUP BY collapses to one null group, sums return 0.
-    // FIX 2: ORDER BY removed — no VModbSortRule in CalcitePlannerImpl.
     // -------------------------------------------------------------------------
     static final String PATH_CHQ1 = "/olap/chq1";
     static final String SQL_CHQ1 = """
@@ -89,21 +58,6 @@ public final class GatewayHttpHandler implements HttpHandler {
 
     // -------------------------------------------------------------------------
     // CH-benCHmark Q4
-    //
-    // Original:
-    //   SELECT o_ol_cnt, count(*) AS order_count FROM orders
-    //   WHERE o_entry_d >= '2007-01-02' AND o_entry_d < '2012-01-02'
-    //     AND EXISTS (SELECT * FROM orderline WHERE ...)
-    //   GROUP BY o_ol_cnt ORDER BY o_ol_cnt
-    //
-    // Pattern : 2-table join + GROUP BY, 1 VMS
-    // VMS     : order VMS only
-    // Tables  : orders + order_line
-    //
-    // FIX 1: EXISTS replaced with JOIN — no LogicalCorrelate rule in planner.
-    // FIX 2: ORDER BY removed — no VModbSortRule.
-    // FIX 3: COUNT(DISTINCT) removed — not supported by LocalAggregateOperator.
-    // STATUS: WORKING ✅ (returns 11 rows grouped by o_ol_cnt)
     // -------------------------------------------------------------------------
     static final String PATH_CHQ4 = "/olap/chq4";
     static final String SQL_CHQ4 = """
@@ -121,21 +75,6 @@ public final class GatewayHttpHandler implements HttpHandler {
 
     // -------------------------------------------------------------------------
     // CH-benCHmark Q3
-    //
-    // Original:
-    //   SELECT ol_o_id, ol_w_id, ol_d_id, sum(ol_amount) as revenue, o_entry_d
-    //   FROM customer, neworder, orders, orderline
-    //   WHERE c_state LIKE 'A%' AND c_id = o_c_id ...
-    //   GROUP BY ol_o_id, ol_w_id, ol_d_id, o_entry_d
-    //
-    // Pattern : cross-VMS broadcast hash join, 4 tables
-    // VMS     : warehouse VMS (customer) + order VMS (orders, new_orders, order_line)
-    //
-    // FIX 1: alias "no" renamed to "nord" — "NO" is a reserved keyword in
-    //   Calcite's SQL parser, causing: "Encountered 'no' at line 9, column 29"
-    // FIX 2: c_state LIKE 'A%' removed — parseSingleCondition() has no LIKE
-    //   case, predicate would be silently dropped anyway (full customer scan).
-    // FIX 3: ORDER BY removed — no VModbSortRule.
     // -------------------------------------------------------------------------
     static final String PATH_CHQ3 = "/olap/chq3";
     static final String SQL_CHQ3 = """
@@ -160,6 +99,21 @@ public final class GatewayHttpHandler implements HttpHandler {
         GROUP BY ol.ol_o_id, ol.ol_w_id, ol.ol_d_id, o.o_entry_d
     """;
 
+    // -------------------------------------------------------------------------
+    // Replica CH Q6 — Experiment II
+    //
+    // Routes the request to the replica VMS (port 8004) instead of going
+    // through the Calcite query engine. The replica serves the query directly
+    // from its own order_line index via GET /chq6.
+    //
+    // Why not Calcite here: the replica VMS is not registered in the Calcite
+    // catalog (it is not a coordinator-managed VMS for OLAP routing purposes —
+    // it only participates as a DAG terminal for OLTP events). A direct HTTP
+    // proxy is simpler and avoids catalog registration complexity.
+    // -------------------------------------------------------------------------
+    static final String PATH_REPLICA_CHQ6 = "/olap/replica/chq6";
+    static final String REPLICA_CHQ6_URL  = "http://localhost:8096/chq6";
+
     private final OlapGatewayService service;
 
     public GatewayHttpHandler(OlapGatewayService service) {
@@ -176,6 +130,27 @@ public final class GatewayHttpHandler implements HttpHandler {
             return;
         }
 
+        // ── Replica passthrough (Experiment II) ───────────────────────────
+        if (PATH_REPLICA_CHQ6.equals(path)) {
+            try {
+                HttpClient client = HttpClient.newHttpClient();
+                HttpRequest req = HttpRequest.newBuilder()
+                        .uri(URI.create(REPLICA_CHQ6_URL))
+                        .header("Accept", "application/json")
+                        .GET()
+                        .build();
+                HttpResponse<String> resp =
+                        client.send(req, HttpResponse.BodyHandlers.ofString());
+                send(exchange, resp.statusCode(), resp.body());
+            } catch (Exception e) {
+                send(exchange, 503, jsonError(
+                        "Replica VMS unavailable (is it running on port 8004?): "
+                                + e.getMessage()));
+            }
+            return;
+        }
+        // ─────────────────────────────────────────────────────────────────
+
         String sql = switch (path) {
             case PATH_Q1   -> SQL_Q1;
             case PATH_CHQ6 -> SQL_CHQ6;
@@ -188,11 +163,12 @@ public final class GatewayHttpHandler implements HttpHandler {
         if (sql == null) {
             send(exchange, 404, jsonError(
                     "Unknown endpoint. Available: "
-                            + PATH_Q1   + " (original cross-VMS join), "
-                            + PATH_CHQ6 + " (CH Q6: full scan + SUM), "
-                            + PATH_CHQ1 + " (CH Q1: GROUP BY aggregate), "
-                            + PATH_CHQ4 + " (CH Q4: JOIN semi-join), "
-                            + PATH_CHQ3 + " (CH Q3: cross-VMS broadcast join)"
+                            + PATH_Q1             + " (original cross-VMS join), "
+                            + PATH_CHQ6           + " (CH Q6 live order VMS), "
+                            + PATH_CHQ1           + " (CH Q1 GROUP BY), "
+                            + PATH_CHQ4           + " (CH Q4 JOIN semi-join), "
+                            + PATH_CHQ3           + " (CH Q3 cross-VMS join), "
+                            + PATH_REPLICA_CHQ6   + " (CH Q6 replica VMS - Experiment II)"
             ));
             return;
         }

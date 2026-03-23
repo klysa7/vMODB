@@ -13,7 +13,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class HATtrickMain {
 
-    // Coordinator is created once and reused across all phases in the same session.
     private static Coordinator sharedCoordinator = null;
 
     @SuppressWarnings("unchecked")
@@ -53,9 +52,6 @@ public final class HATtrickMain {
     }
 
     // ── Phase 1: Pure OLTP ────────────────────────────────────────────────────
-    // Uses HATtrickTClientWorker directly — same path as Phase 3's T-clients.
-    // Every new_order is paired with a delete_orderline so the table stays at
-    // ~300,000 rows throughout. No pre-generated workload files needed.
 
     private static void runPhase1(Properties props, Scanner scanner, int numWare) {
         System.out.println("\n--- Phase 1: Pure OLTP ---");
@@ -100,30 +96,21 @@ public final class HATtrickMain {
             }
 
             try {
-                // Warmup
                 System.out.printf("  Warming up %ds...%n", warmupSecs);
                 Thread.sleep(warmupSecs * 1000L);
 
-                // Snapshot batch commit counter at start
                 System.out.printf("  Measuring %ds...%n", measurementSecs);
                 final long[] tStartHolder = {0};
                 sharedCoordinator.registerBatchCommitConsumer((batchId, tid) -> {
                     if (tStartHolder[0] == 0) tStartHolder[0] = tid;
                 });
                 long windowStart = System.currentTimeMillis();
-
                 Thread.sleep(measurementSecs * 1000L);
-
                 long windowEnd = System.currentTimeMillis();
                 double elapsedSec = (windowEnd - windowStart) / 1000.0;
 
-                // Count committed transactions via submitted proxy
                 long totalSubmitted = workers.stream()
                         .mapToLong(HATtrickTClientWorker::getSubmittedCount).sum();
-
-                // T-tps: use committed count from batch callback
-                // For simplicity here we report submitted/elapsed as an estimate
-                // (same approach used in HATtrickRunner for the grid)
                 double tTps = totalSubmitted / elapsedSec;
 
                 System.out.printf("%n  τ=%d  T-tps≈%.2f  (submitted=%d in %.1fs)%n",
@@ -156,11 +143,12 @@ public final class HATtrickMain {
         sharedCoordinator = loadCoordinator(sharedCoordinator, props);
 
         System.out.println("  Available queries:");
-        System.out.println("    chq6 — CH Q6: full scan + SUM on order_line  (recommended)");
-        System.out.println("    chq1 — CH Q1: GROUP BY aggregate on order_line");
-        System.out.println("    chq4 — CH Q4: JOIN semi-join (orders + order_line)");
-        System.out.println("    chq3 — CH Q3: cross-VMS broadcast join (4 tables)");
-        System.out.println("    q1   — original cross-VMS join (customer + orders)");
+        System.out.println("    chq6         — CH Q6: full scan + SUM on order_line (live order VMS)");
+        System.out.println("    chq1         — CH Q1: GROUP BY aggregate on order_line");
+        System.out.println("    chq4         — CH Q4: JOIN semi-join (orders + order_line)");
+        System.out.println("    chq3         — CH Q3: cross-VMS broadcast join (4 tables)");
+        System.out.println("    q1           — original cross-VMS join (customer + orders)");
+        System.out.println("    replica/chq6 — CH Q6 on replica VMS (Experiment II)");
         System.out.print("  Query to run [default: chq6]: ");
         String queryChoice = scanner.nextLine().trim();
         String queryPath = queryChoice.isEmpty() ? "/olap/chq6" : "/olap/" + queryChoice;
@@ -203,9 +191,7 @@ public final class HATtrickMain {
                 long aStart = aWorkers.stream()
                         .mapToLong(HATtrickAClientWorker::getCompletedCount).sum();
                 long windowStart = System.currentTimeMillis();
-
                 Thread.sleep(measurementSecs * 1_000L);
-
                 long aEnd = aWorkers.stream()
                         .mapToLong(HATtrickAClientWorker::getCompletedCount).sum();
                 long windowEnd = System.currentTimeMillis();
@@ -236,11 +222,12 @@ public final class HATtrickMain {
         System.out.println("  is paired with a delete_orderline.");
 
         System.out.println("  Available queries:");
-        System.out.println("    chq6 — CH Q6: full scan + SUM on order_line  (recommended)");
-        System.out.println("    chq1 — CH Q1: GROUP BY aggregate on order_line");
-        System.out.println("    chq4 — CH Q4: JOIN semi-join (orders + order_line)");
-        System.out.println("    chq3 — CH Q3: cross-VMS broadcast join (4 tables)");
-        System.out.println("    q1   — original cross-VMS join (customer + orders)");
+        System.out.println("    chq6         — CH Q6: full scan + SUM on order_line (live order VMS)");
+        System.out.println("    chq1         — CH Q1: GROUP BY aggregate on order_line");
+        System.out.println("    chq4         — CH Q4: JOIN semi-join (orders + order_line)");
+        System.out.println("    chq3         — CH Q3: cross-VMS broadcast join (4 tables)");
+        System.out.println("    q1           — original cross-VMS join (customer + orders)");
+        System.out.println("    replica/chq6 — CH Q6 on replica VMS (Experiment II)");
         System.out.print("  Query to run [default: chq6]: ");
         String queryChoice = scanner.nextLine().trim();
         String queryPath = queryChoice.isEmpty() ? "/olap/chq6" : "/olap/" + queryChoice;
@@ -265,7 +252,6 @@ public final class HATtrickMain {
         sharedCoordinator = loadCoordinator(sharedCoordinator, props);
         if (sharedCoordinator == null) return;
 
-        // Build dummy txRatio for HATtrickRunner (not used by T-client path)
         Tuple<Integer, String>[] txRatio = new Tuple[]{Tuple.of(100, "new_order")};
         Map<String, Integer> numTxInputPerType = new HashMap<>();
 
@@ -284,6 +270,14 @@ public final class HATtrickMain {
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
+    /**
+     * Starts the coordinator and waits for all 4 VMSes to connect:
+     *   warehouse (8001), inventory (8002), order (8003), replica (8004)
+     *
+     * The replica is a terminal node in the new_order DAG — the coordinator
+     * will not commit any batch until all 4 VMSes have responded.
+     * Start the replica VMS BEFORE choosing a phase here.
+     */
     private static Coordinator loadCoordinator(Coordinator existing, Properties props) {
         if (existing != null) return existing;
         System.out.println("Loading coordinator...");
@@ -297,8 +291,8 @@ public final class HATtrickMain {
                 System.out.println("\nTimeout!");
                 return null;
             }
-        } while (coordinator.getConnectedVMSs().size() < 3);
-        System.out.printf("%n3 VMSes connected.%n");
+        } while (coordinator.getConnectedVMSs().size() < 4);
+        System.out.printf("%n4 VMSes connected.%n");
         return coordinator;
     }
 

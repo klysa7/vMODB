@@ -35,7 +35,7 @@ public final class Main {
     }
 
     private static void loadLocalDeploymentMenu() throws Exception {
-        dk.ku.di.dms.vms.tpcc.warehouse.Main.main(null);
+        dk.ku.di.dms.vms.tpcc.replica.Main.main(null);
         dk.ku.di.dms.vms.tpcc.inventory.Main.main(null);
         dk.ku.di.dms.vms.tpcc.order.Main.main(null);
         loadMenu("Local Deployment Menu");
@@ -55,9 +55,9 @@ public final class Main {
         Map<String, Integer> txRatioMap = buildTransactionRatioMap();
         Tuple<Integer, String>[] txRatio = buildTransactionRatio(txRatioMap);
 
-        // data population
         ForkJoinPool pool = ForkJoinPool.commonPool();
-        Future<?>[] futures = new Future[3];
+        // 4 futures: order, warehouse, inventory, replica
+        Future<?>[] futures = new Future[4];
 
         Scanner scanner = new Scanner(System.in);
         boolean running = true;
@@ -67,11 +67,17 @@ public final class Main {
             String choice = scanner.nextLine();
             switch (choice) {
                 case "1": {
+                    // Populate all 4 VMSes in parallel:
+                    //   order (8003), warehouse (8001), inventory (8002), replica (8004)
+                    // The replica populate pre-loads ~300K order_line rows so that
+                    // A-qps measurements in Experiment II start from the same baseline
+                    // as the live order VMS.
                     futures[0] = pool.submit(() -> submitDataPopulationRequest("order", truncate));
                     futures[1] = pool.submit(() -> submitDataPopulationRequest("warehouse", truncate));
                     futures[2] = pool.submit(() -> submitDataPopulationRequest("inventory", truncate));
+                    futures[3] = pool.submit(() -> submitReplicaPopulationRequest());
                     try {
-                        for (int i = 2; i >= 0; i--) {
+                        for (int i = 3; i >= 0; i--) {
                             futures[i].get();
                         }
                     } catch(InterruptedException | ExecutionException e){
@@ -91,7 +97,6 @@ public final class Main {
                 case "4":
                     System.out.println("Option 4: \"Submit workload\" selected.");
 
-                    // check if workload files exist
                     int numFiles = WorkloadUtils.getNumWorkloadInputFiles(numTxInputPerType);
 
                     if(numWare != numFiles){
@@ -128,20 +133,16 @@ public final class Main {
                         break;
                     }
 
-                    // reload iterators
                     input = WorkloadUtils.mapWorkloadInputFiles(numWare, txRatioMap);
 
-                    // load coordinator
                     if(coordinator == null){
                         coordinator = ExperimentUtils.loadCoordinator(PROPERTIES);
-                        // wait for all starter VMSes to connect
                         int numConnected;
                         do {
                             numConnected = coordinator.getConnectedVMSs().size();
                         } while (numConnected < 3);
                     }
 
-                    // prevent log pollution, i.e., interleaving of handshaking and experiment messages
                     try { Thread.sleep(100); } catch (InterruptedException _) { }
 
                     ExperimentUtils.ExperimentStats expStats = ExperimentUtils.runExperiment(coordinator, txRatio, input, runTime, warmUp);
@@ -150,15 +151,12 @@ public final class Main {
                     break;
                 case "5":
                     System.out.println("Option 5: \"Cleanup VMS states\" selected.");
-                    // has to wait for all submitted transactions to commit in order to send the reset
                     if (checkCompleteness(coordinator, scanner)) break;
-                    // cleanup VMS states
                     DataLoadUtils.cleanup(false);
                     System.out.println("VMS states cleaned.");
                     break;
                 case "6":
                     System.out.println("Option 5: \"Reset VMS states\" selected.");
-                    // has to wait for all submitted transactions to commit in order to send the reset
                     if (checkCompleteness(coordinator, scanner)) break;
                     DataLoadUtils.cleanup(true);
                     System.out.println("VMS states reset.");
@@ -190,6 +188,29 @@ public final class Main {
             System.out.println("Error on PUT endpoint of "+vms);
         } finally {
             if(client != null) DataLoadUtils.returnHttpClient(vms, client);
+        }
+    }
+
+    /**
+     * Sends PUT /populate to the replica VMS (port 8004).
+     * This pre-loads ~300K order_line rows into the replica so that
+     * Experiment II OLAP measurements start from the same baseline as
+     * Experiment I (live order VMS at 300K rows after populate).
+     */
+    private static void submitReplicaPopulationRequest() {
+        try {
+            java.net.http.HttpClient client = java.net.http.HttpClient.newHttpClient();
+            java.net.http.HttpRequest req = java.net.http.HttpRequest.newBuilder()
+                    .uri(java.net.URI.create("http://localhost:8004/populate"))
+                    .PUT(java.net.http.HttpRequest.BodyPublishers.noBody())
+                    .build();
+            java.net.http.HttpResponse<String> resp =
+                    client.send(req, java.net.http.HttpResponse.BodyHandlers.ofString());
+            if (resp.statusCode() != 200) {
+                System.out.println("Error on PUT endpoint of replica (status " + resp.statusCode() + ")");
+            }
+        } catch (Exception e) {
+            System.out.println("Error on PUT endpoint of replica: " + e.getMessage());
         }
     }
 
@@ -246,7 +267,6 @@ public final class Main {
         System.out.println("5. Cleanup VMS states");
         System.out.println("6. Reset VMS states");
         System.out.println("7. HATtrick throughput frontier experiment");
-
         System.out.println("q. Quit program");
     }
 

@@ -207,20 +207,42 @@ public final class ExperimentUtils {
         };
     }
 
+    /**
+     * Builds the coordinator with the transaction DAGs and VMS addresses.
+     *
+     * EXPERIMENT SWITCH:
+     *   Experiment I (live VMS only):
+     *     - new_order DAG has one terminal: "order"
+     *     - starterVMSs has 3 entries: warehouse, inventory, order
+     *
+     *   Experiment II (with replica):
+     *     - new_order DAG has TWO terminals: "order" + "replica"
+     *     - starterVMSs has 4 entries: + replica at port 8004
+     *     - Coordinator waits for both votes before committing each batch
+     *
+     *   To switch between experiments, toggle the two commented lines below.
+     *   No other code changes are needed.
+     */
     public static Coordinator loadCoordinator(Properties properties) {
         Map<String, TransactionDAG> transactionMap = new HashMap<>();
 
-        // new order: warehouse → inventory → order
-        // NOTE: delete of oldest order_line happens INSIDE processNewOrder()
-        // on the Order VMS — no separate DAG needed.
+        // ── new_order DAG ─────────────────────────────────────────────────
+        // warehouse → inventory → order VMS   (terminal)
+        //                       ↘ replica VMS (terminal) ← Experiment II
+        //
+        // BOTH terminals receive "new-order-inv-out" from inventory.
+        // The coordinator commits only after both respond (freshness = 0).
+        // Overhead: one extra network round-trip per batch vs Experiment I.
+        // ─────────────────────────────────────────────────────────────────
         TransactionDAG newOrderDag = TransactionBootstrap.name("new_order")
                 .input("a", "warehouse", "new-order-ware-in")
                 .internal("b", "inventory", "new-order-ware-out", "a")
                 .terminal("c", "order", "b")
+                .terminal("d", "replica", "b")   // ← Experiment II (comment out for Exp I)
                 .build();
         transactionMap.put(newOrderDag.name, newOrderDag);
 
-        // payment: warehouse → order
+        // payment: warehouse → order (replica does not participate — no history table)
         TransactionDAG paymentDag = TransactionBootstrap.name("payment")
                 .input("a", "warehouse", "payment-in")
                 .terminal("b", "order", "a")
@@ -247,16 +269,24 @@ public final class ExperimentUtils {
         String warehouseHost = properties.getProperty("warehouse_host");
         String inventoryHost = properties.getProperty("inventory_host");
         String orderHost     = properties.getProperty("order_host");
+        String replicaHost   = properties.getProperty("replica_host", "localhost");
+
         if (warehouseHost == null) throw new RuntimeException("Warehouse host is null");
         if (inventoryHost == null) throw new RuntimeException("Inventory host is null");
         if (orderHost == null)     throw new RuntimeException("Order host is null");
+
         IdentifiableNode warehouseAddress = new IdentifiableNode("warehouse", warehouseHost, 8001);
         IdentifiableNode inventoryAddress = new IdentifiableNode("inventory", inventoryHost, 8002);
         IdentifiableNode orderAddress     = new IdentifiableNode("order",     orderHost,     8003);
+        // Experiment II: replica VMS on port 8004
+        // Comment out the next line to revert to Experiment I (3-VMS setup)
+        IdentifiableNode replicaAddress   = new IdentifiableNode("replica",   replicaHost,   8004);
+
         Map<String, IdentifiableNode> starterVMSs = new HashMap<>();
         starterVMSs.put(warehouseAddress.identifier, warehouseAddress);
         starterVMSs.put(inventoryAddress.identifier, inventoryAddress);
-        starterVMSs.put(orderAddress.identifier, orderAddress);
+        starterVMSs.put(orderAddress.identifier,     orderAddress);
+        starterVMSs.put(replicaAddress.identifier,   replicaAddress); // ← Experiment II
         return starterVMSs;
     }
 

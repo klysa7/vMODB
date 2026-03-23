@@ -31,7 +31,7 @@
                     </descriptorRefs>
                     <archive>
                         <manifest>
-                            <mainClass>dk.ku.di.dms.vms.tpcc.warehouse.Main</mainClass>
+                            <mainClass>dk.ku.di.dms.vms.tpcc.replica.Main</mainClass>
                         </manifest>
                     </archive>
                 </configuration>

@@ -1,4 +1,4 @@
-package dk.ku.di.dms.vms.tpcc.warehouse.dto;
+package dk.ku.di.dms.vms.tpcc.replica.dto;
 
 public final class CustomerInfoDTO {
 

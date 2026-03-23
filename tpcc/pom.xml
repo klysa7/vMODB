@@ -17,6 +17,7 @@
         <module>order-tpcc</module>
         <module>warehouse-tpcc</module>
         <module>inventory-tpcc</module>
+        <module>replica-tpcc</module>
         <module>proxy-tpcc</module>
     </modules>
 
