@@ -2,9 +2,11 @@ package dk.ku.di.dms.vms.tpcc.order;
 
 import dk.ku.di.dms.vms.modb.api.annotations.Inbound;
 import dk.ku.di.dms.vms.modb.api.annotations.Microservice;
+import dk.ku.di.dms.vms.modb.api.annotations.Outbound;
 import dk.ku.di.dms.vms.modb.api.annotations.Parallel;
 import dk.ku.di.dms.vms.modb.api.annotations.Transactional;
 import dk.ku.di.dms.vms.tpcc.common.events.NewOrderInvOut;
+import dk.ku.di.dms.vms.tpcc.common.events.NewOrderOut;
 import dk.ku.di.dms.vms.tpcc.common.events.OrderStatusOut;
 import dk.ku.di.dms.vms.tpcc.common.events.PaymentOut;
 import dk.ku.di.dms.vms.tpcc.order.dto.OrderLineInfoDto;
@@ -72,10 +74,29 @@ public final class OrderService {
         }
     }
 
+    /**
+     * Processes a new order and emits NewOrderOut to the Replica VMS.
+     *
+     * The order VMS is now an INTERNAL node in the new_order DAG:
+     *
+     *   warehouse → inventory → order (internal) → replica (terminal)
+     *
+     * By emitting NewOrderOut, the order VMS forwards the computed order
+     * line data to the replica. The replica inserts into its own order_line
+     * table and acts as the terminal node — it votes to commit the batch.
+     *
+     * Freshness = 0: the replica data is committed atomically in the same
+     * batch as the order VMS insert.
+     *
+     * Overhead: the order VMS must now serialize and emit an extra event
+     * per new_order transaction. This is the measurable cost of Experiment II
+     * vs Experiment I.
+     */
     @Inbound(values = "new-order-inv-out")
+    @Outbound("new-order-out")
     @Transactional(type = W)
     @Parallel
-    public void processNewOrder(NewOrderInvOut in) {
+    public NewOrderOut processNewOrder(NewOrderInvOut in) {
         Order order = new Order(
                 in.d_next_o_id,
                 in.d_id,
@@ -92,9 +113,12 @@ public final class OrderService {
         this.newOrderRepository.insert(newOrder);
 
         List<OrderLine> orderLinesToInsert = new ArrayList<>(in.itemsIds.length);
+        float[] ol_amounts = new float[in.itemsIds.length];
+
         for (int i = 0; i < in.itemsIds.length; i++) {
             float ol_amount = (float) (in.qty[i] * in.itemsIds[i]
                     * (1 + in.w_tax + in.d_tax) * (1 - in.c_discount));
+            ol_amounts[i] = ol_amount;
             OrderLine orderLine = new OrderLine(
                     in.d_next_o_id,
                     in.d_id,
@@ -110,5 +134,17 @@ public final class OrderService {
             orderLinesToInsert.add(i, orderLine);
         }
         this.orderLineRepository.insertAll(orderLinesToInsert);
+
+        // Emit NewOrderOut to replica VMS
+        return new NewOrderOut(
+                in.w_id,
+                in.d_id,
+                in.d_next_o_id,
+                in.itemsIds,
+                in.supWares,
+                in.qty,
+                ol_amounts,
+                in.ol_dist_info
+        );
     }
 }

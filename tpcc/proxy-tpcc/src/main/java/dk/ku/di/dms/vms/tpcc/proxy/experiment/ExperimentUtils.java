@@ -207,27 +207,42 @@ public final class ExperimentUtils {
         };
     }
 
+    /**
+     * Builds the coordinator with Option B transaction DAGs.
+     *
+     * new_order DAG — order VMS is now INTERNAL, replica is TERMINAL:
+     *
+     *   warehouse → inventory → order (internal, emits new-order-out)
+     *                                → replica (terminal)
+     *
+     * The order VMS processes the new_order and emits NewOrderOut to the
+     * replica. The coordinator waits for the replica's vote before committing.
+     * This adds one extra network hop vs Experiment I, measurable as T-tps overhead.
+     *
+     * payment and order_status DAGs are unchanged — order stays terminal.
+     * Only new_order flows through the replica because only order_line data
+     * is needed for CHQ6.
+     */
     public static Coordinator loadCoordinator(Properties properties) {
         Map<String, TransactionDAG> transactionMap = new HashMap<>();
 
-        // new order: warehouse → inventory → order
-        // NOTE: delete of oldest order_line happens INSIDE processNewOrder()
-        // on the Order VMS — no separate DAG needed.
+        // new_order: warehouse → inventory → order (internal) → replica (terminal)
         TransactionDAG newOrderDag = TransactionBootstrap.name("new_order")
                 .input("a", "warehouse", "new-order-ware-in")
                 .internal("b", "inventory", "new-order-ware-out", "a")
-                .terminal("c", "order", "b")
+                .internal("c", "order", "new-order-inv-out", "b")
+                .terminal("d", "replica", "c")
                 .build();
         transactionMap.put(newOrderDag.name, newOrderDag);
 
-        // payment: warehouse → order
+        // payment: warehouse → order (terminal) — unchanged
         TransactionDAG paymentDag = TransactionBootstrap.name("payment")
                 .input("a", "warehouse", "payment-in")
                 .terminal("b", "order", "a")
                 .build();
         transactionMap.put(paymentDag.name, paymentDag);
 
-        // order status: warehouse → order
+        // order_status: warehouse → order (terminal) — unchanged
         TransactionDAG orderStatusDag = TransactionBootstrap.name("order_status")
                 .input("a", "warehouse", "order-status-in")
                 .terminal("b", "order", "a")
@@ -247,16 +262,22 @@ public final class ExperimentUtils {
         String warehouseHost = properties.getProperty("warehouse_host");
         String inventoryHost = properties.getProperty("inventory_host");
         String orderHost     = properties.getProperty("order_host");
+        String replicaHost   = properties.getProperty("replica_host", "localhost");
+
         if (warehouseHost == null) throw new RuntimeException("Warehouse host is null");
         if (inventoryHost == null) throw new RuntimeException("Inventory host is null");
         if (orderHost == null)     throw new RuntimeException("Order host is null");
+
         IdentifiableNode warehouseAddress = new IdentifiableNode("warehouse", warehouseHost, 8001);
         IdentifiableNode inventoryAddress = new IdentifiableNode("inventory", inventoryHost, 8002);
         IdentifiableNode orderAddress     = new IdentifiableNode("order",     orderHost,     8003);
+        IdentifiableNode replicaAddress   = new IdentifiableNode("replica",   replicaHost,   8004);
+
         Map<String, IdentifiableNode> starterVMSs = new HashMap<>();
         starterVMSs.put(warehouseAddress.identifier, warehouseAddress);
         starterVMSs.put(inventoryAddress.identifier, inventoryAddress);
-        starterVMSs.put(orderAddress.identifier, orderAddress);
+        starterVMSs.put(orderAddress.identifier,     orderAddress);
+        starterVMSs.put(replicaAddress.identifier,   replicaAddress);
         return starterVMSs;
     }
 

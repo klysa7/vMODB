@@ -230,7 +230,7 @@ public final class HATtrickRunner {
     private void writeCsv(List<GridPoint> results) throws IOException {
         String ts = LocalDateTime.now()
                 .format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"));
-        String queryLabel = queryPath.replace("/olap/", "").replace(".", "_");
+        String queryLabel = queryPath.replace("/olap/", "").replace(".", "_").replace("/", "_");
         String filename = "hattrick_" + queryLabel + "_" + ts + ".csv";
         try (BufferedWriter w = new BufferedWriter(new FileWriter(filename))) {
             w.write("tau,alpha,t_tps,a_qps");
