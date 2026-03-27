@@ -35,7 +35,6 @@ public final class Main {
     }
 
     private static void loadLocalDeploymentMenu() throws Exception {
-        dk.ku.di.dms.vms.tpcc.warehouse.Main.main(null);
         dk.ku.di.dms.vms.tpcc.inventory.Main.main(null);
         dk.ku.di.dms.vms.tpcc.order.Main.main(null);
         loadMenu("Local Deployment Menu");
@@ -55,9 +54,9 @@ public final class Main {
         Map<String, Integer> txRatioMap = buildTransactionRatioMap();
         Tuple<Integer, String>[] txRatio = buildTransactionRatio(txRatioMap);
 
-        // data population
         ForkJoinPool pool = ForkJoinPool.commonPool();
-        Future<?>[] futures = new Future[3];
+        // 4 futures: order, warehouse, inventory, replica
+        Future<?>[] futures = new Future[4];
 
         Scanner scanner = new Scanner(System.in);
         boolean running = true;
@@ -67,12 +66,22 @@ public final class Main {
             String choice = scanner.nextLine();
             switch (choice) {
                 case "1": {
+                    // Populate all 4 VMSes in parallel:
+                    //   order (8003), warehouse (8001), inventory (8002), replica (8004)
+                    // The replica populate pre-loads ~300K order_line rows so that
+                    // A-qps measurements in Experiment II start from the same baseline
+                    // as the live order VMS.
+                    boolean useReplica = Boolean.parseBoolean(PROPERTIES.getProperty("use_replica", "false"));
                     futures[0] = pool.submit(() -> submitDataPopulationRequest("order", truncate));
                     futures[1] = pool.submit(() -> submitDataPopulationRequest("warehouse", truncate));
                     futures[2] = pool.submit(() -> submitDataPopulationRequest("inventory", truncate));
+                    if (useReplica) {
+                        futures[3] = pool.submit(() -> submitDataPopulationRequest("replica", truncate));
+                    }
                     try {
-                        for (int i = 2; i >= 0; i--) {
-                            futures[i].get();
+                        int maxFuture = useReplica ? 3 : 2;
+                        for (int i = maxFuture; i >= 0; i--) {
+                            if (futures[i] != null) futures[i].get();
                         }
                     } catch(InterruptedException | ExecutionException e){
                         System.out.println("Error on PUT endpoint of one or more of the endpoints!");
@@ -91,7 +100,6 @@ public final class Main {
                 case "4":
                     System.out.println("Option 4: \"Submit workload\" selected.");
 
-                    // check if workload files exist
                     int numFiles = WorkloadUtils.getNumWorkloadInputFiles(numTxInputPerType);
 
                     if(numWare != numFiles){
@@ -128,20 +136,16 @@ public final class Main {
                         break;
                     }
 
-                    // reload iterators
                     input = WorkloadUtils.mapWorkloadInputFiles(numWare, txRatioMap);
 
-                    // load coordinator
                     if(coordinator == null){
                         coordinator = ExperimentUtils.loadCoordinator(PROPERTIES);
-                        // wait for all starter VMSes to connect
                         int numConnected;
                         do {
                             numConnected = coordinator.getConnectedVMSs().size();
                         } while (numConnected < 3);
                     }
 
-                    // prevent log pollution, i.e., interleaving of handshaking and experiment messages
                     try { Thread.sleep(100); } catch (InterruptedException _) { }
 
                     ExperimentUtils.ExperimentStats expStats = ExperimentUtils.runExperiment(coordinator, txRatio, input, runTime, warmUp);
@@ -150,15 +154,12 @@ public final class Main {
                     break;
                 case "5":
                     System.out.println("Option 5: \"Cleanup VMS states\" selected.");
-                    // has to wait for all submitted transactions to commit in order to send the reset
                     if (checkCompleteness(coordinator, scanner)) break;
-                    // cleanup VMS states
                     DataLoadUtils.cleanup(false);
                     System.out.println("VMS states cleaned.");
                     break;
                 case "6":
                     System.out.println("Option 5: \"Reset VMS states\" selected.");
-                    // has to wait for all submitted transactions to commit in order to send the reset
                     if (checkCompleteness(coordinator, scanner)) break;
                     DataLoadUtils.cleanup(true);
                     System.out.println("VMS states reset.");
@@ -246,7 +247,6 @@ public final class Main {
         System.out.println("5. Cleanup VMS states");
         System.out.println("6. Reset VMS states");
         System.out.println("7. HATtrick throughput frontier experiment");
-
         System.out.println("q. Quit program");
     }
 

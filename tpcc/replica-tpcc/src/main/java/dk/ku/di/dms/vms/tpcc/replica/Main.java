@@ -18,25 +18,6 @@ import java.util.List;
 import java.util.Properties;
 import java.util.concurrent.Executors;
 
-/**
- * Replica VMS main class.
- *
- * Two ports:
- *   8004 — vMODB NIO port (coordinator connects here, inventory sends events here)
- *   8096 — standard HTTP server for OLAP queries from the Calcite gateway
- *
- * Why two ports: the vMODB VMS uses a custom NIO protocol on port 8004 that
- * cannot speak standard HTTP. The gateway's java.net.http.HttpClient needs
- * plain HTTP. So we run a separate HttpServer on 8096 for OLAP queries.
- *
- * OLAP endpoint:
- *   GET http://localhost:8096/chq6  →  {"revenue": <sum of ol_amount>}
- *
- * Populate endpoint (called by proxy menu option 1):
- *   PUT http://localhost:8004/populate
- *   Pre-loads ~300K order_line rows so Experiment II starts from the same
- *   baseline as Experiment I.
- */
 public final class Main {
 
     private static final System.Logger LOGGER = System.getLogger(Main.class.getName());
@@ -44,7 +25,6 @@ public final class Main {
     static final int REPLICA_VMS_PORT  = 8004;
     static final int REPLICA_HTTP_PORT = 8096;
 
-    // Held so the HTTP handler and OLAP server can call VMS.lastTidFinished()
     static VmsApplication VMS;
 
     public static void main(String[] args) throws Exception {
@@ -56,7 +36,6 @@ public final class Main {
     public static VmsApplication build(Properties prop) throws Exception {
         int numWare = Integer.parseInt(prop.getProperty("num_ware", "1"));
 
-        // Buffer sizing: same formula as order VMS
         int numOrders    = numWare * 30_000 + (20_000 * 10);
         int numOrderLine = numOrders * 10;
 
@@ -65,9 +44,7 @@ public final class Main {
         prop.setProperty("checkpointing",             "true");
 
         VmsApplicationOptions options = VmsApplicationOptions.build(
-                prop,
-                "0.0.0.0",
-                REPLICA_VMS_PORT,
+                prop, "0.0.0.0", REPLICA_VMS_PORT,
                 new String[]{
                         "dk.ku.di.dms.vms.tpcc.replica",
                         "dk.ku.di.dms.vms.tpcc.common"
@@ -76,20 +53,18 @@ public final class Main {
         return VmsApplication.build(options, (txManager, repoLookup) -> {
             IOrderLineReplicaRepository repo =
                     (IOrderLineReplicaRepository) repoLookup.apply("order_line");
-
-            // Start the standard HTTP server for OLAP queries
             startOlapHttpServer(txManager, repo);
-
             return new ReplicaVmsHttpHandler(txManager, repo, numWare);
         });
     }
 
     /**
-     * Starts a standard HttpServer on port 8096 for OLAP queries.
-     * This speaks plain HTTP that java.net.http.HttpClient can talk to.
+     * Standard HTTP server on port 8096 — speaks plain HTTP for the gateway.
      *
-     * GET /chq6   — CH Q6: SUM(ol_amount) over all replica order_line rows
-     * GET /status — health check, returns lastTid and row count
+     * Endpoints:
+     *   GET /chq6  — total SUM(ol_amount)  → {"revenue": <float>}
+     *   GET /chq1  — GROUP BY ol_number    → [{"ol_number":1,"sum_qty":...}, ...]
+     *   GET /status — health check
      */
     private static void startOlapHttpServer(ITransactionManager txManager,
                                             IOrderLineReplicaRepository repo) {
@@ -97,20 +72,48 @@ public final class Main {
             HttpServer httpServer = HttpServer.create(
                     new InetSocketAddress("0.0.0.0", REPLICA_HTTP_PORT), 0);
 
+            // ── GET /chq6 ────────────────────────────────────────────────────
             httpServer.createContext("/chq6", exchange -> {
                 try {
-                    // Revenue is tracked incrementally in ReplicaService.REVENUE_BITS.
-                    // No MVCC transaction needed — just read the atomic value.
-                    // This is O(1) and avoids vMODB's select * bug on composite PK tables.
                     double revenue = ReplicaService.getRevenue();
-                    String body = "{\"revenue\":" + revenue + "}";
-                    sendHttp(exchange, 200, body);
+                    sendHttp(exchange, 200, "{\"revenue\":" + revenue + "}");
                 } catch (Exception e) {
-                    sendHttp(exchange, 500,
-                            "{\"error\":\"" + e.getMessage() + "\"}");
+                    sendHttp(exchange, 500, "{\"error\":\"" + e.getMessage() + "\"}");
                 }
             });
 
+            // ── GET /chq1 ────────────────────────────────────────────────────
+            // Returns array of 10 rows grouped by ol_number (1-10).
+            // Matches CH Q1 schema: ol_number, sum_qty, sum_amount,
+            //                       avg_qty, avg_amount, count_order
+            httpServer.createContext("/chq1", exchange -> {
+                try {
+                    StringBuilder sb = new StringBuilder("[");
+                    for (int i = 0; i < 10; i++) {
+                        int   olNumber  = i + 1;
+                        float sumAmount = ReplicaService.getChq1Amount(i);
+                        long  sumQty    = ReplicaService.CHQ1_QUANTITY[i].get();
+                        long  count     = ReplicaService.CHQ1_COUNT[i].get();
+                        double avgQty    = count > 0 ? (double) sumQty / count : 0.0;
+                        double avgAmount = count > 0 ? sumAmount / count : 0.0;
+                        if (i > 0) sb.append(",");
+                        sb.append("{")
+                                .append("\"ol_number\":").append(olNumber).append(",")
+                                .append("\"sum_qty\":").append(sumQty).append(",")
+                                .append("\"sum_amount\":").append(sumAmount).append(",")
+                                .append("\"avg_qty\":").append(String.format("%.4f", avgQty)).append(",")
+                                .append("\"avg_amount\":").append(String.format("%.4f", avgAmount)).append(",")
+                                .append("\"count_order\":").append(count)
+                                .append("}");
+                    }
+                    sb.append("]");
+                    sendHttp(exchange, 200, sb.toString());
+                } catch (Exception e) {
+                    sendHttp(exchange, 500, "{\"error\":\"" + e.getMessage() + "\"}");
+                }
+            });
+
+            // ── GET /status ───────────────────────────────────────────────────
             httpServer.createContext("/status", exchange -> {
                 long lastTid = VMS == null ? 0 : VMS.lastTidFinished();
                 sendHttp(exchange, 200,
@@ -126,8 +129,7 @@ public final class Main {
 
         } catch (IOException e) {
             throw new RuntimeException(
-                    "Failed to start replica OLAP HTTP server on port "
-                            + REPLICA_HTTP_PORT, e);
+                    "Failed to start replica OLAP HTTP server", e);
         }
     }
 
@@ -142,9 +144,7 @@ public final class Main {
         }
     }
 
-    // -------------------------------------------------------------------------
-    // vMODB VMS HTTP handler — handles PUT /populate from the proxy
-    // -------------------------------------------------------------------------
+    // ── vMODB VMS HTTP handler — PUT /populate ────────────────────────────────
 
     static final class ReplicaVmsHttpHandler extends DefaultHttpHandler {
 
@@ -159,16 +159,6 @@ public final class Main {
             this.numWare    = numWare;
         }
 
-        /**
-         * PUT /populate
-         *
-         * Called by the proxy during menu option 1.
-         * Pre-loads ~300K order_line rows (same count as the order VMS populate)
-         * so that Experiment II OLAP baselines start from the same table size.
-         *
-         * ol_amount = 10.0f placeholder — the actual values don't matter for
-         * measuring query throughput (qps). Only row count matters for scan time.
-         */
         @Override
         public void put(String uri, String body) throws Exception {
             if (!uri.startsWith("/populate")) return;
@@ -188,13 +178,7 @@ public final class Main {
                     for (int o = 1; o <= 3_000; o++) {
                         for (int ol = 1; ol <= 10; ol++) {
                             batch.add(new OrderLineReplica(
-                                    o, d, w, ol,
-                                    ol,          // ol_i_id placeholder
-                                    w,           // ol_supply_w_id
-                                    5,           // ol_quantity
-                                    10.0f,       // ol_amount placeholder
-                                    "dist-" + d  // ol_dist_info
-                            ));
+                                    o, d, w, ol, ol, w, 5, 10.0f, "dist-" + d));
                         }
                         if (batch.size() >= 5_000) {
                             this.repository.insertAll(batch);
@@ -213,13 +197,27 @@ public final class Main {
             LOGGER.log(System.Logger.Level.INFO,
                     "Replica VMS: populated " + total + " rows in " + elapsed + "ms");
 
-            // Seed the revenue counter so /chq6 returns the correct baseline
-            // immediately after populate (300K rows × 10.0f = 3,000,000.0)
+            // Seed revenue counter: 300K rows × 10.0f = 3,000,000.0
             float populateRevenue = total * 10.0f;
             long bits = Float.floatToRawIntBits(populateRevenue) & 0xFFFFFFFFL;
             ReplicaService.REVENUE_BITS.set(bits);
+
+            // Seed chq1 counters: each ol_number appears total/10 times
+            long rowsPerOlNumber = total / 10;
+            for (int i = 0; i < 10; i++) {
+                // sum_amount = rowsPerOlNumber * 10.0f
+                float amt = rowsPerOlNumber * 10.0f;
+                ReplicaService.CHQ1_AMOUNT[i].set(
+                        Float.floatToRawIntBits(amt) & 0xFFFFFFFFL);
+                // sum_qty = rowsPerOlNumber * 5 (ol_quantity=5 in populate)
+                ReplicaService.CHQ1_QUANTITY[i].set(rowsPerOlNumber * 5);
+                // count = rowsPerOlNumber
+                ReplicaService.CHQ1_COUNT[i].set(rowsPerOlNumber);
+            }
+
             LOGGER.log(System.Logger.Level.INFO,
-                    "Replica VMS: seeded revenue counter = " + populateRevenue);
+                    "Replica VMS: seeded revenue=" + populateRevenue
+                            + " chq1 rows-per-bucket=" + rowsPerOlNumber);
         }
     }
 }

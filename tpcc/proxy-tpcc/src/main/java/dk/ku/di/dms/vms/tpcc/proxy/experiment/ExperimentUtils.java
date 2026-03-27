@@ -208,48 +208,62 @@ public final class ExperimentUtils {
     }
 
     /**
-     * Builds the coordinator with Option B transaction DAGs.
+     * Builds the coordinator DAG based on the use_replica property.
      *
-     * new_order DAG — order VMS is now INTERNAL, replica is TERMINAL:
+     * use_replica=false (Config 1 + 2 — 3-VMS, Experiment I):
+     *   new_order: warehouse → inventory → order (terminal)
+     *   Coordinator waits for 3 VMSes. Max T-tps, no replica overhead.
+     *   OLAP queries go through Calcite to live order VMS.
      *
-     *   warehouse → inventory → order (internal, emits new-order-out)
-     *                                → replica (terminal)
+     * use_replica=true (Config 3 — 4-VMS, Experiment II):
+     *   new_order: warehouse → inventory → order (internal) → replica (terminal)
+     *   Coordinator waits for 4 VMSes. Extra hop adds commit latency.
+     *   OLAP queries go to replica port 8096. A-qps stays flat under load.
      *
-     * The order VMS processes the new_order and emits NewOrderOut to the
-     * replica. The coordinator waits for the replica's vote before committing.
-     * This adds one extra network hop vs Experiment I, measurable as T-tps overhead.
-     *
-     * payment and order_status DAGs are unchanged — order stays terminal.
-     * Only new_order flows through the replica because only order_line data
-     * is needed for CHQ6.
+     * Switch by editing app.properties: use_replica=true|false
+     * No recompilation needed.
      */
     public static Coordinator loadCoordinator(Properties properties) {
+        boolean useReplica = Boolean.parseBoolean(
+                properties.getProperty("use_replica", "false"));
+
+        System.out.println("ExperimentUtils: use_replica=" + useReplica);
+
         Map<String, TransactionDAG> transactionMap = new HashMap<>();
 
-        // new_order: warehouse → inventory → order (internal) → replica (terminal)
-        TransactionDAG newOrderDag = TransactionBootstrap.name("new_order")
-                .input("a", "warehouse", "new-order-ware-in")
-                .internal("b", "inventory", "new-order-ware-out", "a")
-                .internal("c", "order", "new-order-inv-out", "b")
-                .terminal("d", "replica", "c")
-                .build();
-        transactionMap.put(newOrderDag.name, newOrderDag);
+        if (useReplica) {
+            // 4-VMS DAG: order is internal, replica is terminal
+            TransactionDAG newOrderDag = TransactionBootstrap.name("new_order")
+                    .input("a", "warehouse", "new-order-ware-in")
+                    .internal("b", "inventory", "new-order-ware-out", "a")
+                    .internal("c", "order", "new-order-inv-out", "b")
+                    .terminal("d", "replica", "c")
+                    .build();
+            transactionMap.put(newOrderDag.name, newOrderDag);
+        } else {
+            // 3-VMS DAG: order is terminal (original Experiment I setup)
+            TransactionDAG newOrderDag = TransactionBootstrap.name("new_order")
+                    .input("a", "warehouse", "new-order-ware-in")
+                    .internal("b", "inventory", "new-order-ware-out", "a")
+                    .terminal("c", "order", "b")
+                    .build();
+            transactionMap.put(newOrderDag.name, newOrderDag);
+        }
 
-        // payment: warehouse → order (terminal) — unchanged
+        // payment and order_status: unchanged in both configs
         TransactionDAG paymentDag = TransactionBootstrap.name("payment")
                 .input("a", "warehouse", "payment-in")
                 .terminal("b", "order", "a")
                 .build();
         transactionMap.put(paymentDag.name, paymentDag);
 
-        // order_status: warehouse → order (terminal) — unchanged
         TransactionDAG orderStatusDag = TransactionBootstrap.name("order_status")
                 .input("a", "warehouse", "order-status-in")
                 .terminal("b", "order", "a")
                 .build();
         transactionMap.put(orderStatusDag.name, orderStatusDag);
 
-        Map<String, IdentifiableNode> starterVMSs = getVmsMap(properties);
+        Map<String, IdentifiableNode> starterVMSs = getVmsMap(properties, useReplica);
         Coordinator coordinator = Coordinator.build(
                 properties, starterVMSs, transactionMap,
                 (ignored1) -> IHttpHandler.DEFAULT);
@@ -258,11 +272,11 @@ public final class ExperimentUtils {
         return coordinator;
     }
 
-    private static Map<String, IdentifiableNode> getVmsMap(Properties properties) {
+    private static Map<String, IdentifiableNode> getVmsMap(Properties properties,
+                                                           boolean useReplica) {
         String warehouseHost = properties.getProperty("warehouse_host");
         String inventoryHost = properties.getProperty("inventory_host");
         String orderHost     = properties.getProperty("order_host");
-        String replicaHost   = properties.getProperty("replica_host", "localhost");
 
         if (warehouseHost == null) throw new RuntimeException("Warehouse host is null");
         if (inventoryHost == null) throw new RuntimeException("Inventory host is null");
@@ -271,13 +285,19 @@ public final class ExperimentUtils {
         IdentifiableNode warehouseAddress = new IdentifiableNode("warehouse", warehouseHost, 8001);
         IdentifiableNode inventoryAddress = new IdentifiableNode("inventory", inventoryHost, 8002);
         IdentifiableNode orderAddress     = new IdentifiableNode("order",     orderHost,     8003);
-        IdentifiableNode replicaAddress   = new IdentifiableNode("replica",   replicaHost,   8004);
 
         Map<String, IdentifiableNode> starterVMSs = new HashMap<>();
         starterVMSs.put(warehouseAddress.identifier, warehouseAddress);
         starterVMSs.put(inventoryAddress.identifier, inventoryAddress);
         starterVMSs.put(orderAddress.identifier,     orderAddress);
-        starterVMSs.put(replicaAddress.identifier,   replicaAddress);
+
+        if (useReplica) {
+            String replicaHost = properties.getProperty("replica_host", "localhost");
+            IdentifiableNode replicaAddress =
+                    new IdentifiableNode("replica", replicaHost, 8004);
+            starterVMSs.put(replicaAddress.identifier, replicaAddress);
+        }
+
         return starterVMSs;
     }
 

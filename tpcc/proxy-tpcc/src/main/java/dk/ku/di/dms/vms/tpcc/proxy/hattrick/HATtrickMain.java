@@ -21,15 +21,12 @@ public final class HATtrickMain {
         Properties props = ConfigUtils.loadProperties();
         Scanner scanner = new Scanner(System.in);
 
+        boolean useReplica = Boolean.parseBoolean(props.getProperty("use_replica", "false"));
+
         System.out.println("\n=== HATtrick Experiment ===");
-        System.out.println("  Recommended run order on a FRESH system:");
-        System.out.println("    1. Populate VMSes (option 1 in main menu)");
-        System.out.println("    2. Phase 2 — Pure OLAP  (verify A-qps, no writes)");
-        System.out.println("    3. Phase 3 — Full grid  (frontier measurement)");
-        System.out.println("    4. Phase 1 — Pure OLTP  (verify T-tps)");
-        System.out.println();
-        System.out.println("  Experiment I  (live order VMS):  query = chq6");
-        System.out.println("  Experiment II (replica VMS):     query = replica/chq6");
+        System.out.println("  Config: use_replica=" + useReplica);
+        System.out.println("  Config 1 (use_replica=false): pure OLTP or Experiment I (live order VMS)");
+        System.out.println("  Config 3 (use_replica=true):  Experiment II (replica VMS)");
         System.out.println();
         System.out.println("  1. Phase 1 — Pure OLTP  (T-tps baseline)");
         System.out.println("  2. Phase 2 — Pure OLAP  (A-qps baseline)");
@@ -109,7 +106,7 @@ public final class HATtrickMain {
 
                 System.out.printf("%n  τ=%d  T-tps≈%.2f  (submitted=%d in %.1fs)%n",
                         tau, tTps, totalSubmitted, elapsedSec);
-                System.out.println("  (committed count shown in coordinator batch logs above)");
+                System.out.println("  (committed count shown in coordinator batch logs)");
 
             } catch (InterruptedException ignored) {
             } finally {
@@ -129,17 +126,21 @@ public final class HATtrickMain {
 
     private static void runPhase2(Scanner scanner, String gatewayUrl, Properties props) {
         System.out.println("\n--- Phase 2: Pure OLAP ---");
-        System.out.println("  (Coordinator started if not already running)");
-
         sharedCoordinator = loadCoordinator(sharedCoordinator, props);
 
-        System.out.println("  Available queries:");
-        System.out.println("    chq6         — CH Q6: full scan + SUM (live order VMS, Experiment I)");
-        System.out.println("    replica/chq6 — CH Q6: full scan + SUM (replica VMS, Experiment II)");
-        System.out.println("    chq1         — CH Q1: GROUP BY aggregate on order_line");
-        System.out.println("    chq4         — CH Q4: JOIN semi-join (orders + order_line)");
-        System.out.println("    chq3         — CH Q3: cross-VMS broadcast join (4 tables)");
-        System.out.println("    q1           — original cross-VMS join (customer + orders)");
+        boolean useReplica = Boolean.parseBoolean(props.getProperty("use_replica", "false"));
+
+        System.out.println("  Available queries (live order VMS, use_replica=false):");
+        System.out.println("    chq6  — SUM(ol_amount) full scan");
+        System.out.println("    chq1  — GROUP BY ol_number aggregate");
+        System.out.println("    chq4  — JOIN semi-join (orders + order_line)");
+        System.out.println("    chq3  — cross-VMS broadcast join");
+        System.out.println("    q1    — original cross-VMS join");
+        if (useReplica) {
+            System.out.println("  Available queries (replica VMS, use_replica=true):");
+            System.out.println("    replica/chq6  — SUM(ol_amount) from replica AtomicLong");
+            System.out.println("    replica/chq1  — GROUP BY ol_number from replica buckets");
+        }
         System.out.print("  Query to run [default: chq6]: ");
         String queryChoice = scanner.nextLine().trim();
         String queryPath = queryChoice.isEmpty() ? "/olap/chq6" : "/olap/" + queryChoice;
@@ -158,7 +159,7 @@ public final class HATtrickMain {
 
         for (int alpha : alphaValues) {
             if (alpha == 0) { System.out.println("\n  Skipping α=0"); continue; }
-            System.out.printf("%n=== Running Pure OLAP with α=%d A-workers ===%n", alpha);
+            System.out.printf("%n=== Pure OLAP α=%d query=%s ===%n", alpha, queryPath);
 
             AtomicBoolean aRunning = new AtomicBoolean(true);
             ExecutorService aPool = Executors.newFixedThreadPool(alpha);
@@ -186,7 +187,6 @@ public final class HATtrickMain {
 
                 double elapsedSec = (windowEnd - windowStart) / 1000.0;
                 double aQps = (aEnd - aStart) / elapsedSec;
-
                 System.out.printf("  α=%d  A-qps=%.4f  (queries=%d in %.1fs)%n",
                         alpha, aQps, aEnd - aStart, elapsedSec);
 
@@ -198,7 +198,7 @@ public final class HATtrickMain {
                 catch (InterruptedException ignored) {}
             }
         }
-        System.out.println("\nPhase 2 complete. Note down your X^A values above.");
+        System.out.println("\nPhase 2 complete.");
     }
 
     // ── Phase 3: Full grid ────────────────────────────────────────────────────
@@ -207,13 +207,15 @@ public final class HATtrickMain {
                                   int numWare, String gatewayUrl) {
         System.out.println("\n--- Phase 3: Full Grid ---");
 
-        System.out.println("  Available queries:");
-        System.out.println("    chq6         — CH Q6: full scan + SUM (live order VMS, Experiment I)");
-        System.out.println("    replica/chq6 — CH Q6: full scan + SUM (replica VMS, Experiment II)");
-        System.out.println("    chq1         — CH Q1: GROUP BY aggregate on order_line");
-        System.out.println("    chq4         — CH Q4: JOIN semi-join (orders + order_line)");
-        System.out.println("    chq3         — CH Q3: cross-VMS broadcast join (4 tables)");
-        System.out.println("    q1           — original cross-VMS join (customer + orders)");
+        boolean useReplica = Boolean.parseBoolean(props.getProperty("use_replica", "false"));
+
+        System.out.println("  use_replica=" + useReplica);
+        System.out.println("  Available queries (live order VMS):");
+        System.out.println("    chq6, chq1, chq4, chq3, q1");
+        if (useReplica) {
+            System.out.println("  Available queries (replica VMS):");
+            System.out.println("    replica/chq6, replica/chq1");
+        }
         System.out.print("  Query to run [default: chq6]: ");
         String queryChoice = scanner.nextLine().trim();
         String queryPath = queryChoice.isEmpty() ? "/olap/chq6" : "/olap/" + queryChoice;
@@ -257,27 +259,20 @@ public final class HATtrickMain {
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     /**
-     * Loads the coordinator and waits for all VMSes to connect.
-     *
-     * Experiment I  (no replica): 3 VMSes — warehouse, inventory, order.
-     *   ExperimentUtils.loadCoordinator builds the 3-VMS DAG.
-     *
-     * Experiment II (with replica): 4 VMSes — + replica.
-     *   ExperimentUtils.loadCoordinator builds the 4-VMS DAG with order
-     *   as internal and replica as terminal for new_order.
-     *
-     * The wait count is driven by ExperimentUtils.getVmsMap() — if replica
-     * is in starterVMSs, the coordinator connects to 4 VMSes and we wait
-     * for 4. The count below matches ExperimentUtils exactly.
+     * Waits for the right number of VMSes depending on use_replica.
+     * use_replica=false → 3 VMSes (warehouse, inventory, order)
+     * use_replica=true  → 4 VMSes (+ replica)
      */
     private static Coordinator loadCoordinator(Coordinator existing, Properties props) {
         if (existing != null) return existing;
         System.out.println("Loading coordinator...");
         Coordinator coordinator = ExperimentUtils.loadCoordinator(props);
-        System.out.print("Waiting for VMSes");
+
+        boolean useReplica = Boolean.parseBoolean(props.getProperty("use_replica", "false"));
+        int expectedVMSs = useReplica ? 4 : 3;
+
+        System.out.print("Waiting for " + expectedVMSs + " VMSes");
         int attempts = 0;
-        // ExperimentUtils includes replica in starterVMSs → wait for 4
-        int expectedVMSs = 4;
         do {
             try { Thread.sleep(500); } catch (InterruptedException ignored) {}
             System.out.print(".");

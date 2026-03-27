@@ -14,6 +14,8 @@ import java.nio.charset.StandardCharsets;
 
 public final class GatewayHttpHandler implements HttpHandler {
 
+    // ── Live order VMS queries (Experiment I) ─────────────────────────────────
+
     static final String PATH_Q1 = "/olap/q1";
     static final String SQL_Q1 = """
         SELECT c.c_d_id, COUNT(*)
@@ -26,9 +28,6 @@ public final class GatewayHttpHandler implements HttpHandler {
         GROUP BY c.c_d_id
     """;
 
-    // -------------------------------------------------------------------------
-    // CH Q6 — live order VMS (Experiment I)
-    // -------------------------------------------------------------------------
     static final String PATH_CHQ6 = "/olap/chq6";
     static final String SQL_CHQ6 = """
         SELECT SUM(ol.ol_amount) AS revenue
@@ -87,19 +86,15 @@ public final class GatewayHttpHandler implements HttpHandler {
         GROUP BY ol.ol_o_id, ol.ol_w_id, ol.ol_d_id, o.o_entry_d
     """;
 
-    // -------------------------------------------------------------------------
-    // CH Q6 — replica VMS (Experiment II)
-    //
-    // Routes to the replica's standard HTTP server on port 8096.
-    // The replica maintains its own order_line table updated via the
-    // new_order DAG: warehouse → inventory → order → replica (terminal).
-    //
-    // Port 8096 (not 8004): the vMODB VMS on port 8004 uses a custom NIO
-    // protocol that java.net.http.HttpClient cannot speak. The replica
-    // runs a separate standard HttpServer on 8096 for OLAP queries.
-    // -------------------------------------------------------------------------
+    // ── Replica VMS queries (Experiment II) — proxy to port 8096 ─────────────
+    // Port 8096 (not 8004): vMODB VMS uses custom NIO protocol on 8004.
+    // The replica runs a separate standard HttpServer on 8096 for OLAP.
+
     static final String PATH_REPLICA_CHQ6 = "/olap/replica/chq6";
     static final String REPLICA_CHQ6_URL  = "http://localhost:8096/chq6";
+
+    static final String PATH_REPLICA_CHQ1 = "/olap/replica/chq1";
+    static final String REPLICA_CHQ1_URL  = "http://localhost:8096/chq1";
 
     private final OlapGatewayService service;
 
@@ -117,26 +112,17 @@ public final class GatewayHttpHandler implements HttpHandler {
             return;
         }
 
-        // Replica passthrough — does not go through Calcite, direct HTTP proxy
+        // ── Replica passthrough ───────────────────────────────────────────────
         if (PATH_REPLICA_CHQ6.equals(path)) {
-            try {
-                HttpClient client = HttpClient.newHttpClient();
-                HttpRequest req = HttpRequest.newBuilder()
-                        .uri(URI.create(REPLICA_CHQ6_URL))
-                        .header("Accept", "application/json")
-                        .GET()
-                        .build();
-                HttpResponse<String> resp =
-                        client.send(req, HttpResponse.BodyHandlers.ofString());
-                send(exchange, resp.statusCode(), resp.body());
-            } catch (Exception e) {
-                send(exchange, 503, jsonError(
-                        "Replica unavailable (is it running? port 8096): "
-                                + e.getMessage()));
-            }
+            proxyToReplica(exchange, REPLICA_CHQ6_URL);
+            return;
+        }
+        if (PATH_REPLICA_CHQ1.equals(path)) {
+            proxyToReplica(exchange, REPLICA_CHQ1_URL);
             return;
         }
 
+        // ── Calcite queries ───────────────────────────────────────────────────
         String sql = switch (path) {
             case PATH_Q1   -> SQL_Q1;
             case PATH_CHQ6 -> SQL_CHQ6;
@@ -149,12 +135,13 @@ public final class GatewayHttpHandler implements HttpHandler {
         if (sql == null) {
             send(exchange, 404, jsonError(
                     "Unknown endpoint. Available: "
+                            + PATH_CHQ6 + " (CH Q6 live), "
+                            + PATH_CHQ1 + " (CH Q1 live), "
+                            + PATH_CHQ4 + " (CH Q4 live), "
+                            + PATH_CHQ3 + " (CH Q3 live), "
                             + PATH_Q1   + " (cross-VMS join), "
-                            + PATH_CHQ6 + " (CH Q6 live order VMS), "
-                            + PATH_CHQ1 + " (CH Q1 GROUP BY), "
-                            + PATH_CHQ4 + " (CH Q4 JOIN), "
-                            + PATH_CHQ3 + " (CH Q3 cross-VMS), "
-                            + PATH_REPLICA_CHQ6 + " (CH Q6 replica VMS - Experiment II)"
+                            + PATH_REPLICA_CHQ6 + " (CH Q6 replica), "
+                            + PATH_REPLICA_CHQ1 + " (CH Q1 replica)"
             ));
             return;
         }
@@ -164,6 +151,23 @@ public final class GatewayHttpHandler implements HttpHandler {
             send(exchange, 200, responseJson);
         } catch (Exception e) {
             send(exchange, 500, jsonError("Gateway error: " + e.getMessage()));
+        }
+    }
+
+    private static void proxyToReplica(HttpExchange exchange, String url) throws IOException {
+        try {
+            HttpClient client = HttpClient.newHttpClient();
+            HttpRequest req = HttpRequest.newBuilder()
+                    .uri(URI.create(url))
+                    .header("Accept", "application/json")
+                    .GET()
+                    .build();
+            HttpResponse<String> resp =
+                    client.send(req, HttpResponse.BodyHandlers.ofString());
+            send(exchange, resp.statusCode(), resp.body());
+        } catch (Exception e) {
+            send(exchange, 503, jsonError(
+                    "Replica unavailable (port 8096): " + e.getMessage()));
         }
     }
 
