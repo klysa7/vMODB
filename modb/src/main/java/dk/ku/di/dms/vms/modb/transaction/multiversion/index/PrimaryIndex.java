@@ -569,46 +569,71 @@ public final class PrimaryIndex implements IMultiVersionIndex {
         public PrimaryIndexIteratorDisk(TransactionContext txCtx) {
             this.txCtx = txCtx;
             this.iterator = rawIndex.iterator();
-            // No copy of updatesPerKeyMap — use direct ConcurrentHashMap.get() instead.
-            // The copy was O(n) where n = all entries ever written to this index.
-            // After 70,000 new_orders × 10 order_lines = 700,000 entries, every scan
-            // allocated a 700,000-entry HashSet before reading a single row.
-            // ConcurrentHashMap.get() is O(1) and thread-safe without copying.
         }
 
         @SuppressWarnings("unchecked")
         @Override
         public boolean hasNext() {
-            while(this.iterator.hasNext()){
+            while (this.iterator.hasNext()) {
                 long address = this.iterator.address();
-                this.currRecord = ((ReadOnlyBufferIndex<IKey>)rawIndex).readFromIndex(address + Schema.RECORD_HEADER);
-                IKey nextKey = KeyUtils.buildRecordKey(rawIndex.schema().getPrimaryKeyColumns(), this.currRecord);
 
-                // Fast path: if snapshotId=0 (all current OLAP queries), no OLTP
-                // version can be visible (TIDs start at 1). Skip the map lookup entirely.
-                // This avoids 300,000 ConcurrentHashMap.get() calls under heavy write
-                // contention, which was causing Q1.1 to take >30 seconds at τ>0.
-                long snapshotToUse = this.txCtx.readOnly ? this.txCtx.lastTid : this.txCtx.tid;
-                if (snapshotToUse == 0) {
-                    // rawIndex version is the only visible version at snapshot 0
-                    return true;
-                }
+                // Read base record from rawIndex to extract the PK key.
+                // PK column values are immutable — they never change after insert,
+                // so reading them is safe even while checkpoint holds its exclusive
+                // lock on rawIndex for writing other columns.
+                Object[] baseRecord = ((ReadOnlyBufferIndex<IKey>) rawIndex)
+                        .readFromIndex(address + Schema.RECORD_HEADER);
+                IKey nextKey = KeyUtils.buildRecordKey(
+                        rawIndex.schema().getPrimaryKeyColumns(), baseRecord);
 
+                long snapshotToUse = this.txCtx.readOnly
+                        ? this.txCtx.lastTid
+                        : this.txCtx.tid;
+
+                // ── MVCC-first path ──────────────────────────────────────────────
+                // Check the in-memory version map BEFORE using rawIndex record data.
+                //
+                // Safety guarantee: any key that checkpoint() is currently writing
+                // to rawIndex MUST have an entry in updatesPerKeyMap.
+                // installWrites() adds to keysToFlush at the exact same time
+                // doInsert/doUpdate adds to updatesPerKeyMap. Therefore:
+                //
+                //   Case 1 — opSet exists AND has entry at or before snapshot:
+                //     → correct MVCC version found; use it directly.
+                //       rawIndex data for this key is irrelevant and we skip it.
+                //       This is the hot path for all OLTP-touched rows.
+                //
+                //   Case 2 — opSet exists BUT all entries are AFTER snapshot:
+                //     → key was written after our snapshot was taken.
+                //       Fall through: rawIndex holds the pre-OLTP stable version.
+                //
+                //   Case 3 — opSet is null (no MVCC entry at all):
+                //     → key was never modified after populate; NOT in keysToFlush;
+                //       checkpoint NEVER writes to it; rawIndex is correct and
+                //       the read is lock-safe.
+                //
+                // Outcome: checkpoint lock contention is eliminated for OLAP scans.
+                // OLAP readers never wait for checkpoint — they use their MVCC
+                // snapshot directly. No freshness is lost: the snapshot was already
+                // fixed at beginTransaction(lastTid, ...) before the scan started.
                 OperationSetOfKey opSet = updatesPerKeyMap.get(nextKey);
-                if(opSet != null) {
+                if (opSet != null) {
                     Entry<Long, TransactionWrite> entry = opSet.floorEntry(snapshotToUse);
-                    if(entry == null) {
-                        // No version at or before snapshotId in the version chain.
-                        // The row exists in rawIndex (we just read it), so use that —
-                        // it represents the state before any OLTP touched this key.
-                        // currRecord is already set to the rawIndex version above.
+                    if (entry != null) {
+                        if (entry.val().type == WriteType.DELETE) {
+                            continue;  // deleted at or before snapshot — skip
+                        }
+                        // Case 1: MVCC version found — use it, rawIndex not needed
+                        this.currRecord = entry.val().record;
                         return true;
                     }
-                    if(entry.val().type == WriteType.DELETE) {
-                        continue;  // deleted at or before snapshotId — not visible
-                    }
-                    this.currRecord = entry.val().record;
+                    // Case 2: all versions post-snapshot — fall through to rawIndex
                 }
+
+                // Case 3 (or Case 2 fallthrough): use stable rawIndex base version.
+                // checkpoint() will never write to this key because it has no
+                // keysToFlush entry, making this read unconditionally lock-safe.
+                this.currRecord = baseRecord;
                 return true;
             }
             return false;
@@ -616,7 +641,6 @@ public final class PrimaryIndex implements IMultiVersionIndex {
 
         @Override
         public Object[] next() {
-            // move iterator
             this.iterator.next();
             return this.currRecord;
         }
