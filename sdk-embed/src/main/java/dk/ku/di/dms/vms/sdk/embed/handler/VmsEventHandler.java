@@ -60,20 +60,7 @@ public final class VmsEventHandler extends ModbHttpServer {
         public final byte[] remoteColTypes;
         public final int[]  localColIndices;
         public final long snapshotId;
-
-        // ---------------------------------------------------------------
-        // A3 FIX — CHANGE 1: add createdAt timestamp.
-        //
-        // Without this field there is no way to know how long a JoinContext
-        // has been sitting in activeJoins. If the build-side VMS crashes
-        // mid-broadcast, END_OF_STREAM (type 101) never arrives, so the
-        // entry is never removed by the normal path (activeJoins.remove()
-        // in BroadcastReceiverHandler). The broadcastBuffer inside can hold
-        // up to 30,000 byte[] rows (~300 MB) and leaks forever.
-        // createdAt lets the cleanup task (Change 3) identify and evict it.
-        // ---------------------------------------------------------------
         public final long createdAt = System.currentTimeMillis();
-
         public final Map<String, byte[]> broadcastBuffer = new ConcurrentHashMap<>();
 
         public JoinContext(QueryRequestEvent.QueryPayload payload,
@@ -91,64 +78,35 @@ public final class VmsEventHandler extends ModbHttpServer {
     public record ColRefDTO(int columnPosition) {}
     public record PredicateDTO(ColRefDTO columnReference, String expression, Object value) {}
 
-    // ---------------------------------------------------------------
-    // A3 FIX — CHANGE 2: add the scheduler field alongside activeJoins.
-    //
-    // JOIN_TIMEOUT_MS: how long a JoinContext is allowed to exist without
-    // receiving END_OF_STREAM before we consider the build-side dead.
-    // 30 seconds is conservative — a normal join completes in ~3 seconds.
-    //
-    // joinCleaner: a single background thread that runs the eviction task.
-    // Daemon=true so it doesn't prevent JVM shutdown.
-    // ---------------------------------------------------------------
     private final Map<Long, JoinContext> activeJoins = new ConcurrentHashMap<>();
-
     private static final long JOIN_TIMEOUT_MS = 30_000L;
     private final ScheduledExecutorService joinCleaner =
             Executors.newSingleThreadScheduledExecutor(
                     r -> Thread.ofPlatform().name("join-cleaner").daemon(true).unstarted(r));
 
-
     private final java.util.concurrent.ExecutorService olapExecutor =
             Executors.newFixedThreadPool(2,
                     r -> Thread.ofPlatform().name("olap-query").daemon(true).unstarted(r));
 
-    /** SERVER SOCKET **/
     private final AsynchronousServerSocketChannel serverSocket;
     private final AsynchronousChannelGroup group;
-
-    /** INTERNAL CHANNELS **/
     private final VmsEmbedInternalChannels vmsInternalChannels;
-
-    /** VMS METADATA **/
     private final VmsNode me;
     private final VmsRuntimeMetadata vmsMetadata;
-
-    /** EXTERNAL VMSs **/
     private final Map<String, List<IVmsContainer>> eventToConsumersMap;
     private final Map<IdentifiableNode, IVmsContainer> consumerVmsContainerMap;
     private final Map<Integer, ConnectionMetadata> producerConnectionMetadataMap;
-
-    /** For checkpointing the state */
     private final ITransactionManager transactionManager;
-
-    /** SERIALIZATION & DESERIALIZATION **/
     private final IVmsSerdesProxy serdesProxy;
-
     private final VmsHandlerOptions options;
     private final IHttpHandler httpHandler;
-
-    /** COORDINATOR **/
     private ServerNode leader;
     private ConnectionMetadata leaderConnectionMetadata;
     private LeaderWorker leaderWorker;
 
     @SuppressWarnings("MismatchedQueryAndUpdateOfCollection")
     private final Set<String> queuesLeaderSubscribesTo;
-
-    /** INTERNAL STATE **/
     private final Map<Long, BatchContext> batchContextMap;
-
     public final Map<Long, BatchMetadata> trackingBatchMap;
 
     public static final class BatchMetadata {
@@ -177,14 +135,9 @@ public final class VmsEventHandler extends ModbHttpServer {
         }
     }
 
-    public record VmsHandlerOptions(int maxSleep,
-                                    int networkBufferSize,
-                                    int soBufferSize,
-                                    int networkThreadPoolSize,
-                                    int networkSendTimeout,
-                                    int numVmsWorkers,
-                                    boolean logging,
-                                    boolean checkpointing) {}
+    public record VmsHandlerOptions(int maxSleep, int networkBufferSize, int soBufferSize,
+                                    int networkThreadPoolSize, int networkSendTimeout,
+                                    int numVmsWorkers, boolean logging, boolean checkpointing) {}
 
     private VmsEventHandler(VmsNode me,
                             VmsRuntimeMetadata vmsMetadata,
@@ -194,19 +147,16 @@ public final class VmsEventHandler extends ModbHttpServer {
                             IHttpHandler httpHandler,
                             IVmsSerdesProxy serdesProxy) throws IOException {
         super();
-
-        if(options.networkThreadPoolSize > 0){
+        if (options.networkThreadPoolSize > 0) {
             this.group = AsynchronousChannelGroup.withFixedThreadPool(
                     options.networkThreadPoolSize,
-                    Thread.ofPlatform().name("vms-network-thread").factory()
-            );
+                    Thread.ofPlatform().name("vms-network-thread").factory());
             this.serverSocket = AsynchronousServerSocketChannel.open(this.group);
         } else {
             this.group = null;
             this.serverSocket = AsynchronousServerSocketChannel.open(null);
         }
         this.serverSocket.bind(me.asInetSocketAddress());
-
         this.vmsInternalChannels = vmsInternalChannels;
         this.me = me;
         this.vmsMetadata = vmsMetadata;
@@ -224,19 +174,6 @@ public final class VmsEventHandler extends ModbHttpServer {
         this.options = options;
         this.httpHandler = httpHandler;
 
-        // ---------------------------------------------------------------
-        // A3 FIX — CHANGE 3: start the stale-join eviction task.
-        //
-        // This runs every 30 seconds. For each entry in activeJoins it
-        // checks whether createdAt is older than JOIN_TIMEOUT_MS. If yes,
-        // the build-side VMS never sent END_OF_STREAM (it crashed or was
-        // killed), so we remove the entry. Without this, every failed join
-        // leaks the broadcastBuffer (~300 MB) permanently.
-        //
-        // Example: benchmark runs 100 queries, Warehouse VMS crashes on
-        // query 50. Old: activeJoins grows to 50 stale entries = 15 GB
-        // leaked. New: within 30s all 50 entries are evicted and GC'd.
-        // ---------------------------------------------------------------
         this.joinCleaner.scheduleAtFixedRate(() -> {
             long cutoff = System.currentTimeMillis() - JOIN_TIMEOUT_MS;
             long removed = activeJoins.entrySet().stream()
@@ -246,8 +183,7 @@ public final class VmsEventHandler extends ModbHttpServer {
                     .count();
             if (removed > 0) {
                 LOGGER.log(WARNING, me.identifier + ": Evicted " + removed
-                        + " stale JoinContext(s) older than " + JOIN_TIMEOUT_MS + "ms. "
-                        + "The build-side VMS likely crashed before sending END_OF_STREAM.");
+                        + " stale JoinContext(s) older than " + JOIN_TIMEOUT_MS + "ms.");
             }
         }, 30, 30, TimeUnit.SECONDS);
     }
@@ -255,11 +191,11 @@ public final class VmsEventHandler extends ModbHttpServer {
     @Override
     public void run() {
         this.serverSocket.accept(null, new AcceptCompletionHandler());
-        LOGGER.log(DEBUG, this.me.identifier+": Accept handler setup");
+        LOGGER.log(DEBUG, this.me.identifier + ": Accept handler setup");
     }
 
     public void processOutputEvent(IVmsTransactionResult txResult) {
-        LOGGER.log(DEBUG, this.me.identifier+": New transaction result in event handler. TID = "+ txResult.tid());
+        LOGGER.log(DEBUG, this.me.identifier + ": New transaction result in event handler. TID = " + txResult.tid());
         if (txResult.getOutboundEventResult().outputQueue() != null) {
             Map<String, Long> precedenceMap = this.tidToPrecedenceMap.get(txResult.tid());
             if (precedenceMap != null) {
@@ -275,23 +211,21 @@ public final class VmsEventHandler extends ModbHttpServer {
 
     private void updateBatchStats(OutboundEventResult outputEvent) {
         BatchMetadata batchMetadata = this.updateBatchMetadataAtomically(outputEvent);
-        if(!this.batchContextMap.containsKey(outputEvent.batch())) return;
+        if (!this.batchContextMap.containsKey(outputEvent.batch())) return;
         BatchContext thisBatch = this.batchContextMap.get(outputEvent.batch());
-        if(thisBatch.numberOfTIDsBatch != batchMetadata.numberTIDsExecuted) {
-            return;
-        }
+        if (thisBatch.numberOfTIDsBatch != batchMetadata.numberTIDsExecuted) return;
         LOGGER.log(DEBUG, this.me.identifier + ": All TIDs for the batch " + thisBatch.batch + " have been executed");
         thisBatch.setStatus(BatchContext.BATCH_COMPLETED);
         if (thisBatch.terminal) {
             LOGGER.log(DEBUG, this.me.identifier + ": Requesting leader worker to send batch " + thisBatch.batch + " complete");
             this.leaderWorker.queueMessage(BatchComplete.of(thisBatch.batch, this.me.identifier));
         }
-        if(this.options.checkpointing()){
+        if (this.options.checkpointing()) {
             LOGGER.log(DEBUG, this.me.identifier + ": Requesting checkpoint for batch " + thisBatch.batch);
             thisBatch.setStatus(BatchContext.CHECKPOINTING);
-            submitBackgroundTask(()->this.checkpoint(thisBatch.batch, batchMetadata.maxTidExecuted));
+            submitBackgroundTask(() -> this.checkpoint(thisBatch.batch, batchMetadata.maxTidExecuted));
         } else {
-            submitBackgroundTask(()->transactionManager.cleanup(batchMetadata.maxTidExecuted));
+            submitBackgroundTask(() -> transactionManager.cleanup(batchMetadata.maxTidExecuted));
         }
         this.cleanUpBatchInfo(thisBatch.batch);
     }
@@ -303,25 +237,24 @@ public final class VmsEventHandler extends ModbHttpServer {
     }
 
     private BatchMetadata updateBatchMetadataAtomically(OutboundEventResult outputEvent) {
-        return this.trackingBatchMap.compute(outputEvent.batch(),
-                (ignored, y) -> {
-                    BatchMetadata toMod = y;
-                    if(toMod == null){ toMod = new BatchMetadata(); }
-                    toMod.numberTIDsExecuted += 1;
-                    if(toMod.maxTidExecuted < outputEvent.tid()){ toMod.maxTidExecuted = outputEvent.tid(); }
-                    return toMod;
-                });
+        return this.trackingBatchMap.compute(outputEvent.batch(), (ignored, y) -> {
+            BatchMetadata toMod = y;
+            if (toMod == null) toMod = new BatchMetadata();
+            toMod.numberTIDsExecuted += 1;
+            if (toMod.maxTidExecuted < outputEvent.tid()) toMod.maxTidExecuted = outputEvent.tid();
+            return toMod;
+        });
     }
 
     private void connectToReceivedConsumerSet(Map<String, List<IdentifiableNode>> receivedConsumerVms) {
         Map<IdentifiableNode, List<String>> consumerToEventsMap = new HashMap<>();
-        for(Map.Entry<String,List<IdentifiableNode>> entry : receivedConsumerVms.entrySet()) {
-            for(IdentifiableNode consumer : entry.getValue()){
+        for (Map.Entry<String, List<IdentifiableNode>> entry : receivedConsumerVms.entrySet()) {
+            for (IdentifiableNode consumer : entry.getValue()) {
                 consumerToEventsMap.computeIfAbsent(consumer, (ignored) -> new ArrayList<>()).add(entry.getKey());
             }
         }
-        for(Map.Entry<IdentifiableNode,List<String>> consumerEntry : consumerToEventsMap.entrySet()) {
-            for(int i = 0; i < this.options.numVmsWorkers; i++){
+        for (Map.Entry<IdentifiableNode, List<String>> consumerEntry : consumerToEventsMap.entrySet()) {
+            for (int i = 0; i < this.options.numVmsWorkers; i++) {
                 this.initConsumerVmsWorker(consumerEntry.getKey(), consumerEntry.getValue(), i);
             }
         }
@@ -331,56 +264,53 @@ public final class VmsEventHandler extends ModbHttpServer {
 
     private void checkpoint(long batch, long maxTid) {
         this.transactionManager.checkpoint(maxTid);
-        if(INFORM_BATCH_ACK) {
+        if (INFORM_BATCH_ACK) {
             this.leaderWorker.queueMessage(BatchCommitAck.of(batch, this.me.identifier));
         }
     }
 
-    private void processOutputEvent(OutboundEventResult outputEvent, String precedenceMap){
+    private void processOutputEvent(OutboundEventResult outputEvent, String precedenceMap) {
         Class<?> clazz = this.vmsMetadata.queueToEventMap().get(outputEvent.outputQueue());
         String objStr = this.serdesProxy.serialize(outputEvent.output(), clazz);
         List<IVmsContainer> consumerVMSs = this.eventToConsumersMap.get(outputEvent.outputQueue());
-        if(consumerVMSs == null || consumerVMSs.isEmpty()){
-            LOGGER.log(DEBUG, this.me.identifier+": An output event (queue: "+outputEvent.outputQueue()+") has no target virtual microservices.");
+        if (consumerVMSs == null || consumerVMSs.isEmpty()) {
+            LOGGER.log(DEBUG, this.me.identifier + ": An output event (queue: " + outputEvent.outputQueue() + ") has no target virtual microservices.");
             return;
         }
         TransactionEvent.PayloadRaw payload = TransactionEvent.of(outputEvent.tid(), outputEvent.batch(), outputEvent.outputQueue(), objStr, precedenceMap);
-        for(IVmsContainer consumerVmsContainer : consumerVMSs) {
-            LOGGER.log(DEBUG, this.me.identifier+": An output event (queue: " + outputEvent.outputQueue() + ") will be queued to VMS: " + consumerVmsContainer.identifier());
+        for (IVmsContainer consumerVmsContainer : consumerVMSs) {
+            LOGGER.log(DEBUG, this.me.identifier + ": An output event (queue: " + outputEvent.outputQueue() + ") will be queued to VMS: " + consumerVmsContainer.identifier());
             consumerVmsContainer.queue(payload);
         }
     }
 
-    public void initConsumerVmsWorker(IdentifiableNode node, List<String> outputEvents, int identifier){
-        if(this.producerConnectionMetadataMap.containsKey(node.hashCode())){
-            LOGGER.log(WARNING,"The node "+ node.host+" "+ node.port+" already contains a connection as a producer");
+    public void initConsumerVmsWorker(IdentifiableNode node, List<String> outputEvents, int identifier) {
+        if (this.producerConnectionMetadataMap.containsKey(node.hashCode())) {
+            LOGGER.log(WARNING, "The node " + node.host + " " + node.port + " already contains a connection as a producer");
         }
-        if(this.me.hashCode() == node.hashCode()){
-            LOGGER.log(ERROR, this.me.identifier+" is receiving itself as consumer: "+ node.identifier);
+        if (this.me.hashCode() == node.hashCode()) {
+            LOGGER.log(ERROR, this.me.identifier + " is receiving itself as consumer: " + node.identifier);
             return;
         }
         ConsumerVmsWorker consumerVmsWorker = ConsumerVmsWorker.build(this.me, node,
-                () -> JdkAsyncChannel.create(this.group),
-                this.options,
-                this.serdesProxy);
-        Thread.ofPlatform().name("vms-consumer-"+node.identifier+"-"+identifier)
-                .inheritInheritableThreadLocals(false)
-                .start(consumerVmsWorker);
-        if(!this.consumerVmsContainerMap.containsKey(node)){
-            if(this.options.numVmsWorkers == 1) {
+                () -> JdkAsyncChannel.create(this.group), this.options, this.serdesProxy);
+        Thread.ofPlatform().name("vms-consumer-" + node.identifier + "-" + identifier)
+                .inheritInheritableThreadLocals(false).start(consumerVmsWorker);
+        if (!this.consumerVmsContainerMap.containsKey(node)) {
+            if (this.options.numVmsWorkers == 1) {
                 this.consumerVmsContainerMap.put(node, consumerVmsWorker);
             } else {
                 MultiVmsContainer multiVmsContainer = new MultiVmsContainer(consumerVmsWorker, node, this.options.numVmsWorkers);
                 this.consumerVmsContainerMap.put(node, multiVmsContainer);
             }
             for (String outputEvent : outputEvents) {
-                LOGGER.log(INFO, me.identifier+ " adding "+outputEvent+" to consumers map with "+node.identifier);
+                LOGGER.log(INFO, me.identifier + " adding " + outputEvent + " to consumers map with " + node.identifier);
                 this.eventToConsumersMap.computeIfAbsent(outputEvent, (ignored) -> new ArrayList<>());
                 this.eventToConsumersMap.get(outputEvent).add(consumerVmsWorker);
             }
         } else {
             IVmsContainer vmsContainer = this.consumerVmsContainerMap.get(node);
-            if(vmsContainer instanceof MultiVmsContainer multiVmsContainer){
+            if (vmsContainer instanceof MultiVmsContainer multiVmsContainer) {
                 multiVmsContainer.addConsumerVms(consumerVmsWorker);
             } else {
                 vmsContainer.stop();
@@ -390,14 +320,11 @@ public final class VmsEventHandler extends ModbHttpServer {
     }
 
     private final class VmsReadCompletionHandler implements CompletionHandler<Integer, Integer> {
-
         private final IdentifiableNode node;
         private final ConnectionMetadata connectionMetadata;
         private final ByteBuffer readBuffer;
 
-        public VmsReadCompletionHandler(IdentifiableNode node,
-                                        ConnectionMetadata connectionMetadata,
-                                        ByteBuffer byteBuffer){
+        public VmsReadCompletionHandler(IdentifiableNode node, ConnectionMetadata connectionMetadata, ByteBuffer byteBuffer) {
             this.node = node;
             this.connectionMetadata = connectionMetadata;
             this.readBuffer = byteBuffer;
@@ -406,36 +333,36 @@ public final class VmsEventHandler extends ModbHttpServer {
 
         @Override
         public void completed(Integer result, Integer startPos) {
-            if(result == -1){
-                LOGGER.log(WARNING, me.identifier+": VMS "+node.identifier+" has disconnected!");
-                try { this.connectionMetadata.channel.close(); } catch (IOException ignored) { }
+            if (result == -1) {
+                LOGGER.log(WARNING, me.identifier + ": VMS " + node.identifier + " has disconnected!");
+                try { this.connectionMetadata.channel.close(); } catch (IOException ignored) {}
                 return;
             }
-            if(startPos == 0){ this.readBuffer.flip(); }
+            if (startPos == 0) this.readBuffer.flip();
             byte messageType = this.readBuffer.get();
             switch (messageType) {
                 case (BATCH_OF_EVENTS) -> {
                     int bufferSize = this.getBufferSize();
-                    if(this.readBuffer.remaining() < bufferSize){ this.fetchMoreBytes(startPos); return; }
+                    if (this.readBuffer.remaining() < bufferSize) { this.fetchMoreBytes(startPos); return; }
                     this.processBatchOfEvents(this.readBuffer);
                 }
                 case (EVENT) -> {
                     int bufferSize = this.getBufferSize();
-                    if(this.readBuffer.remaining() < bufferSize){ this.fetchMoreBytes(startPos); return; }
+                    if (this.readBuffer.remaining() < bufferSize) { this.fetchMoreBytes(startPos); return; }
                     this.processSingleEvent(this.readBuffer);
                 }
                 default -> {
-                    LOGGER.log(ERROR, me.identifier+": Unknown message type "+messageType+" received from: "+node.identifier);
-                    if(!isRunning()){ return; }
+                    LOGGER.log(ERROR, me.identifier + ": Unknown message type " + messageType + " received from: " + node.identifier);
+                    if (!isRunning()) return;
                 }
             }
-            if(this.readBuffer.hasRemaining()){ this.completed(result, this.readBuffer.position()); }
-            else { this.setUpNewRead(); }
+            if (this.readBuffer.hasRemaining()) this.completed(result, this.readBuffer.position());
+            else this.setUpNewRead();
         }
 
         private int getBufferSize() {
             int bufferSize = Integer.MAX_VALUE;
-            if(this.readBuffer.remaining() > Integer.BYTES) {
+            if (this.readBuffer.remaining() > Integer.BYTES) {
                 bufferSize = this.readBuffer.getInt();
                 bufferSize -= 1 + Integer.BYTES;
             }
@@ -456,13 +383,13 @@ public final class VmsEventHandler extends ModbHttpServer {
         private void processSingleEvent(ByteBuffer readBuffer) {
             try {
                 TransactionEvent.Payload payload = TransactionEvent.read(readBuffer);
-                LOGGER.log(DEBUG, me.identifier+": 1 event received from "+node.identifier+"\n"+payload);
+                LOGGER.log(DEBUG, me.identifier + ": 1 event received from " + node.identifier + "\n" + payload);
                 if (vmsMetadata.queueToEventMap().containsKey(payload.event())) {
                     InboundEvent inboundEvent = buildInboundEvent(payload);
                     vmsInternalChannels.transactionInputQueue().add(inboundEvent);
                 }
             } catch (Exception e) {
-                if(e instanceof BufferUnderflowException)
+                if (e instanceof BufferUnderflowException)
                     LOGGER.log(ERROR, me.identifier + ": Buffer underflow exception while reading event: " + e);
                 else
                     LOGGER.log(ERROR, me.identifier + ": Unknown exception: " + e);
@@ -471,25 +398,25 @@ public final class VmsEventHandler extends ModbHttpServer {
 
         private void processBatchOfEvents(ByteBuffer readBuffer) {
             List<InboundEvent> inboundEvents = LIST_BUFFER.poll();
-            if(inboundEvents == null) inboundEvents = new ArrayList<>(1024*10);
+            if (inboundEvents == null) inboundEvents = new ArrayList<>(1024 * 10);
             try {
                 int count = readBuffer.getInt();
                 LOGGER.log(DEBUG, me.identifier + ": Batch of [" + count + "] events received from " + node.identifier);
                 int i = 0;
                 while (i < count) {
                     TransactionEvent.Payload payload = TransactionEvent.read(readBuffer);
-                    LOGGER.log(DEBUG, me.identifier+": Processed TID "+payload.tid());
+                    LOGGER.log(DEBUG, me.identifier + ": Processed TID " + payload.tid());
                     if (vmsMetadata.queueToEventMap().containsKey(payload.event())) {
                         inboundEvents.add(buildInboundEvent(payload));
                     }
                     i++;
                 }
-                if(count != inboundEvents.size()){
-                    LOGGER.log(WARNING, me.identifier + ": Batch of [" +count+ "] events != from "+inboundEvents.size()+" that will be pushed to worker " + node.identifier);
+                if (count != inboundEvents.size()) {
+                    LOGGER.log(WARNING, me.identifier + ": Batch of [" + count + "] events != from " + inboundEvents.size() + " that will be pushed to worker " + node.identifier);
                 }
                 vmsInternalChannels.transactionInputQueue().addAll(inboundEvents);
-                LOGGER.log(DEBUG, "Number of inputs pending processing: "+vmsInternalChannels.transactionInputQueue().size());
-            } catch(Exception e){
+                LOGGER.log(DEBUG, "Number of inputs pending processing: " + vmsInternalChannels.transactionInputQueue().size());
+            } catch (Exception e) {
                 if (e instanceof BufferUnderflowException)
                     LOGGER.log(ERROR, me.identifier + ": Buffer underflow exception while reading batch: " + e);
                 else
@@ -502,7 +429,7 @@ public final class VmsEventHandler extends ModbHttpServer {
 
         @Override
         public void failed(Throwable exc, Integer carryOn) {
-            LOGGER.log(ERROR, me.identifier+": Error on reading VMS message from "+node.identifier+"\n"+exc);
+            LOGGER.log(ERROR, me.identifier + ": Error on reading VMS message from " + node.identifier + "\n" + exc);
             exc.printStackTrace(System.out);
             this.setUpNewRead();
         }
@@ -521,21 +448,17 @@ public final class VmsEventHandler extends ModbHttpServer {
         public void completed(Integer result, Integer attachment) {
             if (result == -1) return;
             readBuffer.flip();
-
             while (readBuffer.hasRemaining()) {
                 readBuffer.mark();
                 byte type = readBuffer.get();
-
                 if (type == END_OF_STREAM_TYPE) {
                     if (readBuffer.remaining() < 12) { readBuffer.reset(); break; }
                     readBuffer.getInt();
                     long queryId = readBuffer.getLong();
-
                     JoinContext ctx = activeJoins.remove(queryId);
                     if (ctx != null) {
                         System.out.println(">>> [ORDER VMS] Broadcast END received. Hash Map size: " + ctx.broadcastBuffer.size());
                         System.out.println(">>> [ORDER VMS] Starting Join with local table: " + ctx.payload.tableName());
-
                         TransactionManager tm = (TransactionManager) transactionManager;
                         Iterator<byte[]> joinIter = tm.getJoinIterator(
                                 ctx.payload.tableName(), ctx.broadcastBuffer, ctx.localColIndices, ctx.snapshotId);
@@ -547,22 +470,18 @@ public final class VmsEventHandler extends ModbHttpServer {
                     try { channel.close(); } catch (Exception ignored) {}
                     return;
                 }
-
                 if (type == QUERY_RESULT_TYPE) {
                     if (readBuffer.remaining() < 12) { readBuffer.reset(); break; }
                     int dataSize = readBuffer.getInt();
                     if (readBuffer.remaining() < dataSize) { readBuffer.reset(); break; }
-
                     long queryId = readBuffer.getLong();
                     JoinContext ctx = activeJoins.get(queryId);
-
                     int bytesRemaining = dataSize - 8;
                     while (bytesRemaining > 0) {
                         int rowSize = readBuffer.getInt();
                         byte[] rowData = new byte[rowSize];
                         readBuffer.get(rowData);
                         bytesRemaining -= (4 + rowSize);
-
                         if (ctx != null) {
                             GeneralRowView rowView = GeneralRowView.threadLocal();
                             rowView.wrap(rowData);
@@ -575,7 +494,6 @@ public final class VmsEventHandler extends ModbHttpServer {
                     break;
                 }
             }
-
             if (readBuffer.hasRemaining()) {
                 readBuffer.compact();
                 channel.read(readBuffer, readBuffer.position(), this);
@@ -593,7 +511,6 @@ public final class VmsEventHandler extends ModbHttpServer {
     }
 
     private final class UnknownNodeReadCompletionHandler implements CompletionHandler<Integer, Void> {
-
         private final AsynchronousSocketChannel channel;
         private final ByteBuffer buffer;
 
@@ -605,13 +522,13 @@ public final class VmsEventHandler extends ModbHttpServer {
         @Override
         public void completed(Integer result, Void void_) {
             String remoteAddress = "";
-            try { remoteAddress = channel.getRemoteAddress().toString(); } catch (IOException ignored) { }
-            if(result == 0){
-                LOGGER.log(WARNING, me.identifier+": A node ("+remoteAddress+") is trying to connect with an empty message!");
+            try { remoteAddress = channel.getRemoteAddress().toString(); } catch (IOException ignored) {}
+            if (result == 0) {
+                LOGGER.log(WARNING, me.identifier + ": A node (" + remoteAddress + ") is trying to connect with an empty message!");
                 try { this.channel.close(); } catch (IOException ignored) {}
                 return;
-            } else if(result == -1){
-                LOGGER.log(WARNING, me.identifier+": A node ("+remoteAddress+") died before sending the presentation message");
+            } else if (result == -1) {
+                LOGGER.log(WARNING, me.identifier + ": A node (" + remoteAddress + ") died before sending the presentation message");
                 try { this.channel.close(); } catch (IOException ignored) {}
                 return;
             }
@@ -632,24 +549,22 @@ public final class VmsEventHandler extends ModbHttpServer {
                 return;
             }
 
-            if(messageIdentifier != PRESENTATION){
+            if (messageIdentifier != PRESENTATION) {
                 this.buffer.flip();
                 String request = StandardCharsets.UTF_8.decode(this.buffer).toString();
-                if(HttpUtils.isHttpClient(request)){
+                if (HttpUtils.isHttpClient(request)) {
                     HttpReadCompletionHandler readCompletionHandler = new HttpReadCompletionHandler(
-                            new ConnectionMetadata("http_client".hashCode(),
-                                    ConnectionMetadata.NodeType.HTTP_CLIENT,
-                                    this.channel),
+                            new ConnectionMetadata("http_client".hashCode(), ConnectionMetadata.NodeType.HTTP_CLIENT, this.channel),
                             this.buffer,
                             MemoryManager.getTemporaryDirectBuffer(options.networkBufferSize),
                             httpHandler);
-                    try { NetworkUtils.configure(this.channel, options.soBufferSize()); } catch (IOException ignored) { }
+                    try { NetworkUtils.configure(this.channel, options.soBufferSize()); } catch (IOException ignored) {}
                     readCompletionHandler.parse(new HttpReadCompletionHandler.RequestTracking());
                 } else {
-                    LOGGER.log(WARNING, me.identifier + ": A node is trying to connect without a presentation message.\n"+request);
+                    LOGGER.log(WARNING, me.identifier + ": A node is trying to connect without a presentation message.\n" + request);
                     this.buffer.clear();
                     MemoryManager.releaseTemporaryDirectBuffer(this.buffer);
-                    try { this.channel.close(); } catch (IOException ignored) { }
+                    try { this.channel.close(); } catch (IOException ignored) {}
                 }
                 return;
             }
@@ -657,8 +572,8 @@ public final class VmsEventHandler extends ModbHttpServer {
             this.buffer.position(2);
             switch (nodeTypeIdentifier) {
                 case (Presentation.SERVER_TYPE) -> this.processServerPresentation();
-                case (Presentation.VMS_TYPE) -> this.processVmsPresentation();
-                case (Presentation.GATEWAY_TYPE) -> this.processGatewayPresentation();
+                case (Presentation.VMS_TYPE)    -> this.processVmsPresentation();
+                case (Presentation.GATEWAY_TYPE)-> this.processGatewayPresentation();
                 default -> this.processUnknownNodeType(nodeTypeIdentifier);
             }
         }
@@ -666,8 +581,7 @@ public final class VmsEventHandler extends ModbHttpServer {
         private void processGatewayPresentation() {
             LOGGER.log(INFO, me.identifier + ": Processing presentation message from Gateway");
             VmsNode gatewayNode = Presentation.readVms(this.buffer, serdesProxy);
-            ConnectionMetadata connMetadata = new ConnectionMetadata(
-                    gatewayNode.hashCode(), ConnectionMetadata.NodeType.GATEWAY, this.channel);
+            ConnectionMetadata connMetadata = new ConnectionMetadata(gatewayNode.hashCode(), ConnectionMetadata.NodeType.GATEWAY, this.channel);
             GatewayReadCompletionHandler handler = new GatewayReadCompletionHandler(gatewayNode, connMetadata, this.buffer);
             if (this.buffer.hasRemaining()) {
                 int leftoverBytes = this.buffer.remaining();
@@ -694,7 +608,7 @@ public final class VmsEventHandler extends ModbHttpServer {
             public void completed(Integer result, Integer startPos) {
                 if (result == -1) {
                     LOGGER.log(WARNING, me.identifier + ": Gateway disconnected.");
-                    try { connectionMetadata.channel.close(); } catch (IOException ignored) { }
+                    try { connectionMetadata.channel.close(); } catch (IOException ignored) {}
                     return;
                 }
                 if (startPos == 0) readBuffer.flip();
@@ -702,11 +616,6 @@ public final class VmsEventHandler extends ModbHttpServer {
 
                 byte type = readBuffer.get();
                 if (type == QueryRequestEvent.QUERY_REQUEST_TYPE) {
-                    // Copy remaining buffer bytes so the network thread can
-                    // immediately proceed to the next read while the OLAP
-                    // executor processes the query on its own thread.
-                    // Without this copy, processQueryRequest would run inline
-                    // on the channel group thread, blocking OLTP I/O.
                     ByteBuffer queryCopy = ByteBuffer.allocate(readBuffer.remaining());
                     queryCopy.put(readBuffer);
                     queryCopy.flip();
@@ -717,7 +626,6 @@ public final class VmsEventHandler extends ModbHttpServer {
                             LOGGER.log(ERROR, ">>> [VMS] FATAL ERROR processing QueryRequest!", e);
                         }
                     });
-                    // Don't wait for query — immediately set up next read
                     readBuffer.clear();
                     connectionMetadata.channel.read(readBuffer, 0, this);
                 } else {
@@ -727,14 +635,22 @@ public final class VmsEventHandler extends ModbHttpServer {
                 }
             }
 
+            // ─────────────────────────────────────────────────────────────────
+            // QPO-3: processQueryRequest now reads projectionData from the
+            // payload and passes int[] projectedCols to executeStandardScan.
+            // The projection travels: gateway wire → VmsEventHandler →
+            // TransactionManager.getScanIterator() → serializeRowProjected().
+            // ─────────────────────────────────────────────────────────────────
             private void processQueryRequest(ByteBuffer buffer) {
                 try {
                     buffer.getInt();
                     var payload = QueryRequestEvent.read(buffer);
-                    LOGGER.log(INFO, ">>> [VMS] Received Request | Table: " + payload.tableName() + " | Mode: " + payload.mode());
+                    LOGGER.log(INFO, ">>> [VMS] Received Request | Table: " + payload.tableName()
+                            + " | Mode: " + payload.mode());
 
                     TransactionManager tm = (TransactionManager) transactionManager;
 
+                    // ── Predicate parsing (unchanged) ──────────────────────────
                     List<TransactionManager.SimplePredicate> predicates = null;
                     if (payload.predicates() != null && payload.predicates().length > 0) {
                         String jsonString = new String(payload.predicates(), StandardCharsets.UTF_8);
@@ -749,13 +665,23 @@ public final class VmsEventHandler extends ModbHttpServer {
                         }
                     }
 
+                    // ── QPO-3: projection parsing ──────────────────────────────
+                    // Deserialize the projected column indices from the payload.
+                    // null means full scan (backward compatible — no field sent).
+                    int[] projectedCols = null;
+                    if (payload.projectionData() != null && payload.projectionData().length > 0) {
+                        projectedCols = QueryRequestEvent.deserializeProjection(payload.projectionData());
+                        LOGGER.log(INFO, ">>> [VMS] QPO-3 projection for " + payload.tableName()
+                                + ": " + java.util.Arrays.toString(projectedCols));
+                    }
+
                     final List<TransactionManager.SimplePredicate> finalPredicates = predicates;
+                    final int[] finalProjectedCols = projectedCols;
 
                     if (payload.mode() == QueryRequestEvent.MODE_SCAN_TO_GATEWAY) {
-                        executeStandardScan(payload, finalPredicates, tm,
-                                (AsynchronousSocketChannel) connectionMetadata.channel);
-                    }
-                    else if (payload.mode() == QueryRequestEvent.MODE_BROADCAST_TO_VMS) {
+                        executeStandardScan(payload, finalPredicates, finalProjectedCols,
+                                tm, (AsynchronousSocketChannel) connectionMetadata.channel);
+                    } else if (payload.mode() == QueryRequestEvent.MODE_BROADCAST_TO_VMS) {
                         String targetAddress = new String(payload.routingData(), StandardCharsets.UTF_8);
                         String[] parts = targetAddress.split(":");
                         String host = parts[0];
@@ -766,15 +692,15 @@ public final class VmsEventHandler extends ModbHttpServer {
                             @Override
                             public void completed(Void r, Void a) {
                                 LOGGER.log(INFO, ">>> [WAREHOUSE] CONNECTION SUCCESS! Starting Scan...");
-                                executeStandardScan(payload, finalPredicates, tm, targetChannel);
+                                // Broadcast always sends full rows — no projection
+                                executeStandardScan(payload, finalPredicates, null, tm, targetChannel);
                             }
                             @Override
                             public void failed(Throwable exc, Void a) {
                                 LOGGER.log(ERROR, ">>> [WAREHOUSE] CONNECTION FAILED! Could not connect to Order VMS!", exc);
                             }
                         });
-                    }
-                    else if (payload.mode() == QueryRequestEvent.MODE_RECEIVE_AND_JOIN) {
+                    } else if (payload.mode() == QueryRequestEvent.MODE_RECEIVE_AND_JOIN) {
                         JoinRoutingData jrd = JoinRoutingData.fromBytes(payload.routingData());
                         activeJoins.put(payload.queryId(),
                                 new JoinContext(payload, (AsynchronousSocketChannel) connectionMetadata.channel, jrd));
@@ -786,12 +712,20 @@ public final class VmsEventHandler extends ModbHttpServer {
                 }
             }
 
+            // ─────────────────────────────────────────────────────────────────
+            // QPO-3: projectedCols parameter added.
+            // null = full scan (join path, broadcast path, pre-QPO-3 clients).
+            // non-null = only serialize the listed column indices on the VMS.
+            // ─────────────────────────────────────────────────────────────────
             private void executeStandardScan(QueryRequestEvent.QueryPayload payload,
                                              List<TransactionManager.SimplePredicate> predicates,
+                                             int[] projectedCols,   // QPO-3
                                              TransactionManager tm,
                                              AsynchronousSocketChannel outputChannel) {
                 Iterator<byte[]> byteIterator = tm.getScanIterator(
-                        payload.tableName(), predicates, payload.snapshotId());
+                        payload.tableName(), predicates,
+                        projectedCols,            // QPO-3: may be null (full scan)
+                        payload.snapshotId());
                 if (byteIterator == null) return;
                 VmsQueryWorker worker = new VmsQueryWorker(
                         outputChannel, byteIterator, payload,
@@ -806,14 +740,14 @@ public final class VmsEventHandler extends ModbHttpServer {
         }
 
         private void processServerPresentation() {
-            LOGGER.log(INFO, me.identifier+": Start processing presentation message from a node claiming to be a server");
-            if(!leader.isActive()) {
+            LOGGER.log(INFO, me.identifier + ": Start processing presentation message from a node claiming to be a server");
+            if (!leader.isActive()) {
                 ConnectionFromLeaderProtocol connectionFromLeader = new ConnectionFromLeaderProtocol(this.channel, this.buffer);
                 connectionFromLeader.processLeaderPresentation();
             } else {
                 this.buffer.get();
                 ServerNode serverNode = Presentation.readServer(this.buffer);
-                if(serverNode.asInetSocketAddress().equals(leader.asInetSocketAddress())) {
+                if (serverNode.asInetSocketAddress().equals(leader.asInetSocketAddress())) {
                     LOGGER.log(INFO, me.identifier + ": Leader requested an additional connection");
                     this.buffer.clear();
                     channel.read(buffer, 0, new LeaderReadCompletionHandler(new ConnectionMetadata(leader.hashCode(), ConnectionMetadata.NodeType.SERVER, channel), buffer));
@@ -827,29 +761,28 @@ public final class VmsEventHandler extends ModbHttpServer {
         }
 
         private void processVmsPresentation() {
-            LOGGER.log(INFO, me.identifier+": Start processing presentation message from a node claiming to be a VMS");
+            LOGGER.log(INFO, me.identifier + ": Start processing presentation message from a node claiming to be a VMS");
             VmsNode producerVms = Presentation.readVms(this.buffer, serdesProxy);
-            LOGGER.log(INFO, me.identifier+": Producer VMS received:\n"+producerVms);
+            LOGGER.log(INFO, me.identifier + ": Producer VMS received:\n" + producerVms);
             this.buffer.clear();
-            ConnectionMetadata connMetadata = new ConnectionMetadata(
-                    producerVms.hashCode(), ConnectionMetadata.NodeType.VMS, this.channel);
-            if(consumerVmsContainerMap.containsKey(producerVms)){
-                LOGGER.log(WARNING, me.identifier+": The node "+producerVms.host+" "+producerVms.port+" already contains a connection as a consumer");
+            ConnectionMetadata connMetadata = new ConnectionMetadata(producerVms.hashCode(), ConnectionMetadata.NodeType.VMS, this.channel);
+            if (consumerVmsContainerMap.containsKey(producerVms)) {
+                LOGGER.log(WARNING, me.identifier + ": The node " + producerVms.host + " " + producerVms.port + " already contains a connection as a consumer");
             }
-            if(producerConnectionMetadataMap.containsKey(producerVms.hashCode())) {
-                LOGGER.log(INFO, me.identifier+": Setting up additional consumption from producer "+producerVms);
+            if (producerConnectionMetadataMap.containsKey(producerVms.hashCode())) {
+                LOGGER.log(INFO, me.identifier + ": Setting up additional consumption from producer " + producerVms);
             } else {
                 producerConnectionMetadataMap.put(producerVms.hashCode(), connMetadata);
-                LOGGER.log(INFO, me.identifier+": Setting up consumption from producer "+producerVms);
+                LOGGER.log(INFO, me.identifier + ": Setting up consumption from producer " + producerVms);
             }
             this.channel.read(this.buffer, 0, new VmsReadCompletionHandler(producerVms, connMetadata, this.buffer));
         }
 
         private void processUnknownNodeType(byte nodeTypeIdentifier) {
-            LOGGER.log(WARNING, me.identifier+": Presentation message from unknown source:" + nodeTypeIdentifier);
+            LOGGER.log(WARNING, me.identifier + ": Presentation message from unknown source:" + nodeTypeIdentifier);
             this.buffer.clear();
             MemoryManager.releaseTemporaryDirectBuffer(this.buffer);
-            try { this.channel.close(); } catch (IOException ignored) { }
+            try { this.channel.close(); } catch (IOException ignored) {}
         }
 
         @Override
@@ -861,17 +794,17 @@ public final class VmsEventHandler extends ModbHttpServer {
     private final class AcceptCompletionHandler implements CompletionHandler<AsynchronousSocketChannel, Void> {
         @Override
         public void completed(AsynchronousSocketChannel channel, Void void_) {
-            LOGGER.log(DEBUG, me.identifier+": An unknown host has started a connection attempt.");
+            LOGGER.log(DEBUG, me.identifier + ": An unknown host has started a connection attempt.");
             final ByteBuffer buffer = MemoryManager.getTemporaryDirectBuffer(options.networkBufferSize);
             try {
                 NetworkUtils.configure(channel, options.soBufferSize);
                 channel.read(buffer, null, new UnknownNodeReadCompletionHandler(channel, buffer));
-            } catch(Exception e){
-                LOGGER.log(ERROR, me.identifier+": Accept handler caught an exception:\n"+e);
+            } catch (Exception e) {
+                LOGGER.log(ERROR, me.identifier + ": Accept handler caught an exception:\n" + e);
                 buffer.clear();
                 MemoryManager.releaseTemporaryDirectBuffer(buffer);
             } finally {
-                LOGGER.log(DEBUG, me.identifier+": Accept handler set up again for listening to new connections");
+                LOGGER.log(DEBUG, me.identifier + ": Accept handler set up again for listening to new connections");
                 serverSocket.accept(null, this);
             }
         }
@@ -880,21 +813,17 @@ public final class VmsEventHandler extends ModbHttpServer {
         public void failed(Throwable exc, Void attachment) {
             String message = exc.getMessage();
             boolean logError = true;
-            if(message == null){
-                if (exc.getCause() instanceof ClosedChannelException){
-                    message = "Connection is closed";
-                } else if (exc instanceof AsynchronousCloseException || exc.getCause() instanceof AsynchronousCloseException) {
-                    message = "Event handler has been stopped?";
-                } else {
-                    message = "No cause identified";
-                }
+            if (message == null) {
+                if (exc.getCause() instanceof ClosedChannelException) message = "Connection is closed";
+                else if (exc instanceof AsynchronousCloseException || exc.getCause() instanceof AsynchronousCloseException) message = "Event handler has been stopped?";
+                else message = "No cause identified";
                 LOGGER.log(WARNING, me.identifier + ": Error on accepting connection: " + message);
-            } else if(message.equalsIgnoreCase("Too many open files")){
+            } else if (message.equalsIgnoreCase("Too many open files")) {
                 logError = false;
                 System.out.println("Too many open files error was caught. Cannot log the error appropriately.");
             }
-            if (serverSocket.isOpen()){ serverSocket.accept(null, this); }
-            else if(logError) { LOGGER.log(WARNING, me.identifier+": Socket is not open anymore. Cannot set up accept again"); }
+            if (serverSocket.isOpen()) serverSocket.accept(null, this);
+            else if (logError) LOGGER.log(WARNING, me.identifier + ": Socket is not open anymore. Cannot set up accept again");
         }
     }
 
@@ -913,41 +842,40 @@ public final class VmsEventHandler extends ModbHttpServer {
 
         private enum State { PRESENTATION_RECEIVED, PRESENTATION_PROCESSED, PRESENTATION_SENT }
 
-        private final class WriteCompletionHandler implements CompletionHandler<Integer,Void> {
+        private final class WriteCompletionHandler implements CompletionHandler<Integer, Void> {
             @Override
             public void completed(Integer result, Void attachment) {
                 state = State.PRESENTATION_SENT;
-                LOGGER.log(INFO, me.identifier+": Message sent to Leader successfully = "+state);
-                leaderWorker = new LeaderWorker(me, leader,
-                        leaderConnectionMetadata.channel,
+                LOGGER.log(INFO, me.identifier + ": Message sent to Leader successfully = " + state);
+                leaderWorker = new LeaderWorker(me, leader, leaderConnectionMetadata.channel,
                         MemoryManager.getTemporaryDirectBuffer(options.networkBufferSize));
-                LOGGER.log(INFO, me.identifier+": Leader worker set up");
+                LOGGER.log(INFO, me.identifier + ": Leader worker set up");
                 buffer.clear();
                 channel.read(buffer, 0, new LeaderReadCompletionHandler(leaderConnectionMetadata, buffer));
             }
             @Override
             public void failed(Throwable exc, Void attachment) {
-                LOGGER.log(INFO, me.identifier+": Failed to send presentation to Leader");
+                LOGGER.log(INFO, me.identifier + ": Failed to send presentation to Leader");
                 buffer.clear();
-                if(!channel.isOpen()) { leaderWorker.stop(); leader.off(); }
+                if (!channel.isOpen()) { leaderWorker.stop(); leader.off(); }
             }
         }
 
         public void processLeaderPresentation() {
-            LOGGER.log(INFO, me.identifier+": Start processing the Leader presentation");
+            LOGGER.log(INFO, me.identifier + ": Start processing the Leader presentation");
             boolean includeMetadata = this.buffer.get() == Presentation.YES;
             leader = Presentation.readServer(this.buffer);
             boolean hasQueuesToSubscribe = this.buffer.get() == Presentation.YES;
-            if(hasQueuesToSubscribe){
+            if (hasQueuesToSubscribe) {
                 queuesLeaderSubscribesTo.addAll(Presentation.readQueuesToSubscribeTo(this.buffer, serdesProxy));
             }
-            if(leaderConnectionMetadata != null) {
-                LOGGER.log(WARNING, me.identifier+": Updating leader connection metadata due to new connection");
+            if (leaderConnectionMetadata != null) {
+                LOGGER.log(WARNING, me.identifier + ": Updating leader connection metadata due to new connection");
             }
             leaderConnectionMetadata = new ConnectionMetadata(leader.hashCode(), ConnectionMetadata.NodeType.SERVER, channel);
             leader.on();
             this.buffer.clear();
-            if(includeMetadata) {
+            if (includeMetadata) {
                 String vmsDataSchemaStr = serdesProxy.serializeDataSchema(me.dataSchema);
                 String vmsInputEventSchemaStr = serdesProxy.serializeEventSchema(me.inputEventSchema);
                 String vmsOutputEventSchemaStr = serdesProxy.serializeEventSchema(me.outputEventSchema);
@@ -957,17 +885,17 @@ public final class VmsEventHandler extends ModbHttpServer {
             }
             this.buffer.flip();
             this.state = State.PRESENTATION_PROCESSED;
-            LOGGER.log(INFO, me.identifier+": Message successfully received from the Leader  = "+state);
+            LOGGER.log(INFO, me.identifier + ": Message successfully received from the Leader  = " + state);
             this.channel.write(this.buffer, null, this.writeCompletionHandler);
         }
     }
 
-    private InboundEvent buildInboundEvent(TransactionEvent.Payload payload){
+    private InboundEvent buildInboundEvent(TransactionEvent.Payload payload) {
         Class<?> clazz = this.vmsMetadata.queueToEventMap().get(payload.event());
         Object input = this.serdesProxy.deserialize(payload.payload(), clazz);
         Map<String, Long> precedenceMap = this.serdesProxy.deserializeDependenceMap(payload.precedenceMap());
-        if(precedenceMap == null){ throw new IllegalStateException("Precedence map is null."); }
-        if(!precedenceMap.containsKey(this.me.identifier)){ throw new IllegalStateException("Precedent tid of "+payload.tid()+" is unknown."); }
+        if (precedenceMap == null) throw new IllegalStateException("Precedence map is null.");
+        if (!precedenceMap.containsKey(this.me.identifier)) throw new IllegalStateException("Precedent tid of " + payload.tid() + " is unknown.");
         this.tidToPrecedenceMap.put(payload.tid(), precedenceMap);
         return new InboundEvent(payload.tid(), precedenceMap.get(this.me.identifier), payload.batch(), payload.event(), clazz, input);
     }
@@ -975,11 +903,10 @@ public final class VmsEventHandler extends ModbHttpServer {
     private static final ConcurrentLinkedDeque<List<InboundEvent>> LIST_BUFFER = new ConcurrentLinkedDeque<>();
 
     private final class LeaderReadCompletionHandler implements CompletionHandler<Integer, Integer> {
-
         private final ConnectionMetadata connectionMetadata;
         private final ByteBuffer readBuffer;
 
-        public LeaderReadCompletionHandler(ConnectionMetadata connectionMetadata, ByteBuffer readBuffer){
+        public LeaderReadCompletionHandler(ConnectionMetadata connectionMetadata, ByteBuffer readBuffer) {
             this.connectionMetadata = connectionMetadata;
             this.readBuffer = readBuffer;
             LIST_BUFFER.add(new ArrayList<>(1024));
@@ -987,49 +914,49 @@ public final class VmsEventHandler extends ModbHttpServer {
 
         @Override
         public void completed(Integer result, Integer startPos) {
-            if(result == -1){
-                LOGGER.log(INFO, me.identifier+": Leader has disconnected");
+            if (result == -1) {
+                LOGGER.log(INFO, me.identifier + ": Leader has disconnected");
                 leader.off();
                 try { this.connectionMetadata.channel.close(); } catch (IOException e) { e.printStackTrace(System.out); }
                 return;
             }
-            if(startPos == 0){
+            if (startPos == 0) {
                 this.readBuffer.flip();
-                LOGGER.log(DEBUG, me.identifier+": Leader has sent "+this.readBuffer.limit()+" bytes");
+                LOGGER.log(DEBUG, me.identifier + ": Leader has sent " + this.readBuffer.limit() + " bytes");
             }
             byte messageType = this.readBuffer.get();
             try {
                 switch (messageType) {
                     case (BATCH_OF_EVENTS) -> {
                         int bufferSize = this.getBufferSize();
-                        if(this.readBuffer.remaining() < bufferSize){ this.fetchMoreBytes(startPos); return; }
+                        if (this.readBuffer.remaining() < bufferSize) { this.fetchMoreBytes(startPos); return; }
                         this.processBatchOfEvents(this.readBuffer);
                     }
                     case (EVENT) -> {
                         int bufferSize = this.getBufferSize();
-                        if(this.readBuffer.remaining() < bufferSize){ this.fetchMoreBytes(startPos); return; }
+                        if (this.readBuffer.remaining() < bufferSize) { this.fetchMoreBytes(startPos); return; }
                         this.processSingleEvent(readBuffer);
                     }
                     case (BATCH_COMMIT_INFO) -> {
-                        if(this.readBuffer.remaining() < (BatchCommitInfo.SIZE - 1)){ this.fetchMoreBytes(startPos); return; }
+                        if (this.readBuffer.remaining() < (BatchCommitInfo.SIZE - 1)) { this.fetchMoreBytes(startPos); return; }
                         BatchCommitInfo.Payload bPayload = BatchCommitInfo.read(this.readBuffer);
                         LOGGER.log(DEBUG, me.identifier + ": Batch (" + bPayload.batch() + ") commit info received from the leader");
                         this.processNewBatchInfo(bPayload);
                     }
                     case (BATCH_COMMIT_COMMAND) -> {
-                        if(this.readBuffer.remaining() < (BatchCommitCommand.SIZE - 1)){ this.fetchMoreBytes(startPos); return; }
+                        if (this.readBuffer.remaining() < (BatchCommitCommand.SIZE - 1)) { this.fetchMoreBytes(startPos); return; }
                         BatchCommitCommand.Payload payload = BatchCommitCommand.read(this.readBuffer);
                         LOGGER.log(DEBUG, me.identifier + ": Batch (" + payload.batch() + ") commit command received from the leader");
                         this.processNewBatchCommand(payload);
                     }
                     case (TX_ABORT) -> {
-                        if(this.readBuffer.remaining() < (TransactionAbort.SIZE - 1)){ this.fetchMoreBytes(startPos); return; }
+                        if (this.readBuffer.remaining() < (TransactionAbort.SIZE - 1)) { this.fetchMoreBytes(startPos); return; }
                         TransactionAbort.Payload txAbortPayload = TransactionAbort.read(this.readBuffer);
                         LOGGER.log(WARNING, "Transaction (" + txAbortPayload.batch() + ") abort received from the leader?");
                         vmsInternalChannels.transactionAbortInputQueue().add(txAbortPayload);
                     }
                     case (BATCH_ABORT_REQUEST) -> {
-                        if(this.readBuffer.remaining() < (BatchAbortRequest.SIZE - 1)){ this.fetchMoreBytes(startPos); return; }
+                        if (this.readBuffer.remaining() < (BatchAbortRequest.SIZE - 1)) { this.fetchMoreBytes(startPos); return; }
                         BatchAbortRequest.Payload batchAbortReq = BatchAbortRequest.read(this.readBuffer);
                         LOGGER.log(WARNING, "Batch (" + batchAbortReq.batch() + ") abort received from the leader");
                     }
@@ -1037,8 +964,8 @@ public final class VmsEventHandler extends ModbHttpServer {
                         try {
                             LOGGER.log(INFO, me.identifier + ": Consumer set received from the leader");
                             Map<String, List<IdentifiableNode>> receivedConsumerVms = ConsumerSet.read(this.readBuffer, serdesProxy);
-                            if (!receivedConsumerVms.isEmpty()) { connectToReceivedConsumerSet(receivedConsumerVms); }
-                            else { LOGGER.log(WARNING, me.identifier + ": Consumer set is empty"); }
+                            if (!receivedConsumerVms.isEmpty()) connectToReceivedConsumerSet(receivedConsumerVms);
+                            else LOGGER.log(WARNING, me.identifier + ": Consumer set is empty");
                         } catch (IOException e) {
                             LOGGER.log(ERROR, me.identifier + ": IOException while reading consumer set: " + e);
                             e.printStackTrace(System.out);
@@ -1047,13 +974,12 @@ public final class VmsEventHandler extends ModbHttpServer {
                     case (PRESENTATION) -> LOGGER.log(WARNING, me.identifier + ": Presentation being sent again by the leader!?");
                     default -> LOGGER.log(ERROR, me.identifier + ": Message type sent by the leader cannot be identified: " + messageType);
                 }
-            } catch (Exception e){
-                LOGGER.log(ERROR, "Leader: Error caught\n"+e.getMessage(), e);
+            } catch (Exception e) {
+                LOGGER.log(ERROR, "Leader: Error caught\n" + e.getMessage(), e);
                 e.printStackTrace(System.out);
             }
-
-            if(this.readBuffer.hasRemaining()){ this.completed(result, this.readBuffer.position()); }
-            else { this.setUpNewRead(); }
+            if (this.readBuffer.hasRemaining()) this.completed(result, this.readBuffer.position());
+            else this.setUpNewRead();
         }
 
         private int getBufferSize() {
@@ -1077,24 +1003,24 @@ public final class VmsEventHandler extends ModbHttpServer {
 
         private void processBatchOfEvents(ByteBuffer readBuffer) {
             List<InboundEvent> payloads = LIST_BUFFER.poll();
-            if(payloads == null) payloads = new ArrayList<>(1024);
+            if (payloads == null) payloads = new ArrayList<>(1024);
             try {
                 int count = readBuffer.getInt();
                 LOGGER.log(DEBUG, me.identifier + ": Batch of [" + count + "] events received from the leader");
                 for (int i = 0; i < count; i++) {
                     TransactionEvent.Payload payload = TransactionEvent.read(readBuffer);
-                    LOGGER.log(DEBUG, me.identifier+": Processed TID "+payload.tid());
+                    LOGGER.log(DEBUG, me.identifier + ": Processed TID " + payload.tid());
                     if (vmsMetadata.queueToEventMap().containsKey(payload.event())) {
                         payloads.add(buildInboundEvent(payload));
                         continue;
                     }
-                    LOGGER.log(WARNING, me.identifier + ": queue not identified for event received from the leader \n"+payload);
+                    LOGGER.log(WARNING, me.identifier + ": queue not identified for event received from the leader \n" + payload);
                 }
                 vmsInternalChannels.transactionInputQueue().addAll(payloads);
-            } catch (Exception e){
-                LOGGER.log(ERROR, me.identifier +": Error while processing a batch\n"+e);
+            } catch (Exception e) {
+                LOGGER.log(ERROR, me.identifier + ": Error while processing a batch\n" + e);
                 e.printStackTrace(System.out);
-                if(e instanceof BufferUnderflowException) { throw new RuntimeException(e); }
+                if (e instanceof BufferUnderflowException) throw new RuntimeException(e);
             } finally {
                 payloads.clear();
                 LIST_BUFFER.add(payloads);
@@ -1104,57 +1030,57 @@ public final class VmsEventHandler extends ModbHttpServer {
         private void processSingleEvent(ByteBuffer readBuffer) {
             try {
                 TransactionEvent.Payload payload = TransactionEvent.read(readBuffer);
-                LOGGER.log(DEBUG, me.identifier + ": 1 event received from the leader \n"+payload);
+                LOGGER.log(DEBUG, me.identifier + ": 1 event received from the leader \n" + payload);
                 if (vmsMetadata.queueToEventMap().containsKey(payload.event())) {
                     vmsInternalChannels.transactionInputQueue().add(buildInboundEvent(payload));
                     return;
                 }
-                LOGGER.log(WARNING, me.identifier + ": queue not identified for event received from the leader \n"+payload);
+                LOGGER.log(WARNING, me.identifier + ": queue not identified for event received from the leader \n" + payload);
             } catch (Exception e) {
-                if(e instanceof BufferUnderflowException)
+                if (e instanceof BufferUnderflowException)
                     LOGGER.log(ERROR, me.identifier + ": Buffer underflow exception while reading event: " + e);
                 else
                     LOGGER.log(ERROR, me.identifier + ": Unknown exception: " + e);
             }
         }
 
-        private void processNewBatchInfo(BatchCommitInfo.Payload batchCommitInfo){
+        private void processNewBatchInfo(BatchCommitInfo.Payload batchCommitInfo) {
             BatchContext batchContext = BatchContext.build(batchCommitInfo);
             batchContextMap.put(batchCommitInfo.batch(), batchContext);
-            if(trackingBatchMap.containsKey(batchCommitInfo.batch())
-                    && trackingBatchMap.get(batchCommitInfo.batch()).numberTIDsExecuted == batchCommitInfo.numberOfTIDsBatch()){
-                LOGGER.log(INFO, me.identifier+": Requesting leader worker to send batch ("+batchCommitInfo.batch()+") complete (LATE)");
+            if (trackingBatchMap.containsKey(batchCommitInfo.batch())
+                    && trackingBatchMap.get(batchCommitInfo.batch()).numberTIDsExecuted == batchCommitInfo.numberOfTIDsBatch()) {
+                LOGGER.log(INFO, me.identifier + ": Requesting leader worker to send batch (" + batchCommitInfo.batch() + ") complete (LATE)");
                 leaderWorker.queueMessage(BatchComplete.of(batchCommitInfo.batch(), me.identifier));
             }
         }
 
-        private void processNewBatchCommand(BatchCommitCommand.Payload batchCommitCommand){
+        private void processNewBatchCommand(BatchCommitCommand.Payload batchCommitCommand) {
             BatchContext batchContext = BatchContext.build(batchCommitCommand);
             batchContextMap.put(batchCommitCommand.batch(), batchContext);
             BatchMetadata batchMetadata = trackingBatchMap.get(batchCommitCommand.batch());
-            if(batchMetadata == null){
-                LOGGER.log(WARNING, me.identifier+": Cannot find tracking of batch "+ batchCommitCommand.batch());
+            if (batchMetadata == null) {
+                LOGGER.log(WARNING, me.identifier + ": Cannot find tracking of batch " + batchCommitCommand.batch());
                 return;
             }
-            if(batchContext.numberOfTIDsBatch != batchMetadata.numberTIDsExecuted) {
-                LOGGER.log(WARNING, me.identifier+": Batch "+ batchCommitCommand.batch()+" has not yet finished!");
+            if (batchContext.numberOfTIDsBatch != batchMetadata.numberTIDsExecuted) {
+                LOGGER.log(WARNING, me.identifier + ": Batch " + batchCommitCommand.batch() + " has not yet finished!");
                 return;
             }
             LOGGER.log(DEBUG, me.identifier + ": All TIDs for the batch " + batchCommitCommand.batch() + " have been executed");
             batchContext.setStatus(BatchContext.BATCH_COMPLETED);
-            if(options.checkpointing()){
+            if (options.checkpointing()) {
                 LOGGER.log(DEBUG, me.identifier + ": Requesting checkpoint for batch " + batchCommitCommand.batch());
                 batchContext.setStatus(BatchContext.CHECKPOINTING);
-                submitBackgroundTask(()->checkpoint(batchCommitCommand.batch(), batchMetadata.maxTidExecuted));
+                submitBackgroundTask(() -> checkpoint(batchCommitCommand.batch(), batchMetadata.maxTidExecuted));
             } else {
-                submitBackgroundTask(()->transactionManager.cleanup(batchMetadata.maxTidExecuted));
+                submitBackgroundTask(() -> transactionManager.cleanup(batchMetadata.maxTidExecuted));
             }
             cleanUpBatchInfo(batchCommitCommand.batch());
         }
 
         @Override
         public void failed(Throwable exc, Integer carryOn) {
-            LOGGER.log(ERROR, me.identifier+": Message could not be processed: "+exc);
+            LOGGER.log(ERROR, me.identifier + ": Message could not be processed: " + exc);
             exc.printStackTrace(System.out);
             this.setUpNewRead();
         }
@@ -1164,9 +1090,9 @@ public final class VmsEventHandler extends ModbHttpServer {
         this.stop();
         this.joinCleaner.shutdownNow();
         this.olapExecutor.shutdownNow();
-        for(var consumer : this.consumerVmsContainerMap.entrySet()){
+        for (var consumer : this.consumerVmsContainerMap.entrySet()) {
             consumer.getValue().stop();
         }
-        try { this.serverSocket.close(); } catch (IOException ignored){ }
+        try { this.serverSocket.close(); } catch (IOException ignored) {}
     }
 }

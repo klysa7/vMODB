@@ -1,12 +1,13 @@
 package dk.ku.di.dms.vms.calcite.client;
 
+import dk.ku.di.dms.vms.modb.common.schema.network.query.QueryRequestEvent;
+
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 
@@ -15,18 +16,15 @@ public class VmsGatewayClient {
     private static final byte GATEWAY_TYPE       = 12;
     private static final byte QUERY_REQUEST_TYPE = 99;
 
-    public Iterator<Object[]> scan(String host, int port, long queryId, long snapshotId,
-                                   byte mode, String tableName,
-                                   List<Class<?>> columnTypes,
-                                   byte[] predicates, byte[] routingData) {
-        return scanWithSchema(host, port, queryId, snapshotId, mode, tableName,
-                null, predicates, routingData);
-    }
+    // ── Scan with schema + projection (QPO-3 main entry point) ───────────────
 
-    public Iterator<Object[]> scanWithSchema(String host, int port, long queryId, long snapshotId,
+    public Iterator<Object[]> scanWithSchema(String host, int port,
+                                             long queryId, long snapshotId,
                                              byte mode, String tableName,
                                              List<ColumnDescriptor> descriptors,
-                                             byte[] predicates, byte[] routingData) {
+                                             byte[] predicates,
+                                             byte[] routingData,
+                                             byte[] projectionData) {  // QPO-3: new param
         try {
             Socket socket = new Socket(host, port);
             socket.setTcpNoDelay(true);
@@ -34,8 +32,10 @@ public class VmsGatewayClient {
             DataOutputStream out = new DataOutputStream(socket.getOutputStream());
             DataInputStream  in  = new DataInputStream(socket.getInputStream());
 
-            ByteBuffer buffer = ByteBuffer.allocate(4096);
-            buildPayload(buffer, queryId, snapshotId, mode, tableName, predicates, routingData);
+            // Increase buffer for safety — projection adds up to 40 bytes (10 cols × 4)
+            ByteBuffer buffer = ByteBuffer.allocate(8192);
+            buildPayload(buffer, queryId, snapshotId, mode, tableName,
+                    predicates, routingData, projectionData);
 
             buffer.flip();
             out.write(buffer.array(), 0, buffer.limit());
@@ -48,27 +48,33 @@ public class VmsGatewayClient {
         }
     }
 
-    // -------------------------------------------------------------------------
-    // B4 FIX: Replace the 5-second sleep with immediate socket close.
-    //
-    // OLD: after flushing the mode=1 (BROADCAST_TO_VMS) command, the gateway
-    //      slept for 5000 ms as a timing workaround, then closed the socket.
-    //      If the VMS takes longer than 5 s the gateway closes mid-broadcast.
-    //      If it finishes faster, 5 s of wall time is wasted per query.
-    //
-    // NEW: close the socket immediately after flush. The VMS has already
-    //      received the complete command payload. It independently opens its
-    //      own AsynchronousSocketChannel connection to the probe VMS and
-    //      streams rows there — the original gateway socket is not used for
-    //      data transfer at all. No sleep is needed.
-    //
-    //      The DistributedExecutor already calls scanWithSchema (mode=2) on
-    //      the probe VMS before triggerBroadcast, so the probe VMS has its
-    //      JoinContext registered and is ready to receive rows. The gateway's
-    //      VmsResultIterator on that second connection blocks naturally on
-    //      VmsResultIterator.fetchNextBatch() until the join result flows —
-    //      no timing assumption anywhere in the pipeline.
-    // -------------------------------------------------------------------------
+    /** Backward-compatible overload — no projection (broadcast path, join path) */
+    public Iterator<Object[]> scanWithSchema(String host, int port,
+                                             long queryId, long snapshotId,
+                                             byte mode, String tableName,
+                                             List<ColumnDescriptor> descriptors,
+                                             byte[] predicates,
+                                             byte[] routingData) {
+        return scanWithSchema(host, port, queryId, snapshotId, mode, tableName,
+                descriptors, predicates, routingData, null);
+    }
+
+    /** Legacy scan() overload — no descriptors, no projection */
+    public Iterator<Object[]> scan(String host, int port, long queryId, long snapshotId,
+                                   byte mode, String tableName,
+                                   List<Class<?>> columnTypes,
+                                   byte[] predicates, byte[] routingData) {
+        return scanWithSchema(host, port, queryId, snapshotId, mode, tableName,
+                null, predicates, routingData, null);
+    }
+
+    // ── Broadcast trigger (no projection needed — sends full rows to probe VMS) ─
+
+    /**
+     * B4 FIX: close socket immediately after flush.
+     * The VMS received the full command and will independently connect to the
+     * probe VMS. No sleep needed.
+     */
     public void triggerBroadcast(String host, int port, long queryId, long snapshotId,
                                  String tableName, byte[] predicates, String targetHostPort) {
         try {
@@ -76,17 +82,15 @@ public class VmsGatewayClient {
             socket.setTcpNoDelay(true);
             DataOutputStream out = new DataOutputStream(socket.getOutputStream());
 
-            ByteBuffer buffer = ByteBuffer.allocate(4096);
+            ByteBuffer buffer = ByteBuffer.allocate(8192);
             buildPayload(buffer, queryId, snapshotId, (byte) 1, tableName,
-                    predicates, targetHostPort.getBytes(StandardCharsets.UTF_8));
+                    predicates, targetHostPort.getBytes(StandardCharsets.UTF_8), null);
 
             buffer.flip();
             out.write(buffer.array(), 0, buffer.limit());
             out.flush();
-
-            // B4 FIX: close immediately — the VMS received the full command and
-            // will independently connect to the probe VMS. No sleep needed.
             socket.close();
+
             System.out.println(">>> [GATEWAY] Broadcast trigger sent to " + host + ":" + port
                     + " for table " + tableName + " (queryId=" + queryId + ")");
 
@@ -95,12 +99,15 @@ public class VmsGatewayClient {
         }
     }
 
+    // ── Wire payload builder ──────────────────────────────────────────────────
+
     private void buildPayload(ByteBuffer buffer, long queryId, long snapshotId,
                               byte mode, String tableName,
-                              byte[] predicates, byte[] routingData) {
+                              byte[] predicates, byte[] routingData,
+                              byte[] projectionData) {          // QPO-3: new param
         int startPos = buffer.position();
         buffer.put(QUERY_REQUEST_TYPE);
-        buffer.putInt(0);
+        buffer.putInt(0); // length placeholder
 
         buffer.putLong(queryId);
         buffer.putLong(snapshotId);
@@ -120,6 +127,14 @@ public class VmsGatewayClient {
         if (routingData != null && routingData.length > 0) {
             buffer.putInt(routingData.length);
             buffer.put(routingData);
+        } else {
+            buffer.putInt(0);
+        }
+
+        // QPO-3: projection field
+        if (projectionData != null && projectionData.length > 0) {
+            buffer.putInt(projectionData.length);
+            buffer.put(projectionData);
         } else {
             buffer.putInt(0);
         }
