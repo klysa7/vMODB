@@ -19,7 +19,9 @@ import dk.ku.di.dms.vms.modb.common.schema.network.query.QueryRequestEvent;
 import java.net.URI;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
 
 import static java.lang.System.Logger.Level.ERROR;
 import static java.lang.System.Logger.Level.INFO;
@@ -31,6 +33,15 @@ public final class DistributedExecutor {
 
     private final VmsGatewayClient gatewayClient;
     private final DistributedPlanner.ColumnsResolver columnsResolver;
+
+    // ── QPO-7: Descriptor cache ───────────────────────────────────────────────
+    // columnsResolver.columnMetas() iterates the full catalog on every call.
+    // Cache the resulting ColumnDescriptor list per schema.table — built once
+    // on the first query, reused on all subsequent queries.
+    // ConcurrentHashMap: safe under concurrent OLAP workers (α≥2).
+    // Key: "schema.table". Value: immutable ColumnDescriptor list.
+    private final ConcurrentHashMap<String, List<ColumnDescriptor>> descriptorCache =
+            new ConcurrentHashMap<>();
 
     public DistributedExecutor(VmsGatewayClient gatewayClient,
                                DistributedPlanner.ColumnsResolver columnsResolver) {
@@ -86,33 +97,17 @@ public final class DistributedExecutor {
                     .map(s -> (ScanSubPlan) s)
                     .findFirst().orElseThrow();
 
-            String schemaName       = ((ScanAllOperation) subplan.operation()).schema;
-            String tableName        = ((ScanAllOperation) subplan.operation()).table;
+            String schemaName   = ((ScanAllOperation) subplan.operation()).schema;
+            String tableName    = ((ScanAllOperation) subplan.operation()).table;
             List<CatalogColumn> allCols = columnsResolver.columnMetas(schemaName, tableName);
 
             // ── QPO-3: Projection pushdown ────────────────────────────────────
-            //
-            // scanDef.projectedIndices() comes from VModbTableAccess.projects,
-            // which is populated by VModbTableAccessRule when Calcite's logical
-            // plan has a Project on top of a TableScan (B61 fix).
-            //
-            // If projects is still null (B61 not yet fixed, or query selects *),
-            // we fall back to all columns — fully backward compatible.
-            //
-            // The critical invariant: projected descriptors must use SEQUENTIAL
-            // offsets (0, 4, 8, ...) matching the projected byte[] layout that
-            // serializeRowProjected() on the VMS writes. These are NOT the
-            // original schema offsets — only the projected columns' sizes matter.
-            // VmsResultIterator.parseRowData() reads using these sequential
-            // offsets correctly from the smaller byte[].
-            // ──────────────────────────────────────────────────────────────────
             int[] projectedColIndices = scanDef.projectedIndices(); // may be null
 
             List<CatalogColumn> projectedCols;
             byte[]              projectionData;
 
             if (projectedColIndices != null && projectedColIndices.length > 0) {
-                // Build the projected column list in the requested order
                 projectedCols = new ArrayList<>(projectedColIndices.length);
                 for (int idx : projectedColIndices) {
                     projectedCols.add(allCols.get(idx));
@@ -125,27 +120,34 @@ public final class DistributedExecutor {
                         + sumByteSizes(projectedCols) + " bytes/row (was "
                         + sumByteSizes(allCols) + ")");
             } else {
-                // No projection — send all columns (current behavior)
                 projectedCols  = allCols;
                 projectionData = null;
             }
 
-            // Sequential offsets for the output byte[] on the gateway side
-            int[] seqOffsets = computeDataOffsets(projectedCols);
-            List<ColumnDescriptor> descriptors = new ArrayList<>(projectedCols.size());
-            for (int i = 0; i < projectedCols.size(); i++) {
-                CatalogColumn col = projectedCols.get(i);
-                descriptors.add(new ColumnDescriptor(
-                        col.name(), col.type(),
-                        seqOffsets[i],   // sequential — NOT original schema offset
-                        col.byteSize()));
-            }
+            // ── QPO-7: use cached descriptors for the projected column set ────
+            // For the scan path, descriptors depend on the projected subset so
+            // we cache by "schema.table[col0,col1,...]" to handle both full and
+            // projected scans correctly.
+            String descKey = schemaName + "." + tableName
+                    + (projectedColIndices != null ? Arrays.toString(projectedColIndices) : "[]");
+            List<ColumnDescriptor> descriptors = descriptorCache.computeIfAbsent(descKey, k -> {
+                LOGGER.log(INFO, "QPO-7: Building descriptors for " + k + " (first call)");
+                int[] seqOff = computeDataOffsets(projectedCols);
+                List<ColumnDescriptor> d = new ArrayList<>(projectedCols.size());
+                for (int i = 0; i < projectedCols.size(); i++) {
+                    CatalogColumn col = projectedCols.get(i);
+                    d.add(new ColumnDescriptor(col.name(), col.type(), seqOff[i], col.byteSize()));
+                }
+                return Collections.unmodifiableList(d);
+            });
+            LOGGER.log(INFO, "QPO-7: Descriptors retrieved for " + descKey   // ADD THIS
+                    + " | cache size: " + descriptorCache.size());
 
             ScanSubPlan subplanWithDescriptors = new ScanSubPlan(
                     subplan.vmsName(), subplan.url(), subplan.exchangeId(),
                     subplan.operation(), subplan.columnsInOrder(),
                     subplan.predicates(), descriptors,
-                    projectionData);    // QPO-3: pass projection to StreamingScanOperator
+                    projectionData);
 
             return new StreamingScanOperator(gatewayClient, subplanWithDescriptors,
                     plan.snapshot);
@@ -207,7 +209,6 @@ public final class DistributedExecutor {
                                 LOGGER.log(INFO, ">>> [TRIGGER THREAD] Firing Broadcast from "
                                         + leftTable + " to " + targetAddress
                                         + " queryId=" + joinQueryId);
-                                // Note: broadcast sends FULL rows to probe VMS — no projection
                                 gatewayClient.triggerBroadcast(
                                         "localhost", leftPort, joinQueryId, plan.snapshot,
                                         leftTable, leftPlan.predicates(), targetAddress);
@@ -220,22 +221,33 @@ public final class DistributedExecutor {
 
                 int[] allRightOffsets = computeDataOffsets(rightCols);
 
-                List<ColumnDescriptor> combinedDescriptors = new ArrayList<>();
-                List<String> combinedColumns = new ArrayList<>();
+                // ── QPO-7: cache combined join descriptors ────────────────────
+                // Both sides are fixed schema — built once per unique join pair.
+                String joinDescKey = leftSchema + "." + leftTable
+                        + "+" + rightSchema + "." + rightTable;
+                List<ColumnDescriptor> combinedDescriptors =
+                        descriptorCache.computeIfAbsent(joinDescKey, k -> {
+                            LOGGER.log(INFO, "QPO-7: Building join descriptors for " + k + " (first call)");  // ADD THIS
+                            List<ColumnDescriptor> d = new ArrayList<>(
+                                    leftCols.size() + rightCols.size());
+                            for (int i = 0; i < leftCols.size(); i++) {
+                                CatalogColumn col = leftCols.get(i);
+                                d.add(new ColumnDescriptor(col.name(), col.type(),
+                                        allLeftOffsets[i], col.byteSize()));
+                            }
+                            for (int i = 0; i < rightCols.size(); i++) {
+                                CatalogColumn col = rightCols.get(i);
+                                d.add(new ColumnDescriptor(col.name(), col.type(),
+                                        remoteRecordSize + allRightOffsets[i], col.byteSize()));
+                            }
+                            return Collections.unmodifiableList(d);
+                        });
+                LOGGER.log(INFO, "QPO-7: Join descriptors retrieved for " + joinDescKey   // ADD THIS
+                        + " | cache size: " + descriptorCache.size());
 
-                for (int i = 0; i < leftCols.size(); i++) {
-                    CatalogColumn col = leftCols.get(i);
-                    combinedDescriptors.add(new ColumnDescriptor(
-                            col.name(), col.type(), allLeftOffsets[i], col.byteSize()));
-                    combinedColumns.add(col.name());
-                }
-                for (int i = 0; i < rightCols.size(); i++) {
-                    CatalogColumn col = rightCols.get(i);
-                    combinedDescriptors.add(new ColumnDescriptor(
-                            col.name(), col.type(),
-                            remoteRecordSize + allRightOffsets[i], col.byteSize()));
-                    combinedColumns.add(col.name());
-                }
+                List<String> combinedColumns = new ArrayList<>();
+                for (CatalogColumn col : leftCols)  combinedColumns.add(col.name());
+                for (CatalogColumn col : rightCols) combinedColumns.add(col.name());
 
                 JoinSubPlan receiverJoinPlan = new JoinSubPlan(
                         rightPlan.vmsName(), rightPlan.url(), rightPlan.exchangeId(),
