@@ -38,6 +38,8 @@ public final class GatewayHttpHandler implements HttpHandler {
     """;
 
     static final String PATH_CHQ6 = "/olap/chq6";
+    static final String PATH_CHQ6_FAST = "/olap/chq6-fast"; // <-- NEW: Optimized Route
+
     static final String SQL_CHQ6 = """
         SELECT SUM(ol.ol_amount) AS revenue
         FROM "order".order_line ol
@@ -127,8 +129,8 @@ public final class GatewayHttpHandler implements HttpHandler {
             return;
         }
 
-        // ── QPO-2: Hardcoded Query Compilation for CHQ6 ───────────────────────
-        if (PATH_CHQ6.equals(path)) {
+        // ── QPO-2: Hardcoded Query Compilation for CHQ6 (A/B Test Route) ──────
+        if (PATH_CHQ6_FAST.equals(path)) {
             try {
                 String responseJson = executeChq6Direct();
                 send(exchange, 200, responseJson);
@@ -138,9 +140,10 @@ public final class GatewayHttpHandler implements HttpHandler {
             return;
         }
 
-        // ── Standard Calcite queries ──────────────────────────────────────────
+        // ── Standard Calcite queries (Baseline Routes) ────────────────────────
         String sql = switch (path) {
             case PATH_Q1   -> SQL_Q1;
+            case PATH_CHQ6 -> SQL_CHQ6; // <-- RESTORED: Standard Calcite route for CHQ6
             case PATH_CHQ1 -> SQL_CHQ1;
             case PATH_CHQ4 -> SQL_CHQ4;
             case PATH_CHQ3 -> SQL_CHQ3;
@@ -182,8 +185,7 @@ public final class GatewayHttpHandler implements HttpHandler {
             int[] projectedCols = new int[]{8};
             byte[] projectionData = QueryRequestEvent.serializeProjection(projectedCols);
 
-            // Construct minimal QueryRequestEvent payload (No predicates passed here to keep it simple,
-            // relying on full scan projection and filtering mathematically, OR push predicates if needed)
+            // Construct minimal QueryRequestEvent payload
             int startPos = buffer.position();
             buffer.put(QueryRequestEvent.QUERY_REQUEST_TYPE);
             buffer.putInt(0); // Length placeholder
@@ -195,7 +197,7 @@ public final class GatewayHttpHandler implements HttpHandler {
             buffer.putInt(tableName.length);
             buffer.put(tableName);
 
-            buffer.putInt(0); // No predicates (we filter implicitly or fetch all)
+            buffer.putInt(0); // No predicates
             buffer.putInt(0); // No routing data
 
             buffer.putInt(projectionData.length);
@@ -248,6 +250,8 @@ public final class GatewayHttpHandler implements HttpHandler {
                 "  \"metadata\": [{\"name\": \"revenue\", \"type\": \"FLOAT\"}]\n" +
                 "}";
     }
+
+    // ... (rest of the file remains unchanged)
 
     private static void proxyToReplica(HttpExchange exchange, String url) throws IOException {
         try {
