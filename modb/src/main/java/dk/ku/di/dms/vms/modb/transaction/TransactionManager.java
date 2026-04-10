@@ -422,6 +422,98 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
         };
     }
 
+    /**
+     * QPO-5: Intra-VMS local hash join.
+     *
+     * Both tables are co-located in this VMS. Instead of the expensive
+     * gateway-side broadcast protocol (2 TCP connections, 100ms delay,
+     * full table transfer), we execute the join entirely in local memory.
+     *
+     * Algorithm:
+     *   1. Scan build table (orders), apply buildPredicates, hash on buildJoinCols
+     *   2. Scan probe table (order_line), probe hash map on probeJoinCols
+     *   3. GROUP BY groupByCol from build table, COUNT(*) matching rows
+     *   4. Return result rows: (groupByValue: INT 4 bytes, count: LONG 8 bytes)
+     *
+     * Cite: DeWitt & Gray 1992 — computation moves to data, not data to computation.
+     */
+    public Iterator<byte[]> getLocalJoinIterator(
+            String buildTableName,
+            String probeTableName,
+            int[]  buildJoinCols,
+            int[]  probeJoinCols,
+            List<SimplePredicate> buildPredicates,
+            int    groupByCol,
+            long   snapshotId) {
+
+        Table buildTable = this.catalog.get(buildTableName);
+        Table probeTable = this.catalog.get(probeTableName);
+        if (buildTable == null) throw new IllegalArgumentException("Build table not found: " + buildTableName);
+        if (probeTable == null) throw new IllegalArgumentException("Probe table not found: " + probeTableName);
+
+        var buildUnderlying = buildTable.primaryKeyIndex().underlyingIndex();
+        var probeUnderlying = probeTable.primaryKeyIndex().underlyingIndex();
+        if (!(buildUnderlying instanceof UniqueHashBufferIndex buildRaw))
+            throw new IllegalStateException("Build table requires UniqueHashBufferIndex");
+        if (!(probeUnderlying instanceof UniqueHashBufferIndex probeRaw))
+            throw new IllegalStateException("Probe table requires UniqueHashBufferIndex");
+
+        byte[] buildColTypes = resolveColumnTypes(buildRaw.schema(), buildJoinCols);
+        byte[] probeColTypes = resolveColumnTypes(probeRaw.schema(), probeJoinCols);
+
+        // ── Step 1: Build phase — hash filtered orders rows ───────────────────
+        // Key: composite join key string (o_id-o_d_id-o_w_id)
+        // Value: groupByCol value (o_ol_cnt)
+        TransactionContext buildCtx = new TransactionContext(0, snapshotId, true);
+        Iterator<Object[]> buildIter = buildTable.primaryKeyIndex().iterator(buildCtx);
+
+        Map<String, Integer> buildMap = new HashMap<>();
+        while (buildIter.hasNext()) {
+            Object[] row = buildIter.next();
+            if (row == null) continue;
+            if (buildPredicates != null && !buildPredicates.isEmpty()
+                    && !checkPredicates(row, buildPredicates)) continue;
+            String key = extractKeyFromRow(row, buildJoinCols, buildColTypes);
+            buildMap.put(key, ((Number) row[groupByCol]).intValue());
+        }
+
+        LOGGER.log(INFO, ">>> [LOCAL JOIN] Build phase complete. " + buildTableName
+                + " rows matched: " + buildMap.size() + " | snapshot: " + snapshotId);
+
+        // ── Step 2: Probe phase — scan order_line, match against build map ────
+        TransactionContext probeCtx = new TransactionContext(0, snapshotId, true);
+        Iterator<Object[]> probeIter = probeTable.primaryKeyIndex().iterator(probeCtx);
+
+        Map<Integer, Long> groups = new HashMap<>();
+        while (probeIter.hasNext()) {
+            Object[] row = probeIter.next();
+            if (row == null) continue;
+            String key = extractKeyFromRow(row, probeJoinCols, probeColTypes);
+            Integer groupVal = buildMap.get(key);
+            if (groupVal != null) {
+                groups.merge(groupVal, 1L, Long::sum);
+            }
+        }
+
+        LOGGER.log(INFO, ">>> [LOCAL JOIN] Probe phase complete. Groups: " + groups.size());
+
+        // ── Step 3: Serialize result rows ─────────────────────────────────────
+        // Each result row: (groupByValue: INT 4 bytes, count: LONG 8 bytes) = 12 bytes
+        List<byte[]> results = new ArrayList<>(groups.size());
+        for (Map.Entry<Integer, Long> entry : groups.entrySet()) {
+            ByteBuffer buf = ByteBuffer.allocate(12).order(ByteOrder.nativeOrder());
+            buf.putInt(entry.getKey());
+            buf.putLong(entry.getValue());
+            results.add(buf.array());
+        }
+
+        Iterator<byte[]> it = results.iterator();
+        return new Iterator<byte[]>() {
+            @Override public boolean hasNext() { return it.hasNext(); }
+            @Override public byte[] next()     { return it.next();    }
+        };
+    }
+
     private static int[] resolveColumnOffsets(dk.ku.di.dms.vms.modb.definition.Schema schema, int[] colIndices) {
         int[] all = schema.columnOffset();
         int[] result = new int[colIndices.length];
