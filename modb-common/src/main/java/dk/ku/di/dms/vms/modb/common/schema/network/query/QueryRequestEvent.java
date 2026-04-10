@@ -12,6 +12,8 @@ public final class QueryRequestEvent {
     public static final byte MODE_SCAN_TO_GATEWAY = 0;
     public static final byte MODE_BROADCAST_TO_VMS = 1;
     public static final byte MODE_RECEIVE_AND_JOIN = 2;
+    public static final byte MODE_LOCAL_JOIN = 3;
+
 
     // Wire format:
     // [99][length:4][queryId:8][snapshotId:8][mode:1]

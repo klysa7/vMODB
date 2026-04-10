@@ -3,6 +3,7 @@ package dk.ku.di.dms.vms.calcite.http;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import dk.ku.di.dms.vms.calcite.service.OlapGatewayService;
+import dk.ku.di.dms.vms.modb.common.schema.network.query.LocalJoinSpec;
 import dk.ku.di.dms.vms.modb.common.schema.network.query.QueryRequestEvent;
 
 import java.io.DataInputStream;
@@ -17,6 +18,8 @@ import java.net.http.HttpResponse;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 import static dk.ku.di.dms.vms.modb.common.schema.network.query.QueryResultEvent.END_OF_STREAM_TYPE;
 import static dk.ku.di.dms.vms.modb.common.schema.network.query.QueryResultEvent.QUERY_RESULT_TYPE;
@@ -39,6 +42,7 @@ public final class GatewayHttpHandler implements HttpHandler {
 
     static final String PATH_CHQ6 = "/olap/chq6";
     static final String PATH_CHQ6_FAST = "/olap/chq6-fast"; // <-- NEW: Optimized Route
+    static final String PATH_CHQ4_FAST = "/olap/chq4-fast"; // <-- NEW: Optimized Route
 
     static final String SQL_CHQ6 = """
         SELECT SUM(ol.ol_amount) AS revenue
@@ -129,6 +133,16 @@ public final class GatewayHttpHandler implements HttpHandler {
             return;
         }
 
+        if (PATH_CHQ4_FAST.equals(path)) {
+            try {
+                String responseJson = executeChq4Direct();
+                send(exchange, 200, responseJson);
+            } catch (Exception e) {
+                send(exchange, 500, jsonError("CHQ4 local join error: " + e.getMessage()));
+            }
+            return;
+        }
+
         // ── QPO-2: Hardcoded Query Compilation for CHQ6 (A/B Test Route) ──────
         if (PATH_CHQ6_FAST.equals(path)) {
             try {
@@ -162,6 +176,133 @@ public final class GatewayHttpHandler implements HttpHandler {
             send(exchange, 500, jsonError("Gateway error: " + e.getMessage()));
         }
     }
+    /**
+     * QPO-5: CHQ4 direct — intra-VMS local hash join.
+     *
+     * Current path: 2 TCP connections, 100ms hardcoded delay (B44),
+     * full orders+order_line transfer, gateway-side LocalJoinOperator (B49).
+     *
+     * New path: single TCP connection, MODE_LOCAL_JOIN, VMS executes
+     * the hash join locally, returns only result rows (10-15 rows).
+     *
+     * Cite: DeWitt & Gray 1992 — computation moves to data.
+     */
+    private String executeChq4Direct() throws Exception {
+        long snapshotId = service.getCurrentSnapshotId();
+        long queryId    = System.nanoTime();
+        long startNano  = System.nanoTime();
+
+        // ── Build predicates for orders table ─────────────────────────────────
+        // o_w_id = 1         (col 2)
+        // o_entry_d >= 2007-01-02 epoch (col 4)
+        // o_entry_d <  2030-01-01 epoch (col 4)
+        long epoch2007 = java.time.LocalDate.of(2007, 1, 2)
+                .atStartOfDay(java.time.ZoneOffset.UTC).toInstant().toEpochMilli();
+        long epoch2030 = java.time.LocalDate.of(2030, 1, 1)
+                .atStartOfDay(java.time.ZoneOffset.UTC).toInstant().toEpochMilli();
+
+        // Use same PredicateDTO JSON format the VMS already parses
+        String buildPredicatesJson = "[" +
+                "{\"columnReference\":{\"columnPosition\":2},\"expression\":\"EQUALS\",\"value\":1}," +
+                "{\"columnReference\":{\"columnPosition\":4},\"expression\":\"GREATER_THAN_OR_EQUAL\",\"value\":" + epoch2007 + "}," +
+                "{\"columnReference\":{\"columnPosition\":4},\"expression\":\"LESS_THAN\",\"value\":" + epoch2030 + "}" +
+                "]";
+
+        // ── Build LocalJoinSpec ───────────────────────────────────────────────
+        // orders join cols:     [0=o_id, 1=o_d_id, 2=o_w_id]
+        // order_line join cols: [0=ol_o_id, 1=ol_d_id, 2=ol_w_id]
+        // group by: col 6 = o_ol_cnt
+        LocalJoinSpec spec = new LocalJoinSpec(
+                "orders",
+                new int[]{0, 1, 2},   // build join cols
+                new int[]{0, 1, 2},   // probe join cols
+                6,                    // group by o_ol_cnt
+                buildPredicatesJson);
+
+        // ── Send MODE_LOCAL_JOIN to order VMS ─────────────────────────────────
+        Map<Integer, Long> groups = new LinkedHashMap<>();
+
+        try (java.net.Socket socket = new java.net.Socket("localhost", 8003)) {
+            socket.setTcpNoDelay(true);
+            java.io.DataOutputStream out = new java.io.DataOutputStream(socket.getOutputStream());
+            java.io.DataInputStream  in  = new java.io.DataInputStream(socket.getInputStream());
+
+            byte[] tableBytes   = "order_line".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            byte[] routingBytes = spec.toBytes();
+
+            java.nio.ByteBuffer buf = java.nio.ByteBuffer.allocate(512)
+                    .order(java.nio.ByteOrder.BIG_ENDIAN);
+
+            int startPos = buf.position();
+            buf.put(QueryRequestEvent.QUERY_REQUEST_TYPE);
+            buf.putInt(0); // length placeholder
+
+            buf.putLong(queryId);
+            buf.putLong(snapshotId);
+            buf.put(QueryRequestEvent.MODE_LOCAL_JOIN);
+
+            buf.putInt(tableBytes.length);
+            buf.put(tableBytes);
+
+            buf.putInt(0);             // no probe predicates
+            buf.putInt(routingBytes.length);
+            buf.put(routingBytes);
+            buf.putInt(0);             // no projection data
+
+            int endPos = buf.position();
+            buf.putInt(startPos + 1, endPos - startPos - 1 - Integer.BYTES);
+            buf.position(endPos);
+            buf.flip();
+
+            out.write(buf.array(), 0, buf.limit());
+            out.flush();
+
+            // ── Read result rows: (o_ol_cnt: INT 4, count: LONG 8) = 12 bytes ─
+            byte[] header = new byte[5];
+            while (true) {
+                in.readFully(header);
+                byte type = header[0];
+                if (type == END_OF_STREAM_TYPE) break;
+                if (type != QUERY_RESULT_TYPE)
+                    throw new IllegalStateException("Unexpected type: " + type);
+
+                int batchLen = java.nio.ByteBuffer.wrap(header, 1, 4).getInt();
+                byte[] batchData = new byte[batchLen];
+                in.readFully(batchData);
+
+                java.nio.ByteBuffer batchBuf = java.nio.ByteBuffer.wrap(batchData)
+                        .order(java.nio.ByteOrder.nativeOrder());
+                batchBuf.getLong(); // skip queryId
+
+                while (batchBuf.remaining() >= 16) { // 4 (rowSize) + 12 (row)
+                    int rowSize = batchBuf.getInt();  // should be 12
+                    int  olCnt  = batchBuf.getInt();
+                    long count  = batchBuf.getLong();
+                    groups.put(olCnt, count);
+                }
+            }
+        }
+
+        double latencyMs = (System.nanoTime() - startNano) / 1_000_000.0;
+        System.out.printf(">>> [CHQ4 LOCAL JOIN] Groups: %d | Latency: %.2f ms%n",
+                groups.size(), latencyMs);
+
+        // ── Build JSON response ───────────────────────────────────────────────
+        StringBuilder sb = new StringBuilder();
+        sb.append("{\"resultColumns\":[\"o_ol_cnt\",\"order_count\"],");
+        sb.append("\"resultRowCount\":").append(groups.size()).append(",");
+        sb.append("\"result\":[");
+        boolean first = true;
+        for (Map.Entry<Integer, Long> e : groups.entrySet()) {
+            if (!first) sb.append(",");
+            sb.append("{\"o_ol_cnt\":").append(e.getKey())
+                    .append(",\"order_count\":").append(e.getValue()).append("}");
+            first = false;
+        }
+        sb.append("]}");
+        return sb.toString();
+    }
+
 
     /**
      * QPO-2: Directly compiled query path for CHQ6.
