@@ -23,11 +23,13 @@ import java.io.StringWriter;
 import java.util.List;
 import java.util.Objects;
 
+import static java.lang.System.Logger.Level.DEBUG;
 import static java.lang.System.Logger.Level.INFO;
 
 public final class CalcitePlannerImpl implements CalcitePlanner {
 
-    private static final System.Logger LOGGER = System.getLogger(CalcitePlannerImpl.class.getName());
+    private static final System.Logger LOGGER =
+            System.getLogger(CalcitePlannerImpl.class.getName());
 
     private static final RuleSet RULES = RuleSets.ofList(
             VModbTableAccessRule.INSTANCE,
@@ -45,9 +47,9 @@ public final class CalcitePlannerImpl implements CalcitePlanner {
         Optimizer optimizer = Optimizer.createFromRootSchema(rootSchema);
 
         try {
-            SqlNode parsed = optimizer.parse(sql);
+            SqlNode parsed   = optimizer.parse(sql);
             SqlNode validated = optimizer.validate(parsed);
-            RelNode logical = optimizer.convert(validated);
+            RelNode logical  = optimizer.convert(validated);
 
             HepProgramBuilder builder = new HepProgramBuilder();
             builder.addRuleInstance(CoreRules.FILTER_INTO_JOIN);
@@ -55,25 +57,44 @@ public final class CalcitePlannerImpl implements CalcitePlanner {
             hepPlanner.setRoot(logical);
             RelNode pushedDownLogical = hepPlanner.findBestExp();
 
-            LOGGER.log(INFO, explainRel("LOGICAL (PUSHED DOWN)", pushedDownLogical));
+            // B33 FIX: gate plan serialization behind DEBUG.
+            // BEFORE: LOGGER.log(INFO, explainRel(...)) — called on EVERY query.
+            //   explainRel() allocates a StringWriter + RelWriterImpl + full tree
+            //   traversal on every execution, even after QPO-1 caches the plan.
+            //   Under α=2: two concurrent threads doing this simultaneously.
+            // AFTER: isLoggable(DEBUG) check — short-circuits at the level check.
+            //   explainRel() is never called, no string allocated, no I/O.
+            //   To see plans during development: set log level to DEBUG.
+            if (LOGGER.isLoggable(DEBUG)) {
+                LOGGER.log(DEBUG, explainRel("LOGICAL (PUSHED DOWN)", pushedDownLogical));
+            }
 
             RelNode physical = optimizer.optimize(
                     pushedDownLogical,
                     pushedDownLogical.getTraitSet().replace(VModbConvention.INSTANCE),
                     RULES
             );
-            LOGGER.log(INFO, explainRel("PHYSICAL", physical));
+
+            // B33 FIX: same — physical plan serialization gated behind DEBUG.
+            if (LOGGER.isLoggable(DEBUG)) {
+                LOGGER.log(DEBUG, explainRel("PHYSICAL", physical));
+            }
+
+            // Keep one INFO log so benchmarking logs show planning activity
+            LOGGER.log(INFO, "Planning complete for SQL: "
+                    + sql.trim().substring(0, Math.min(60, sql.trim().length())) + "...");
 
             return new PlanOutput(pushedDownLogical, physical);
         } catch (Exception e) {
-            throw new RuntimeException("Calcite planning failed-- " + e.getMessage(), e);
+            throw new RuntimeException("Calcite planning failed -- " + e.getMessage(), e);
         }
     }
 
     private static String explainRel(String header, RelNode relTree) {
         StringWriter sw = new StringWriter();
         sw.append(header).append(":\n");
-        RelWriterImpl writer = new RelWriterImpl(new PrintWriter(sw), SqlExplainLevel.ALL_ATTRIBUTES, true);
+        RelWriterImpl writer = new RelWriterImpl(
+                new PrintWriter(sw), SqlExplainLevel.ALL_ATTRIBUTES, true);
         relTree.explain(writer);
         return sw.toString();
     }
