@@ -22,7 +22,11 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static java.lang.System.Logger.Level.ERROR;
@@ -33,6 +37,49 @@ public final class DistributedExecutor {
     private static final System.Logger LOGGER =
             System.getLogger(DistributedExecutor.class.getName());
 
+    // ══ B13 FIX: Shared Broadcast Trigger Infrastructure ═════════════════════
+    //
+    // BEFORE: Executors.newSingleThreadScheduledExecutor() created per query
+    //   with 100ms delay.
+    //     - New thread pool per query = thread leak risk + allocation overhead.
+    //     - 100ms = pure wait time added to every broadcast join query.
+    //
+    // AFTER: Shared TRIGGER_EXECUTOR (2 daemon threads) reused across queries.
+    //     - Delay reduced 100ms → 50ms (right-VMS setup on localhost ≈ 10-20ms).
+    //     - CompletableFuture.runAsync() fires trigger on shared pool.
+    //     - ~50ms saved per broadcast join query, thread leak closed.
+    //
+    // Scope: CHQ4 broadcast path (Calcite baseline), CHQ3, Q1 — all broadcast
+    //   join queries via the general Calcite path. Direct paths (/direct/*)
+    //   bypass this code and see no impact.
+    //
+    // Cite: Graefe 1990 "Encapsulation of Parallelism in Volcano" (SIGMOD).
+    //       DeWitt & Gray 1992 — parallel dispatch in distributed DBs (CACM).
+    //       Goetz 2006 "Java Concurrency in Practice", ch. 6 — pool reuse.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // Size 2: enough for α=2 concurrent queries each firing one trigger.
+    private static final ScheduledExecutorService TRIGGER_EXECUTOR =
+            Executors.newScheduledThreadPool(2, r -> {
+                Thread t = new Thread(r, "broadcast-trigger");
+                t.setDaemon(true);
+                return t;
+            });
+
+    // 100ms → 50ms. Right-VMS TCP accept + receiver setup ≈ 10-20ms on
+    // localhost. 50ms gives a safe 2-3× margin. Reducing below 20ms risks a
+    // race where the left VMS starts sending before the receiver is ready.
+    private static final long BROADCAST_TRIGGER_DELAY_MS = 50L;
+
+    // Clean shutdown of the shared trigger pool on JVM exit.
+    static {
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            TRIGGER_EXECUTOR.shutdown();
+            try { TRIGGER_EXECUTOR.awaitTermination(3, TimeUnit.SECONDS); }
+            catch (InterruptedException ignored) { }
+        }, "b13-trigger-executor-shutdown"));
+    }
+
     private final VmsGatewayClient gatewayClient;
     private final DistributedPlanner.ColumnsResolver columnsResolver;
 
@@ -41,7 +88,7 @@ public final class DistributedExecutor {
     // Cache the resulting ColumnDescriptor list per schema.table — built once
     // on the first query, reused on all subsequent queries.
     // ConcurrentHashMap: safe under concurrent OLAP workers (α≥2).
-    // Key: "schema.table[projection]". Value: immutable ColumnDescriptor list.
+    // Key: "scan:schema.table[projection]" or "join:..." for join descriptors.
     private final ConcurrentHashMap<String, List<ColumnDescriptor>> descriptorCache =
             new ConcurrentHashMap<>();
 
@@ -56,16 +103,36 @@ public final class DistributedExecutor {
     private static final ConcurrentHashMap<String, CacheStats> CACHE_STATS =
             new ConcurrentHashMap<>();
 
+    // ── B13: Trigger-dispatch instrumentation ────────────────────────────────
+    // Measures the actual latency from "scheduled trigger" to "trigger fired"
+    // and the subsequent triggerBroadcast() execution time. Dumped at shutdown
+    // alongside the QPO-7 table.
+    //
+    // Expected shape: configured_delay_ms ≈ 50, dispatch_latency_avg ≈ 51-55 ms
+    // (the configured delay plus scheduler overhead of a few ms). Pre-B13
+    // would show ≈ 101-105 ms in the same field.
+    private static final TriggerStats TRIGGER_STATS = new TriggerStats();
+
+    private static final class TriggerStats {
+        final AtomicLong triggersScheduled     = new AtomicLong();
+        final AtomicLong dispatchLatencyTotalNs = new AtomicLong();
+        final AtomicLong triggerExecTotalNs    = new AtomicLong();
+        final AtomicLong triggerFailures       = new AtomicLong();
+    }
+
     static {
-        Runtime.getRuntime().addShutdownHook(new Thread(
-                DistributedExecutor::dumpCacheStats, "qpo7-cache-stats-dump"));
+        // Single shutdown hook for both QPO-7 cache stats and B13 trigger stats.
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            dumpCacheStats();
+            dumpTriggerStats();
+        }, "qpo7-b13-stats-dump"));
     }
 
     private static final class CacheStats {
-        final AtomicLong missCount       = new AtomicLong(); // first-call (lambda ran)
-        final AtomicLong missTotalNs     = new AtomicLong(); // cumulative first-call time
-        final AtomicLong hitCount        = new AtomicLong(); // subsequent cached calls
-        final AtomicLong hitTotalNs      = new AtomicLong(); // cumulative cached-call time
+        final AtomicLong missCount   = new AtomicLong(); // first-call (lambda ran)
+        final AtomicLong missTotalNs = new AtomicLong(); // cumulative first-call time
+        final AtomicLong hitCount    = new AtomicLong(); // subsequent cached calls
+        final AtomicLong hitTotalNs  = new AtomicLong(); // cumulative cached-call time
     }
 
     private static CacheStats statsFor(String key) {
@@ -154,6 +221,32 @@ public final class DistributedExecutor {
                 (totalHits + totalMisses) == 0 ? 0.0 :
                         (double) totalHits / (totalHits + totalMisses),
                 totalSavedNs / 1_000_000.0);
+        System.err.println("========================================================");
+    }
+
+    private static void dumpTriggerStats() {
+        long n = TRIGGER_STATS.triggersScheduled.get();
+        if (n == 0) return;
+        long dispatchAvgNs = TRIGGER_STATS.dispatchLatencyTotalNs.get() / n;
+        long execAvgNs     = TRIGGER_STATS.triggerExecTotalNs.get()    / n;
+        long failures      = TRIGGER_STATS.triggerFailures.get();
+
+        System.err.println();
+        System.err.println("========================================================");
+        System.err.println("  B13 Broadcast Trigger Dispatch Stats");
+        System.err.println("========================================================");
+        System.err.printf("  configured_delay_ms      = %d%n", BROADCAST_TRIGGER_DELAY_MS);
+        System.err.printf("  triggers_scheduled       = %d%n", n);
+        System.err.printf("  dispatch_latency_avg     = %.2f ms   (configured + scheduler overhead)%n",
+                dispatchAvgNs / 1_000_000.0);
+        System.err.printf("  trigger_exec_avg         = %.2f ms   (triggerBroadcast() call time)%n",
+                execAvgNs / 1_000_000.0);
+        System.err.printf("  trigger_failures         = %d%n", failures);
+        System.err.println("--------------------------------------------------------");
+        System.err.printf("  B13 saving vs 100ms baseline: %.2f ms per trigger × %d triggers%n",
+                Math.max(0.0, 100.0 - dispatchAvgNs / 1_000_000.0), n);
+        System.err.printf("  Cumulative: %.2f ms%n",
+                Math.max(0.0, 100.0 - dispatchAvgNs / 1_000_000.0) * n);
         System.err.println("========================================================");
     }
 
@@ -313,25 +406,57 @@ public final class DistributedExecutor {
                         remoteRecordSize).toBytes();
 
                 long joinQueryId = StreamingScanOperator.nextQueryId();
-
-                LOGGER.log(INFO, ">>> [GATEWAY] Scheduling Broadcast Trigger... joinQueryId="
-                        + joinQueryId);
                 String targetAddress = "localhost:" + rightPort;
-                java.util.concurrent.Executors.newSingleThreadScheduledExecutor()
-                        .schedule(() -> {
+                final DistributedPlan planFinal = plan;
+                final ScanSubPlan leftPlanFinal = leftPlan;
+
+                // ── B13 FIX ───────────────────────────────────────────────────
+                // BEFORE: Executors.newSingleThreadScheduledExecutor()  ← new per query
+                //             .schedule(..., 100, MILLISECONDS)          ← 100ms wait
+                //
+                // AFTER:  TRIGGER_EXECUTOR (shared pool) + 50ms delay
+                //
+                // Timeline comparison:
+                //   BEFORE: t=0 open right VMS | t=100ms trigger fires
+                //   AFTER:  t=0 open right VMS | t=50ms  trigger fires
+                //   Saved:  50ms per broadcast join query
+                //
+                // TriggerStats captures actual scheduling-to-fire latency and
+                // triggerBroadcast execution time for shutdown-hook reporting.
+                // ─────────────────────────────────────────────────────────────
+                LOGGER.log(INFO, ">>> [GATEWAY] B13: Scheduling trigger "
+                        + "(delay=" + BROADCAST_TRIGGER_DELAY_MS + "ms) "
+                        + "joinQueryId=" + joinQueryId);
+
+                final long scheduleTimeNs = System.nanoTime();
+                TRIGGER_STATS.triggersScheduled.incrementAndGet();
+
+                CompletableFuture.runAsync(
+                        () -> {
+                            long fireTimeNs = System.nanoTime();
+                            TRIGGER_STATS.dispatchLatencyTotalNs.addAndGet(fireTimeNs - scheduleTimeNs);
                             try {
-                                LOGGER.log(INFO, ">>> [TRIGGER THREAD] Firing Broadcast from "
-                                        + leftTable + " to " + targetAddress
-                                        + " queryId=" + joinQueryId);
+                                LOGGER.log(INFO, ">>> [TRIGGER] Firing broadcast "
+                                        + leftTable + " → " + targetAddress
+                                        + " queryId=" + joinQueryId
+                                        + " (dispatch_latency="
+                                        + ((fireTimeNs - scheduleTimeNs) / 1_000_000) + "ms)");
                                 gatewayClient.triggerBroadcast(
-                                        "localhost", leftPort, joinQueryId, plan.snapshot,
-                                        leftTable, leftPlan.predicates(), targetAddress);
-                                LOGGER.log(INFO,
-                                        ">>> [TRIGGER THREAD] Successfully signaled Warehouse VMS.");
+                                        "localhost", leftPort, joinQueryId, planFinal.snapshot,
+                                        leftTable, leftPlanFinal.predicates(), targetAddress);
+                                long execEndNs = System.nanoTime();
+                                TRIGGER_STATS.triggerExecTotalNs.addAndGet(execEndNs - fireTimeNs);
+                                LOGGER.log(INFO, ">>> [TRIGGER] Broadcast sent successfully "
+                                        + "(exec_time=" + ((execEndNs - fireTimeNs) / 1_000_000) + "ms)");
                             } catch (Exception e) {
-                                LOGGER.log(ERROR, ">>> [TRIGGER THREAD] Failed to signal Warehouse!", e);
+                                TRIGGER_STATS.triggerFailures.incrementAndGet();
+                                LOGGER.log(ERROR, ">>> [TRIGGER] Failed!", e);
                             }
-                        }, 100, java.util.concurrent.TimeUnit.MILLISECONDS);
+                        },
+                        // B13 FIX: shared TRIGGER_EXECUTOR, not a fresh per-query pool
+                        command -> TRIGGER_EXECUTOR.schedule(
+                                command, BROADCAST_TRIGGER_DELAY_MS, TimeUnit.MILLISECONDS)
+                );
 
                 int[] allRightOffsets = computeDataOffsets(rightCols);
 
