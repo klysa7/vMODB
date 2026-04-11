@@ -26,15 +26,30 @@ import static java.lang.System.Logger.Level.WARNING;
 
 public final class ExperimentUtils {
 
-    private static final boolean SLEEP_MODE = true;
+    // B-V14 FIX: configurable submission sleep — replaces hardcoded SLEEP_MODE=true.
+    //
+    // BEFORE: private static final boolean SLEEP_MODE = true;
+    //   tpccInputBuilder() called Thread.sleep(1000) between every transaction.
+    //   This caps T-tps to 1/second per worker regardless of system capacity —
+    //   a benchmarking correctness bug. HATtrick already used 1ms on its own path,
+    //   but the standard menu option 4 was broken by this 1000ms cap.
+    //
+    // AFTER: read submission_sleep_ms from app.properties, default 1ms.
+    //   0 = no sleep (maximum throughput).
+    //   1 = 1ms (matches HATtrick, current default).
+    //   1000 = legacy behavior (do not use for benchmarks).
+    //
+    // Set via app.properties: submission_sleep_ms=1
+    private static long SUBMISSION_SLEEP_MS = 1L; // default — overridden by loadCoordinator()
 
-    private static final System.Logger LOGGER = System.getLogger(ExperimentUtils.class.getName());
+    private static final System.Logger LOGGER =
+            System.getLogger(ExperimentUtils.class.getName());
 
     private static boolean CONSUMER_REGISTERED = false;
-
     private static int lastExperimentLastTID = 0;
 
-    public static ExperimentStats runExperiment(Coordinator coordinator, Tuple<Integer, String>[] txRatio,
+    public static ExperimentStats runExperiment(Coordinator coordinator,
+                                                Tuple<Integer, String>[] txRatio,
                                                 List<Map<String, Iterator<Object>>> input,
                                                 int runTime, int warmUp) {
         Function<Object, Long> func = tpccInputBuilder(coordinator);
@@ -78,7 +93,8 @@ public final class ExperimentUtils {
         }
 
         if (prevBatchStats == null) {
-            Long lowestKey = BATCH_TO_FINISHED_TS_MAP.keySet().stream().min(Long::compareTo).orElse(null);
+            Long lowestKey = BATCH_TO_FINISHED_TS_MAP.keySet().stream()
+                    .min(Long::compareTo).orElse(null);
             prevBatchStats = BATCH_TO_FINISHED_TS_MAP.get(lowestKey);
         }
 
@@ -95,13 +111,13 @@ public final class ExperimentUtils {
         numCompleted = numCompletedWithWarmUp - numCompletedDuringWarmUp;
         long usefulRuntime = prevBatchStats.endTs - firstBatchStats.endTs;
 
-        double average        = allLatencies.stream().mapToLong(Long::longValue).average().orElse(0.0);
+        double average       = allLatencies.stream().mapToLong(Long::longValue).average().orElse(0.0);
         allLatencies.sort(null);
-        double percentile_50  = calculatePercentile(allLatencies, 0.50);
-        double percentile_75  = calculatePercentile(allLatencies, 0.75);
-        double percentile_90  = calculatePercentile(allLatencies, 0.90);
-        double percentile_99  = calculatePercentile(allLatencies, 0.99);
-        double txPerSec       = numCompleted / ((double) runTime / 1000L);
+        double percentile_50 = calculatePercentile(allLatencies, 0.50);
+        double percentile_75 = calculatePercentile(allLatencies, 0.75);
+        double percentile_90 = calculatePercentile(allLatencies, 0.90);
+        double percentile_99 = calculatePercentile(allLatencies, 0.99);
+        double txPerSec      = numCompleted / ((double) runTime / 1000L);
         double txPerSecUseful = numCompleted / ((double) usefulRuntime / 1000L);
 
         System.out.println("Average latency: " + average);
@@ -109,7 +125,8 @@ public final class ExperimentUtils {
         System.out.println("Latency at 75th percentile: " + percentile_75);
         System.out.println("Latency at 90th percentile: " + percentile_90);
         System.out.println("Latency at 99th percentile: " + percentile_99);
-        System.out.println("Number of completed transactions (during warm up): " + numCompletedDuringWarmUp);
+        System.out.println("Number of completed transactions (during warm up): "
+                + numCompletedDuringWarmUp);
         System.out.println("Number of completed transactions (after warm up): " + numCompleted);
         System.out.println("Number of completed transactions (total): " + numCompletedWithWarmUp);
         System.out.println("Total runtime (ms): " + runTime);
@@ -130,7 +147,8 @@ public final class ExperimentUtils {
                                   double percentile_75, double percentile_90,
                                   double percentile_99) {}
 
-    public static void writeResultsToFile(int numWare, ExperimentStats expStats, int runTime, int warmUp,
+    public static void writeResultsToFile(int numWare, ExperimentStats expStats,
+                                          int runTime, int warmUp,
                                           int numTransactionWorkers, int batchWindow,
                                           int maxTransactionsPerBatch,
                                           Tuple<Integer, String>[] txRatio,
@@ -157,6 +175,7 @@ public final class ExperimentUtils {
             }
             writer.write("Logging: " + logging); writer.newLine();
             writer.write("Checkpointing: " + checkpointing); writer.newLine();
+            writer.write("Submission sleep (ms): " + SUBMISSION_SLEEP_MS); writer.newLine();
             writer.newLine();
             writer.write("Average latency: " + expStats.average); writer.newLine();
             writer.write("Latency at 50th percentile: " + expStats.percentile_50); writer.newLine();
@@ -176,14 +195,22 @@ public final class ExperimentUtils {
         }
     }
 
-    private static final Map<Long, BatchStats> BATCH_TO_FINISHED_TS_MAP = new ConcurrentHashMap<>();
+    private static final Map<Long, BatchStats> BATCH_TO_FINISHED_TS_MAP =
+            new ConcurrentHashMap<>();
 
     private record BatchStats(long batchId, long lastTid, long endTs) {}
 
     private static Function<Object, Long> tpccInputBuilder(final Coordinator coordinator) {
+        // B-V14 FIX: use SUBMISSION_SLEEP_MS instead of hardcoded 1000ms.
+        // SUBMISSION_SLEEP_MS is set in loadCoordinator() from app.properties.
+        // Default is 1ms — matches HATtrick submission rate.
+        // 0 = no sleep (maximum submission rate).
+        final long sleepMs = SUBMISSION_SLEEP_MS;
+
         return input -> {
-            if (SLEEP_MODE) {
-                try { Thread.sleep(1000); }
+            // B-V14 FIX: replaced if (SLEEP_MODE) { Thread.sleep(1000); }
+            if (sleepMs > 0) {
+                try { Thread.sleep(sleepMs); }
                 catch (InterruptedException e) { Thread.currentThread().interrupt(); }
             }
 
@@ -192,13 +219,16 @@ public final class ExperimentUtils {
 
             if (input instanceof NewOrderWareIn newOrderInput) {
                 txIdentifier = "new_order";
-                eventPayload = new TransactionInput.Event("new-order-ware-in", newOrderInput.toString());
+                eventPayload = new TransactionInput.Event(
+                        "new-order-ware-in", newOrderInput.toString());
             } else if (input instanceof PaymentIn paymentInput) {
                 txIdentifier = "payment";
-                eventPayload = new TransactionInput.Event("payment-in", paymentInput.toString());
+                eventPayload = new TransactionInput.Event(
+                        "payment-in", paymentInput.toString());
             } else {
                 txIdentifier = "order_status";
-                eventPayload = new TransactionInput.Event("order-status-in", input.toString());
+                eventPayload = new TransactionInput.Event(
+                        "order-status-in", input.toString());
             }
 
             TransactionInput txInput = new TransactionInput(txIdentifier, eventPayload);
@@ -212,16 +242,9 @@ public final class ExperimentUtils {
      *
      * use_replica=false (Config 1 + 2 — 3-VMS, Experiment I):
      *   new_order: warehouse → inventory → order (terminal)
-     *   Coordinator waits for 3 VMSes. Max T-tps, no replica overhead.
-     *   OLAP queries go through Calcite to live order VMS.
      *
      * use_replica=true (Config 3 — 4-VMS, Experiment II):
      *   new_order: warehouse → inventory → order (internal) → replica (terminal)
-     *   Coordinator waits for 4 VMSes. Extra hop adds commit latency.
-     *   OLAP queries go to replica port 8096. A-qps stays flat under load.
-     *
-     * Switch by editing app.properties: use_replica=true|false
-     * No recompilation needed.
      */
     public static Coordinator loadCoordinator(Properties properties) {
         boolean useReplica = Boolean.parseBoolean(
@@ -229,10 +252,23 @@ public final class ExperimentUtils {
 
         System.out.println("ExperimentUtils: use_replica=" + useReplica);
 
+        // B-V14 FIX: read submission_sleep_ms from properties.
+        // Default 1ms — same as HATtrick path. 0 = no sleep.
+        String sleepMsStr = properties.getProperty("submission_sleep_ms");
+        if (sleepMsStr != null && !sleepMsStr.isBlank()) {
+            try {
+                SUBMISSION_SLEEP_MS = Long.parseLong(sleepMsStr.trim());
+                System.out.println("ExperimentUtils: submission_sleep_ms=" + SUBMISSION_SLEEP_MS + "ms");
+            } catch (NumberFormatException e) {
+                System.err.println("ExperimentUtils: invalid submission_sleep_ms '"
+                        + sleepMsStr + "' — using default 1ms");
+                SUBMISSION_SLEEP_MS = 1L;
+            }
+        }
+
         Map<String, TransactionDAG> transactionMap = new HashMap<>();
 
         if (useReplica) {
-            // 4-VMS DAG: order is internal, replica is terminal
             TransactionDAG newOrderDag = TransactionBootstrap.name("new_order")
                     .input("a", "warehouse", "new-order-ware-in")
                     .internal("b", "inventory", "new-order-ware-out", "a")
@@ -241,7 +277,6 @@ public final class ExperimentUtils {
                     .build();
             transactionMap.put(newOrderDag.name, newOrderDag);
         } else {
-            // 3-VMS DAG: order is terminal (original Experiment I setup)
             TransactionDAG newOrderDag = TransactionBootstrap.name("new_order")
                     .input("a", "warehouse", "new-order-ware-in")
                     .internal("b", "inventory", "new-order-ware-out", "a")
@@ -250,7 +285,6 @@ public final class ExperimentUtils {
             transactionMap.put(newOrderDag.name, newOrderDag);
         }
 
-        // payment and order_status: unchanged in both configs
         TransactionDAG paymentDag = TransactionBootstrap.name("payment")
                 .input("a", "warehouse", "payment-in")
                 .terminal("b", "order", "a")
@@ -282,14 +316,17 @@ public final class ExperimentUtils {
         if (inventoryHost == null) throw new RuntimeException("Inventory host is null");
         if (orderHost == null)     throw new RuntimeException("Order host is null");
 
-        IdentifiableNode warehouseAddress = new IdentifiableNode("warehouse", warehouseHost, 8001);
-        IdentifiableNode inventoryAddress = new IdentifiableNode("inventory", inventoryHost, 8002);
-        IdentifiableNode orderAddress     = new IdentifiableNode("order",     orderHost,     8003);
+        IdentifiableNode warehouseAddress =
+                new IdentifiableNode("warehouse", warehouseHost, 8001);
+        IdentifiableNode inventoryAddress =
+                new IdentifiableNode("inventory", inventoryHost, 8002);
+        IdentifiableNode orderAddress =
+                new IdentifiableNode("order", orderHost, 8003);
 
         Map<String, IdentifiableNode> starterVMSs = new HashMap<>();
         starterVMSs.put(warehouseAddress.identifier, warehouseAddress);
         starterVMSs.put(inventoryAddress.identifier, inventoryAddress);
-        starterVMSs.put(orderAddress.identifier,     orderAddress);
+        starterVMSs.put(orderAddress.identifier, orderAddress);
 
         if (useReplica) {
             String replicaHost = properties.getProperty("replica_host", "localhost");
@@ -305,9 +342,9 @@ public final class ExperimentUtils {
         if (percentile < 0 || percentile > 1)
             throw new IllegalArgumentException("Percentile must be between 0 and 1.");
         if (data == null || data.isEmpty()) return 0;
-        double rank      = percentile * (data.size() - 1);
-        int lowerIndex   = (int) Math.floor(rank);
-        int upperIndex   = (int) Math.ceil(rank);
+        double rank    = percentile * (data.size() - 1);
+        int lowerIndex = (int) Math.floor(rank);
+        int upperIndex = (int) Math.ceil(rank);
         if (lowerIndex == upperIndex) return data.get(lowerIndex);
         double weight = rank - lowerIndex;
         return data.get(lowerIndex) * (1 - weight) + data.get(upperIndex) * weight;
