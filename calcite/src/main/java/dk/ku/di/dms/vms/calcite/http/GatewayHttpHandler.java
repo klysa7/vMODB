@@ -18,6 +18,7 @@ import java.net.http.HttpResponse;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -25,6 +26,34 @@ import static dk.ku.di.dms.vms.modb.common.schema.network.query.QueryResultEvent
 import static dk.ku.di.dms.vms.modb.common.schema.network.query.QueryResultEvent.QUERY_RESULT_TYPE;
 
 public final class GatewayHttpHandler implements HttpHandler {
+
+    // ══ B23 FIX: Shared HttpClient for Replica Passthrough ═══════════════════
+    //
+    // BEFORE: HttpClient.newHttpClient() allocated per proxyToReplica() call.
+    //   Each call builds a fresh connection pool, async I/O executor, selector
+    //   thread, and SSL context. No HTTP/1.1 keep-alive benefit — every
+    //   request pays a full TCP handshake to port 8096. Discarded instances
+    //   hold native resources until GC.
+    //
+    // AFTER: Single static final HttpClient, built once at class load, reused
+    //   for all replica requests. HttpClient internally maintains HTTP/1.1
+    //   persistent connections to the replica — subsequent requests reuse the
+    //   established TCP connection. connectTimeout(5s) prevents indefinite
+    //   blocking if the replica is unreachable.
+    //
+    // Unlike B10 (raw TCP), no replica-side change required — HTTP/1.1 has
+    // persistent connections by default (RFC 7230 §6.3).
+    //
+    // Scope: /olap/replica/* endpoints only (Experiment II, use_replica=true).
+    //   Experiment I queries and direct paths are unaffected.
+    //
+    // Cite: Gray & Reuter 1992 — connection cost must be amortized over
+    //       many requests.
+    //       Fielding & Reschke 2014 (RFC 7230) — HTTP/1.1 persistent connections.
+    // ─────────────────────────────────────────────────────────────────────────
+    private static final HttpClient REPLICA_HTTP_CLIENT = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(5))
+            .build();
 
     // ── Live order VMS queries (Experiment I) ─────────────────────────────────
 
@@ -511,14 +540,15 @@ public final class GatewayHttpHandler implements HttpHandler {
 
     private static void proxyToReplica(HttpExchange exchange, String url) throws IOException {
         try {
-            HttpClient client = HttpClient.newHttpClient();
+            // B23 FIX: use shared REPLICA_HTTP_CLIENT instead of HttpClient.newHttpClient().
+            // Reuses HTTP/1.1 keep-alive connection to port 8096 across all replica calls.
             HttpRequest req = HttpRequest.newBuilder()
                     .uri(URI.create(url))
                     .header("Accept", "application/json")
                     .GET()
                     .build();
             HttpResponse<String> resp =
-                    client.send(req, HttpResponse.BodyHandlers.ofString());
+                    REPLICA_HTTP_CLIENT.send(req, HttpResponse.BodyHandlers.ofString());
             send(exchange, resp.statusCode(), resp.body());
         } catch (Exception e) {
             send(exchange, 503, jsonError(
