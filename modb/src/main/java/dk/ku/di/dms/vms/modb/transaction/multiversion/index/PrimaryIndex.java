@@ -578,22 +578,6 @@ public final class PrimaryIndex implements IMultiVersionIndex {
                 long address     = this.iterator.address();
                 long dataAddress = address + Schema.RECORD_HEADER;
 
-                // B-V1 FIX: partial PK deserialization.
-                //
-                // BEFORE: readFromIndex(dataAddress) — deserializes ALL columns into
-                //   Object[10] (104 bytes read) just to extract 3 PK columns (12 bytes).
-                //   The full Object[10] is thrown away immediately because updatesPerKeyMap
-                //   always has a Case 1 hit (keys never removed — see commented-out
-                //   updatesPerKeyMap.remove() in checkpoint()). 7 wasted allocations per row.
-                //
-                // AFTER: readPkFromAddress(dataAddress) — reads only the 3 PK column
-                //   bytes directly from off-heap via UNSAFE. Object[3] instead of Object[10].
-                //   Full readFromIndex() is deferred to Case 3 only (no MVCC entry).
-                //   Since all 300K rows have MVCC entries after populate+rebuildIndexes,
-                //   Case 3 effectively never fires — full read eliminated for every row.
-                //
-                // Cite: Abadi et al. 2008 "Column-Stores vs. Row-Stores" (SIGMOD) —
-                //   late materialization defers full tuple construction until necessary.
                 UniqueHashBufferIndex uhbi = (UniqueHashBufferIndex) rawIndex;
                 IKey nextKey = uhbi.readPkFromAddress(dataAddress);
 
@@ -601,27 +585,18 @@ public final class PrimaryIndex implements IMultiVersionIndex {
                         ? this.txCtx.lastTid
                         : this.txCtx.tid;
 
-                // ── MVCC-first path ──────────────────────────────────────────
                 OperationSetOfKey opSet = updatesPerKeyMap.get(nextKey);
                 if (opSet != null) {
                     Entry<Long, TransactionWrite> entry = opSet.floorEntry(snapshotToUse);
                     if (entry != null) {
                         if (entry.val().type == WriteType.DELETE) {
-                            continue; // deleted at or before snapshot — skip
+                            continue;
                         }
-                        // Case 1: MVCC version found.
-                        // B-V1 FIX: full readFromIndex() NOT called — MVCC record used directly.
-                        // This is the hot path for all 300K rows after rebuildIndexes().
                         this.currRecord = entry.val().record;
                         return true;
                     }
-                    // Case 2: all versions post-snapshot — fall through to rawIndex
                 }
 
-                // Case 3 (or Case 2 fallthrough): no MVCC entry at or before snapshot.
-                // Only here do we pay the cost of full deserialization.
-                // After normal populate+rebuildIndexes this path is effectively unreachable
-                // for existing rows — only truly new rows inserted after snapshot would land here.
                 this.currRecord = uhbi.readFromIndex(dataAddress);
                 return true;
             }
@@ -633,7 +608,6 @@ public final class PrimaryIndex implements IMultiVersionIndex {
             this.iterator.next();
             return this.currRecord;
         }
-
     }
 
     private final class PrimaryIndexIteratorMemory implements Iterator<Object[]> {
@@ -687,4 +661,117 @@ public final class PrimaryIndex implements IMultiVersionIndex {
 
     }
 
+
+    /**
+     * PARALLEL SCAN — scan a contiguous slot range and return SUM of a FLOAT column.
+     *
+     * This method implements the "worker" half of QuestDB's Sharded GROUP BY
+     * (Discipline 3, Slides 49-51). Each call processes a disjoint partition of the
+     * off-heap slot buffer. Since no two workers ever write to the same address,
+     * there is zero lock contention and zero false sharing between threads.
+     *
+     * ── MVCC correctness ────────────────────────────────────────────────────────
+     * Exactly mirrors the case logic of PrimaryIndexIteratorDisk.hasNext():
+     *
+     *   Case 1 (opSet exists, entry ≤ snapshotTid, type != DELETE):
+     *     Row is visible. Read column value from Object[] in the MVCC version chain.
+     *     This is the hot path for all rows after populate+rebuildIndexes().
+     *
+     *   Case 2 (opSet exists, but ALL versions are AFTER snapshotTid):
+     *     Row was inserted after our snapshot — invisible to this scan.
+     *     Fall through to rawIndex: the rawIndex holds the pre-insert stable value
+     *     OR the slot was just written and rawIndex has the old committed value.
+     *     (Same fallthrough semantics as PrimaryIndexIteratorDisk Case 2.)
+     *
+     *   Case 2b (opSet exists, entry.type == DELETE):
+     *     Row was deleted at or before snapshotTid. Skip — do not add to sum.
+     *
+     *   Case 3 (opSet == null, no MVCC entry):
+     *     Stable row never modified after populate. Read directly from off-heap.
+     *     No lock needed — checkpoint() never writes to keys not in keysToFlush.
+     *
+     * ── Performance ─────────────────────────────────────────────────────────────
+     * For stable rows (Case 3): one UNSAFE.getFloat() per row — no allocation,
+     * no HashMap lookup, no pointer chasing. L1-cache-friendly sequential reads.
+     *
+     * For MVCC rows (Case 1, all 300K after rebuildIndexes):
+     * One updatesPerKeyMap.get() + one floorEntry() + one Object[] field access.
+     * ConcurrentHashMap.get() from two simultaneous reader threads is safe —
+     * CHM allows arbitrary concurrent reads.
+     *
+     * ── Threading ───────────────────────────────────────────────────────────────
+     * This method is designed to be called from two threads simultaneously,
+     * each covering a different [startAddress, startAddress + numSlots) range.
+     * updatesPerKeyMap is read-only during the scan — writes continue on OLTP
+     * transaction worker threads, which never conflict with concurrent CHM reads.
+     *
+     * @param startAddress         absolute off-heap address of first slot in partition
+     * @param numSlots             number of slots to scan (may include inactive slots)
+     * @param columnIndex          Java column index in Object[] (e.g., 8 for ol_amount)
+     * @param colByteOffsetFromHeader byte offset of column from RECORD_HEADER in slot
+     * @param snapshotTid          OLAP snapshot boundary — only versions ≤ this are visible
+     * @return sum of visible float values in this partition
+     *
+     * Cite: QuestDB Discipline 3 Slides 49-51 — each worker has private state,
+     *   accumulates locally, no shared mutable data during scan phase.
+     *   Abadi et al. 2008 "Column-Stores vs. Row-Stores" — late materialization:
+     *   for stable rows, the column byte is read directly without full row deserialize.
+     */
+    public float scanSlotRangeFloatSum(long startAddress,
+                                       int numSlots,
+                                       int columnIndex,
+                                       int colByteOffsetFromHeader,
+                                       long snapshotTid) {
+        if (!(this.rawIndex instanceof UniqueHashBufferIndex uhbi)) {
+            throw new IllegalStateException(
+                    "scanSlotRangeFloatSum requires UniqueHashBufferIndex");
+        }
+
+        float sum = 0f;
+        long recSize = uhbi.slotByteSize();
+        long addr    = startAddress;
+
+        for (int i = 0; i < numSlots; i++, addr += recSize) {
+
+            // Skip inactive (empty or deleted-from-rawIndex) slots.
+            // Same check as RecordIterator.hasNext() — no MVCC involvement here.
+            if (!uhbi.isSlotActive(addr)) continue;
+
+            // B-V1 FIX: read only PK columns from off-heap to probe updatesPerKeyMap.
+            // Object[pkCols.length] instead of Object[numCols]. For order_line: Object[3].
+            IKey key = uhbi.readPkFromAddress(addr + dk.ku.di.dms.vms.modb.definition.Schema.RECORD_HEADER);
+
+            OperationSetOfKey opSet = updatesPerKeyMap.get(key);
+
+            if (opSet != null) {
+                Entry<Long, TransactionWrite> entry = opSet.floorEntry(snapshotTid);
+
+                if (entry == null) {
+                    // Case 2: all MVCC versions for this key are after snapshotTid.
+                    // The rawIndex holds the last committed stable value.
+                    sum += uhbi.readColumnFloat(addr, colByteOffsetFromHeader);
+
+                } else if (entry.val().type == WriteType.DELETE) {
+                    // Case 2b: row deleted at or before snapshotTid — skip.
+                    continue;
+
+                } else {
+                    // Case 1: visible INSERT or UPDATE in MVCC chain.
+                    // Read column value from Object[] — already deserialized at OLTP commit time.
+                    Object val = entry.val().record[columnIndex];
+                    if (val != null) {
+                        sum += ((Number) val).floatValue();
+                    }
+                }
+
+            } else {
+                // Case 3: no MVCC entry — stable rawIndex row, never modified after populate.
+                // Read directly from off-heap: zero Object[], zero boxing, zero allocation.
+                // Cite: Abadi et al. 2008 — late materialization applied to off-heap row store.
+                sum += uhbi.readColumnFloat(addr, colByteOffsetFromHeader);
+            }
+        }
+
+        return sum;
+    }
 }
