@@ -264,6 +264,27 @@ public class UniqueHashBufferIndex extends ReadWriteIndex<IKey> implements ReadW
         return -1;
     }
 
+    public IKey readPkFromAddress(long dataAddress) {
+        int[]    pkCols  = this.schema.getPrimaryKeyColumns();
+        int[]    offsets = this.schema.columnOffset();
+        Object[] pkVals  = new Object[pkCols.length];
+        for (int i = 0; i < pkCols.length; i++) {
+            int  col     = pkCols[i];
+            // offsets[col] is from slot start (includes RECORD_HEADER).
+            // dataAddress already skips RECORD_HEADER, so subtract it.
+            long colAddr = dataAddress + (offsets[col] - Schema.RECORD_HEADER);
+            pkVals[i] = switch (this.schema.columnDataType(col)) {
+                case INT    -> UNSAFE.getInt(null, colAddr);
+                case LONG   -> UNSAFE.getLong(null, colAddr);
+                case FLOAT  -> UNSAFE.getFloat(null, colAddr);
+                case DOUBLE -> UNSAFE.getDouble(null, colAddr);
+                // Strings not expected as PK columns in TPC-C but handled safely
+                default     -> UNSAFE.getInt(null, colAddr);
+            };
+        }
+        return KeyUtils.buildRecordKey(pkVals);
+    }
+
     /**
      * Check whether the record is active (if exists)
      */
