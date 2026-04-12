@@ -575,65 +575,54 @@ public final class PrimaryIndex implements IMultiVersionIndex {
         @Override
         public boolean hasNext() {
             while (this.iterator.hasNext()) {
-                long address = this.iterator.address();
+                long address     = this.iterator.address();
+                long dataAddress = address + Schema.RECORD_HEADER;
 
-                // Read base record from rawIndex to extract the PK key.
-                // PK column values are immutable — they never change after insert,
-                // so reading them is safe even while checkpoint holds its exclusive
-                // lock on rawIndex for writing other columns.
-                Object[] baseRecord = ((ReadOnlyBufferIndex<IKey>) rawIndex)
-                        .readFromIndex(address + Schema.RECORD_HEADER);
-                IKey nextKey = KeyUtils.buildRecordKey(
-                        rawIndex.schema().getPrimaryKeyColumns(), baseRecord);
+                // B-V1 FIX: partial PK deserialization.
+                //
+                // BEFORE: readFromIndex(dataAddress) — deserializes ALL columns into
+                //   Object[10] (104 bytes read) just to extract 3 PK columns (12 bytes).
+                //   The full Object[10] is thrown away immediately because updatesPerKeyMap
+                //   always has a Case 1 hit (keys never removed — see commented-out
+                //   updatesPerKeyMap.remove() in checkpoint()). 7 wasted allocations per row.
+                //
+                // AFTER: readPkFromAddress(dataAddress) — reads only the 3 PK column
+                //   bytes directly from off-heap via UNSAFE. Object[3] instead of Object[10].
+                //   Full readFromIndex() is deferred to Case 3 only (no MVCC entry).
+                //   Since all 300K rows have MVCC entries after populate+rebuildIndexes,
+                //   Case 3 effectively never fires — full read eliminated for every row.
+                //
+                // Cite: Abadi et al. 2008 "Column-Stores vs. Row-Stores" (SIGMOD) —
+                //   late materialization defers full tuple construction until necessary.
+                UniqueHashBufferIndex uhbi = (UniqueHashBufferIndex) rawIndex;
+                IKey nextKey = uhbi.readPkFromAddress(dataAddress);
 
                 long snapshotToUse = this.txCtx.readOnly
                         ? this.txCtx.lastTid
                         : this.txCtx.tid;
 
-                // ── MVCC-first path ──────────────────────────────────────────────
-                // Check the in-memory version map BEFORE using rawIndex record data.
-                //
-                // Safety guarantee: any key that checkpoint() is currently writing
-                // to rawIndex MUST have an entry in updatesPerKeyMap.
-                // installWrites() adds to keysToFlush at the exact same time
-                // doInsert/doUpdate adds to updatesPerKeyMap. Therefore:
-                //
-                //   Case 1 — opSet exists AND has entry at or before snapshot:
-                //     → correct MVCC version found; use it directly.
-                //       rawIndex data for this key is irrelevant and we skip it.
-                //       This is the hot path for all OLTP-touched rows.
-                //
-                //   Case 2 — opSet exists BUT all entries are AFTER snapshot:
-                //     → key was written after our snapshot was taken.
-                //       Fall through: rawIndex holds the pre-OLTP stable version.
-                //
-                //   Case 3 — opSet is null (no MVCC entry at all):
-                //     → key was never modified after populate; NOT in keysToFlush;
-                //       checkpoint NEVER writes to it; rawIndex is correct and
-                //       the read is lock-safe.
-                //
-                // Outcome: checkpoint lock contention is eliminated for OLAP scans.
-                // OLAP readers never wait for checkpoint — they use their MVCC
-                // snapshot directly. No freshness is lost: the snapshot was already
-                // fixed at beginTransaction(lastTid, ...) before the scan started.
+                // ── MVCC-first path ──────────────────────────────────────────
                 OperationSetOfKey opSet = updatesPerKeyMap.get(nextKey);
                 if (opSet != null) {
                     Entry<Long, TransactionWrite> entry = opSet.floorEntry(snapshotToUse);
                     if (entry != null) {
                         if (entry.val().type == WriteType.DELETE) {
-                            continue;  // deleted at or before snapshot — skip
+                            continue; // deleted at or before snapshot — skip
                         }
-                        // Case 1: MVCC version found — use it, rawIndex not needed
+                        // Case 1: MVCC version found.
+                        // B-V1 FIX: full readFromIndex() NOT called — MVCC record used directly.
+                        // This is the hot path for all 300K rows after rebuildIndexes().
                         this.currRecord = entry.val().record;
                         return true;
                     }
                     // Case 2: all versions post-snapshot — fall through to rawIndex
                 }
 
-                // Case 3 (or Case 2 fallthrough): use stable rawIndex base version.
-                // checkpoint() will never write to this key because it has no
-                // keysToFlush entry, making this read unconditionally lock-safe.
-                this.currRecord = baseRecord;
+                // Case 3 (or Case 2 fallthrough): no MVCC entry at or before snapshot.
+                // Only here do we pay the cost of full deserialization.
+                // After normal populate+rebuildIndexes this path is effectively unreachable
+                // for existing rows — only truly new rows inserted after snapshot would land here.
+                this.currRecord = uhbi.readFromIndex(dataAddress);
                 return true;
             }
             return false;
