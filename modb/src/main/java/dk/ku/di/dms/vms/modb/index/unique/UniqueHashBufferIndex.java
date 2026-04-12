@@ -352,4 +352,73 @@ public class UniqueHashBufferIndex extends ReadWriteIndex<IKey> implements ReadW
         this.recordBufferContext.force();
     }
 
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // PARALLEL SCAN SUPPORT — add these three methods to UniqueHashBufferIndex
+    //
+    // These expose the minimum off-heap geometry needed by PrimaryIndex to
+    // split the slot range into N contiguous partitions for parallel scanning.
+    //
+    // Why here and not in TransactionManager:
+    //   recordBufferContext, recordSize, capacity are all `protected` —
+    //   accessible from UniqueHashBufferIndex but not from TransactionManager
+    //   (different package). Adding public getters is the minimal safe exposure.
+    //
+    // Cite: QuestDB Discipline 3 Slides 49-51 — Sharded GROUP BY requires
+    //   splitting data into N disjoint partitions. These methods provide
+    //   the partition geometry (base address + slot size + capacity).
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Returns the off-heap base address of the slot buffer.
+     * Used by PrimaryIndex to compute per-partition start addresses:
+     *   partition i starts at: baseAddress() + i * (slotCapacity()/N) * slotByteSize()
+     */
+    public long baseAddress() {
+        return this.recordBufferContext.address;
+    }
+
+    /**
+     * Returns the byte size of one slot (RECORD_HEADER + all column data).
+     * Used to step from one slot address to the next:
+     *   nextSlotAddress = currentSlotAddress + slotByteSize()
+     */
+    public long slotByteSize() {
+        return this.recordSize;
+    }
+
+    /**
+     * Returns the total number of slots allocated in the buffer.
+     * This includes BOTH active (populated) AND inactive (empty/deleted) slots.
+     * The parallel scan must iterate ALL slots and skip inactive ones via
+     * isSlotActive() — the same pattern as RecordIterator.hasNext().
+     */
+    public int slotCapacity() {
+        return this.capacity;
+    }
+
+    /**
+     * Returns true if the slot at the given address contains an active (live) record.
+     * Reads the ACTIVE_BYTE header flag directly from off-heap.
+     * Equivalent to RecordIterator's internal check — exposed here so parallel
+     * scan workers can check slot activity without going through the iterator.
+     *
+     * @param slotAddress the absolute off-heap address of the slot start
+     */
+    public boolean isSlotActive(long slotAddress) {
+        return UNSAFE.getByte(null, slotAddress) == Header.ACTIVE_BYTE;
+    }
+
+    /**
+     * Reads a FLOAT column value directly from off-heap for a given slot.
+     * Used by the parallel scan hot path to avoid Object[] materialization
+     * for stable rows (those not in updatesPerKeyMap / Case 3).
+     *
+     * @param slotAddress           absolute off-heap address of the slot start
+     * @param colByteOffsetFromHeader byte offset of the column from RECORD_HEADER
+     *                              = schema.columnOffset()[colIndex] - Schema.RECORD_HEADER
+     */
+    public float readColumnFloat(long slotAddress, int colByteOffsetFromHeader) {
+        return UNSAFE.getFloat(null, slotAddress + Schema.RECORD_HEADER + colByteOffsetFromHeader);
+    }
 }

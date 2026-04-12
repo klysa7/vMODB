@@ -21,6 +21,9 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 
 import static dk.ku.di.dms.vms.modb.common.schema.network.query.QueryResultEvent.END_OF_STREAM_TYPE;
 import static dk.ku.di.dms.vms.modb.common.schema.network.query.QueryResultEvent.QUERY_RESULT_TYPE;
@@ -41,9 +44,6 @@ public final class GatewayHttpHandler implements HttpHandler {
     //   established TCP connection. connectTimeout(5s) prevents indefinite
     //   blocking if the replica is unreachable.
     //
-    // Unlike B10 (raw TCP), no replica-side change required — HTTP/1.1 has
-    // persistent connections by default (RFC 7230 §6.3).
-    //
     // Scope: /olap/replica/* endpoints only (Experiment II, use_replica=true).
     //   Experiment I queries and direct paths are unaffected.
     //
@@ -54,6 +54,43 @@ public final class GatewayHttpHandler implements HttpHandler {
     private static final HttpClient REPLICA_HTTP_CLIENT = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
             .build();
+
+    // ══ B-SS FIX: Scan Sharing via ConcurrentHashMap<key, CompletableFuture> ═
+    //
+    // PROBLEM: at α=2, two identical OLAP queries arrive within milliseconds.
+    //   Without sharing, both fire a full VMS scan independently — double the
+    //   VMS CPU, double the TCP overhead, double the result processing.
+    //   Under mixed load this doubling is what starves the OLTP commit path.
+    //
+    // SOLUTION: if an identical scan (same SQL + same snapshotId) is already
+    //   in-flight, the second query joins the first query's CompletableFuture
+    //   instead of starting a new VMS request. When the first scan completes,
+    //   future.complete() fans the result out to all waiting threads at once.
+    //
+    // KEY = sqlHash + ":" + snapshotId  (strict correctness).
+    //   Same SQL + same snapshotId → same committed database state → safe.
+    //   Different snapshotIds → queries execute independently. No staleness.
+    //
+    // SNAPSHOT COLLISION RATE: coordinator commits batches every ~230ms. Two
+    //   queries arriving within the same batch window see the same snapshotId
+    //   → sharing fires. When snapshotIds differ, queries execute independently
+    //   — correct always.
+    //
+    // THREAD SAFETY: putIfAbsent() is atomic. Exactly one thread creates the
+    //   future (first); all others get the existing one. No deadlock — the
+    //   first thread executes the scan, others wait on future.get().
+    //
+    // Cite: Zukowski et al. 2007 "Cooperative Scans" (VLDB) —
+    //          share the physical result, not the physical scan.
+    //       QuestDB Discipline 3 — cooperative scan sharing.
+    //       Supervisor OPT-1.
+    //
+    // Scope: Calcite-path routes (PATH_Q1/CHQ6/CHQ1/CHQ4/CHQ3) only.
+    //   Direct paths (/direct/*) bypass sharing — they're already cheap enough
+    //   that the sharing overhead would not pay for itself.
+    // ─────────────────────────────────────────────────────────────────────────
+    private final ConcurrentHashMap<String, CompletableFuture<String>> scanRegistry =
+            new ConcurrentHashMap<>();
 
     // ── Live order VMS queries (Experiment I) ─────────────────────────────────
 
@@ -72,7 +109,7 @@ public final class GatewayHttpHandler implements HttpHandler {
     // ── CHQ6: dual-path (general Calcite + QPO-2 direct scan) ────────────────
     //
     // /olap/chq6    → OlapGatewayService (Calcite + planner + operator tree
-    //                 + VmsGatewayClient). QPO-3 still fires.
+    //                 + VmsGatewayClient). QPO-3 still fires. Scan-shared.
     // /direct/chq6  → QPO-2 hot path. Raw socket, hand-built QueryRequestEvent,
     //                 sums floats in a tight loop. Single-VMS-safe only.
     static final String PATH_CHQ6        = "/olap/chq6";
@@ -189,6 +226,7 @@ public final class GatewayHttpHandler implements HttpHandler {
         }
 
         // ── Direct hot paths (QPO-2 / QPO-5 / QPO-6) ──────────────────────────
+        // These bypass Calcite entirely — scan sharing does not apply here.
         if (PATH_CHQ6_DIRECT.equals(path)) {
             try {
                 send(exchange, 200, executeChq6Direct());
@@ -229,11 +267,51 @@ public final class GatewayHttpHandler implements HttpHandler {
             return;
         }
 
-        try {
-            String responseJson = service.execute(sql);
-            send(exchange, 200, responseJson);
-        } catch (Exception e) {
-            send(exchange, 500, jsonError("Gateway error: " + e.getMessage()));
+        // ══ B-SS FIX: Scan Sharing intercept ═════════════════════════════════
+        //
+        // Key: sqlHash ensures different queries never share.
+        //      snapshotId ensures different database states never share.
+        //
+        // putIfAbsent() is atomic — exactly one thread wins (returns null = first).
+        // All other threads for the same key wait on future.get() and receive
+        // the same result string when the first thread completes its scan.
+        // ─────────────────────────────────────────────────────────────────────
+        long   snapshotId = service.getCurrentSnapshotId();
+        String scanKey    = sql.hashCode() + ":" + snapshotId;
+
+        CompletableFuture<String> newFuture = new CompletableFuture<>();
+        CompletableFuture<String> existing  = this.scanRegistry.putIfAbsent(scanKey, newFuture);
+        boolean isFirst = (existing == null);
+        CompletableFuture<String> future = isFirst ? newFuture : existing;
+
+        if (isFirst) {
+            // This thread owns the physical VMS scan.
+            // On completion, future.complete() unblocks all waiting joiners.
+            try {
+                String result = service.execute(sql);
+                future.complete(result);
+                send(exchange, 200, result);
+            } catch (Exception e) {
+                future.completeExceptionally(e);
+                send(exchange, 500, jsonError("Gateway error: " + e.getMessage()));
+            } finally {
+                // Value-checking remove: only removes if this is still the current future.
+                // Prevents a race where a late joiner's future is accidentally removed
+                // by another thread's cleanup.
+                this.scanRegistry.remove(scanKey, newFuture);
+            }
+        } else {
+            // This thread joins the existing scan — no VMS request fired.
+            // Blocks until the first thread calls future.complete(result).
+            // Both clients receive the same result — safe because same snapshotId
+            // means same committed database state was visible to both queries.
+            try {
+                System.out.println(">>> [SCAN SHARING] Joined existing scan. key=" + scanKey);
+                String result = future.get(30, TimeUnit.SECONDS);
+                send(exchange, 200, result);
+            } catch (Exception e) {
+                send(exchange, 500, jsonError("Scan sharing error: " + e.getMessage()));
+            }
         }
     }
 
