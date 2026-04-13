@@ -9,21 +9,25 @@ import java.util.List;
 
 /**
  * Mirrors the Seller pattern exactly:
- *   Seller:  @Query("select * from order_entries where seller_id = :sellerId")
- *   Replica: @Query("select * from order_line")
+ *
+ *   Seller:
+ *     @VmsIndex(name="seller_idx") on seller_id
+ *     @Query("select * from order_entries where seller_id = :sellerId")
+ *
+ *   Replica:
+ *     @VmsIndex(name="w_idx") on ol_w_id  (in OrderLineReplica entity)
+ *     @Query("select * from order_line where ol_w_id = :wId")
+ *
+ * With num_ware=1, querying wId=1 returns ALL rows — semantically identical
+ * to a full table scan, but using the index code path that doesn't crash.
  *
  * The HTTP handler calls beginTransaction(lastTid, 0, lastTid, true) before
- * invoking the query, giving the same MVCC snapshot guarantee as the live
- * order VMS's chq6 scan.
- *
- * We use select * + aggregate in Java instead of SELECT SUM(ol_amount)
- * because vMODB's aggregate queries crash on composite PK tables with
- * "Index 7 out of bounds for length 4".
+ * invoking this method, giving MVCC snapshot consistency exactly like Seller.
  */
 @Repository
 public interface IOrderLineReplicaRepository
         extends IRepository<OrderLineReplica.OrderLineReplicaId, OrderLineReplica> {
 
-    @Query("select * from order_line where ol_quantity >= 1 and ol_quantity <= 100000")
-    List<OrderLineReplica> getOrderLinesForChq6();
+    @Query("select * from order_line where ol_w_id = :wId")
+    List<OrderLineReplica> getOrderLinesByWarehouse(int wId);
 }

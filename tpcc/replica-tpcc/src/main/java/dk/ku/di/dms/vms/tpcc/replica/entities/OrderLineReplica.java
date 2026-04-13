@@ -1,5 +1,6 @@
 package dk.ku.di.dms.vms.tpcc.replica.entities;
 
+import dk.ku.di.dms.vms.modb.api.annotations.VmsIndex;
 import dk.ku.di.dms.vms.modb.api.annotations.VmsTable;
 import dk.ku.di.dms.vms.modb.api.interfaces.IEntity;
 
@@ -10,16 +11,6 @@ import javax.persistence.IdClass;
 import java.io.Serializable;
 import java.util.Date;
 
-/**
- * Replica copy of order_line — identical schema to the live OrderLine entity.
- *
- * Must have the same columns as the live order_line table, including
- * ol_delivery_d, so that vMODB's metadata loader can map all 10 columns
- * correctly when processing @Query("select * from order_line").
- *
- * No @VmsForeignKey constraints — the replica only holds order_line,
- * not orders or new_orders.
- */
 @Entity
 @VmsTable(name = "order_line")
 @IdClass(OrderLineReplica.OrderLineReplicaId.class)
@@ -43,12 +34,12 @@ public final class OrderLineReplica implements IEntity<OrderLineReplica.OrderLin
 
     @Id public int ol_o_id;
     @Id public int ol_d_id;
-    @Id public int ol_w_id;
+    @Id @VmsIndex(name = "w_idx") public int ol_w_id;
     @Id public int ol_number;
 
     @Column public int    ol_i_id;
     @Column public int    ol_supply_w_id;
-    @Column public Date   ol_delivery_d;   // null at insert time, kept for schema match
+    @Column public Date   ol_delivery_d;
     @Column public int    ol_quantity;
     @Column public float  ol_amount;
     @Column public String ol_dist_info;

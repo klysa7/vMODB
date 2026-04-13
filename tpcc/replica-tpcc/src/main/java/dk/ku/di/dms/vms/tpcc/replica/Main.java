@@ -53,7 +53,7 @@ public final class Main {
         return VmsApplication.build(options, (txManager, repoLookup) -> {
             IOrderLineReplicaRepository repo =
                     (IOrderLineReplicaRepository) repoLookup.apply("order_line");
-            startOlapHttpServer(txManager, repo);
+            startOlapHttpServer(txManager, repo, numWare);
             return new ReplicaVmsHttpHandler(txManager, repo, numWare);
         });
     }
@@ -63,35 +63,39 @@ public final class Main {
      *
      * /chq6 mirrors the Seller VMS pattern exactly:
      *
-     *   Seller (marketplace):
+     *   Seller:
      *     long lastTid = VMS.lastTidFinished();
      *     transactionManager.beginTransaction(lastTid, 0, lastTid, true);
-     *     List<OrderEntry> rows = repo.getOrderEntriesBySellerId(id);
+     *     List<OrderEntry> rows = repo.getOrderEntriesBySellerId(sellerId);
      *     // aggregate in Java
      *
-     *   Replica (tpcc):
+     *   Replica:
      *     long lastTid = VMS.lastTidFinished();
      *     txManager.beginTransaction(lastTid, 0, lastTid, true);
-     *     List<OrderLineReplica> rows = repo.getOrderLinesForChq6();
-     *     float revenue = sum(rows.ol_amount)  // aggregate in Java
+     *     for each warehouse: rows += repo.getOrderLinesByWarehouse(w);
+     *     float revenue = sum(row.ol_amount)
      *
-     * beginTransaction(..., readOnly=true) opens an MVCC snapshot at the
-     * last committed TID. The scan sees a consistent point-in-time view
-     * of order_line with no interference from concurrent OLTP writes.
+     * With num_ware=1, the loop runs once and returns all rows.
+     * beginTransaction(readOnly=true) gives MVCC snapshot consistency.
      */
     private static void startOlapHttpServer(ITransactionManager txManager,
-                                            IOrderLineReplicaRepository repo) {
+                                            IOrderLineReplicaRepository repo,
+                                            int numWare) {
         try {
             HttpServer httpServer = HttpServer.create(
                     new InetSocketAddress("0.0.0.0", REPLICA_HTTP_PORT), 0);
 
+            // ── GET /chq6 ─────────────────────────────────────────────────────
+            // SELECT SUM(ol_amount) FROM order_line
             httpServer.createContext("/chq6", exchange -> {
                 try {
                     long lastTid = VMS == null ? 1L : VMS.lastTidFinished();
                     txManager.beginTransaction(lastTid, 0, lastTid, true);
-                    List<OrderLineReplica> rows = repo.getOrderLinesForChq6();
                     float revenue = 0f;
-                    for (OrderLineReplica r : rows) revenue += r.ol_amount;
+                    for (int w = 1; w <= numWare; w++) {
+                        List<OrderLineReplica> rows = repo.getOrderLinesByWarehouse(w);
+                        for (OrderLineReplica r : rows) revenue += r.ol_amount;
+                    }
                     sendHttp(exchange, 200, "{\"revenue\":" + revenue + "}");
                 } catch (Exception e) {
                     LOGGER.log(System.Logger.Level.WARNING, "chq6 error: " + e.getMessage());
@@ -99,6 +103,7 @@ public final class Main {
                 }
             });
 
+            // ── GET /status ───────────────────────────────────────────────────
             httpServer.createContext("/status", exchange -> {
                 long lastTid = VMS == null ? 0 : VMS.lastTidFinished();
                 sendHttp(exchange, 200,

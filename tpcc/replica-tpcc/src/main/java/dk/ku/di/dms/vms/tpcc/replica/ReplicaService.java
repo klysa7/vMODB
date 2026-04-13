@@ -16,17 +16,10 @@ import static dk.ku.di.dms.vms.modb.api.enums.TransactionTypeEnum.W;
 /**
  * Replica VMS service — terminal node in the new_order DAG.
  *
- * Receives NewOrderOut events and inserts order_line rows into the
- * replica table. No AtomicLong counters — queries are answered by
- * the HTTP handler via vMODB's MVCC query engine, exactly like the
- * Seller VMS in the online marketplace.
+ * Identical to the Seller pattern: receives events, inserts rows,
+ * queries answered by HTTP handler via vMODB MVCC query engine.
  *
- * DAG position (same as Seller in marketplace):
- *   warehouse → inventory → order → REPLICA (terminal)
- *
- * Query answering (same pattern as Seller):
- *   Seller:  getOrderEntriesBySellerId() → sum in Java
- *   Replica: getOrderLinesForChq6()      → sum in Java
+ * DAG: warehouse → inventory → order → REPLICA (terminal)
  */
 @Microservice("replica")
 public final class ReplicaService {
