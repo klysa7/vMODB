@@ -22,6 +22,8 @@ import dk.ku.di.dms.vms.tpcc.order.repositories.IOrderRepository;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static dk.ku.di.dms.vms.modb.api.enums.TransactionTypeEnum.R;
 import static dk.ku.di.dms.vms.modb.api.enums.TransactionTypeEnum.W;
@@ -32,6 +34,39 @@ import static java.lang.System.Logger.Level.ERROR;
 public final class OrderService {
 
     private static final System.Logger LOGGER = System.getLogger(OrderService.class.getName());
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // EVICTION COUNTERS — Table Size Stabilization
+    //
+    // Tracks the next ol_o_id to evict per (w_id, d_id) combination.
+    // Key: (w_id << 16) | d_id    Value: next ol_o_id to delete (starts at 1)
+    //
+    // After populate, ol_o_id ranges from 1..3000 per district.
+    // Counter starts at 1. Each processNewOrder atomically increments it
+    // and deletes all ol_numbers (1..15) for that ol_o_id.
+    // Deletes for non-existent ol_numbers are silent no-ops (safe).
+    //
+    // WHY NOT A QUERY:
+    //   "ORDER BY ol_o_id ASC LIMIT 15" returned ALL matching rows instead of 15
+    //   due to a bug in the VMS FullScanWithOrder operator's LIMIT handling.
+    //   This wiped entire districts per transaction, crashing revenue.
+    //   Counter approach bypasses the query entirely — pure key-based deletes,
+    //   O(15) per transaction, zero scan overhead.
+    //
+    // THREAD SAFETY: AtomicInteger — concurrent @Parallel transactions on the
+    //   same district each evict a DIFFERENT order. No two transactions clash.
+    // ─────────────────────────────────────────────────────────────────────────
+    private static final int MAX_OL_NUMBER = 15; // TPC-C spec: ol_count in [5,15]
+
+    private final ConcurrentHashMap<Integer, AtomicInteger> evictCounters =
+            new ConcurrentHashMap<>();
+
+    private int nextEvictOId(int w_id, int d_id) {
+        int key = (w_id << 16) | d_id;
+        return evictCounters
+                .computeIfAbsent(key, k -> new AtomicInteger(1))
+                .getAndIncrement();
+    }
 
     private final IOrderRepository orderRepository;
     private final INewOrderRepository newOrderRepository;
@@ -74,24 +109,6 @@ public final class OrderService {
         }
     }
 
-    /**
-     * Processes a new order and emits NewOrderOut to the Replica VMS.
-     *
-     * The order VMS is now an INTERNAL node in the new_order DAG:
-     *
-     *   warehouse → inventory → order (internal) → replica (terminal)
-     *
-     * By emitting NewOrderOut, the order VMS forwards the computed order
-     * line data to the replica. The replica inserts into its own order_line
-     * table and acts as the terminal node — it votes to commit the batch.
-     *
-     * Freshness = 0: the replica data is committed atomically in the same
-     * batch as the order VMS insert.
-     *
-     * Overhead: the order VMS must now serialize and emit an extra event
-     * per new_order transaction. This is the measurable cost of Experiment II
-     * vs Experiment I.
-     */
     @Inbound(values = "new-order-inv-out")
     @Outbound("new-order-out")
     @Transactional(type = W)
@@ -135,7 +152,16 @@ public final class OrderService {
         }
         this.orderLineRepository.insertAll(orderLinesToInsert);
 
-        // Emit NewOrderOut to replica VMS
+        // ── EVICTION: delete oldest order for this (w_id, d_id) ──────────────
+        // Atomically claim the next ol_o_id to evict for this district.
+        // Attempt delete for ol_number 1..15 — missing rows are silent no-ops.
+        int evictOId = nextEvictOId(in.w_id, in.d_id);
+        for (int olNum = 1; olNum <= MAX_OL_NUMBER; olNum++) {
+            this.orderLineRepository.delete(
+                    new OrderLine(evictOId, in.d_id, in.w_id, olNum,
+                            0, 0, null, 0, 0f, null));
+        }
+
         return new NewOrderOut(
                 in.w_id,
                 in.d_id,
