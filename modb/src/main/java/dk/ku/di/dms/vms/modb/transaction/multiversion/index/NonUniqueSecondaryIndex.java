@@ -69,7 +69,9 @@ public final class NonUniqueSecondaryIndex implements IMultiVersionIndex {
             if(entry.getValue().t2() != WriteType.INSERT) continue;
             IKey secKey = KeyUtils.buildRecordKey( this.underlyingIndex.columns(), entry.getValue().t1() );
             Set<IKey> set = this.keyMap.get(secKey);
-            set.remove(entry.getKey());
+            if (set != null) {
+                set.remove(entry.getKey());
+            }
         }
         this.clearAndReturnWriteSetToBuffer(txWriteSet);
     }
@@ -118,7 +120,13 @@ public final class NonUniqueSecondaryIndex implements IMultiVersionIndex {
             if(entry.getValue().t2() != WriteType.DELETE) continue;
             IKey secKey = KeyUtils.buildRecordKey( this.underlyingIndex.columns(), entry.getValue().t1() );
             Set<IKey> set = this.keyMap.get(secKey);
-            set.remove(entry.getKey());
+            // FIX: null check — row was populated via direct raw index path (populateDisk),
+            // not through the OLTP insert path, so it was never tracked in keyMap.
+            // Nothing to remove — skip silently. The primary index DELETE is already
+            // recorded correctly in updatesPerKeyMap. ✓
+            if (set != null) {
+                set.remove(entry.getKey());
+            }
         }
         this.clearAndReturnWriteSetToBuffer(writeSet);
     }

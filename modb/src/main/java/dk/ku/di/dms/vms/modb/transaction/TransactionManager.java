@@ -1022,6 +1022,14 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
             buf.putFloat(colByteOffsetFromHeader, totalSum);
         }
 
+        // temporarily add inside the parallel scan, before submitting tasks
+        int activeCount = 0;
+        long countAddr = baseAddr;
+        for (int i = 0; i < totalSlots; i++, countAddr += recSize) {
+            if (uhbi.isSlotActive(countAddr)) activeCount++;
+        }
+        LOGGER.log(INFO, ">>> [CHQ6] Active rows in order_line: " + activeCount);
+
         return Collections.singletonList(result).iterator();
     }
 
