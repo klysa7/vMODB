@@ -8,82 +8,47 @@ import dk.ku.di.dms.vms.tpcc.common.events.NewOrderWareIn;
 import dk.ku.di.dms.vms.tpcc.common.events.PaymentIn;
 
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.locks.LockSupport;
 
 /**
- * HATtrick T-client for the throughput frontier experiment.
+ * HATtrick T-client — no fixed sleep, coordinator-aware backpressure.
  *
- * Workload: 50% new_order + 50% payment.
+ * The original TPC-C experiment (ExperimentUtils, SLEEP_MODE=false) works
+ * without sleep because it pre-generates a finite number of inputs and the
+ * client naturally runs out before flooding the queue. HATtrick generates
+ * inputs indefinitely, so we need equivalent flow control.
  *
- * ─────────────────────────────────────────────────────────────────────────────
- * CHANGE 1 — Simplified new_order (ol_cnt = 3)
- *   Was: DataGenUtils.randomNumber(5, 15) from TPC-C spec constants.
- *   Now: fixed at 3. Paired with OrderService eviction so every tx inserts
- *   exactly 3 order_line rows and (after guard) deletes exactly 3. Net 0 at
- *   steady state. This keeps the TPC-C feel (small ol_cnt within the
- *   [1, 15] legal range) while giving us a predictable insert/delete cadence
- *   that's easy to reason about when tuning eviction.
+ * Flow control uses coordinator.getNumTIDsSubmitted() -
+ * coordinator.getNumTIDsCommitted() — the same values already exposed in
+ * Main.java for the cleanup check. When in-flight > MAX_IN_FLIGHT,
+ * Thread.yield() gives the coordinator thread CPU time to drain a batch.
+ * No sleep on the hot path.
  *
- * CHANGE 2 — Removed Thread.sleep(1)
- *   The sleep was capping each client at ~1000 tps regardless of coordinator
- *   capacity. Removed so clients can sustain multi-thousand tps when the
- *   pipeline can absorb them.
- *
- * CHANGE 3 — Per-client inflight budget (maxInFlight)
- *   Replacement for the removed sleep. Before every submit we check
- *   (submitted - committed). If it exceeds the configured budget, we park
- *   the thread for 100μs and re-check.
- *
- *   The budget is passed by the caller (HATtrickRunner) as
- *   MAX_IN_FLIGHT_PER_CLIENT × τ. This gives each client the same effective
- *   per-client budget regardless of how many clients are in the point,
- *   preventing the τ=2 regression where both clients thrashed against one
- *   shared 5000-slot counter.
- *
- * CHANGE 4 — LockSupport.parkNanos instead of Thread.yield
- *   Thread.yield() is only a scheduler hint and keeps the thread hot,
- *   burning CPU that should go to the coordinator's TransactionWorker and
- *   the VMS worker threads. A 100μs park actually releases the CPU.
- * ─────────────────────────────────────────────────────────────────────────────
+ * MAX_IN_FLIGHT = num_max_transactions_batch (10000) — matching the
+ * coordinator's own batch cap so we never queue more than one extra batch
+ * ahead of what the coordinator is currently processing.
  */
 public final class HATtrickTClientWorker implements Runnable {
 
     private static final System.Logger LOG =
             System.getLogger(HATtrickTClientWorker.class.getName());
 
-    /**
-     * Fixed ol_cnt for all new_order transactions. Must be ≤ MAX_OL_NUMBER
-     * in OrderService so eviction deletes exactly the inserted rows.
-     */
-    private static final int OL_CNT = 3;
-
+    private static final int MAX_IN_FLIGHT = 5_000;
     private final int           clientId;
     private final Coordinator   coordinator;
     private final AtomicBoolean running;
     private final int           numWarehouses;
 
-    /**
-     * Global inflight budget seen by this client. When
-     * (submitted - committed) exceeds this, we park instead of submitting.
-     * HATtrickRunner sets this to MAX_IN_FLIGHT_PER_CLIENT × τ so each
-     * client gets a fair share.
-     */
-    private final int maxInFlight;
-
-    private final AtomicLong submitted = new AtomicLong(0L);
+    private long submitted = 0L;
     private long lastPrintAt = 0;
 
     public HATtrickTClientWorker(int clientId,
                                  Coordinator coordinator,
                                  AtomicBoolean running,
-                                 int numWarehouses,
-                                 int maxInFlight) {
+                                 int numWarehouses) {
         this.clientId      = clientId;
         this.coordinator   = coordinator;
         this.running       = running;
         this.numWarehouses = numWarehouses;
-        this.maxInFlight   = maxInFlight;
     }
 
     @Override
@@ -92,17 +57,13 @@ public final class HATtrickTClientWorker implements Runnable {
 
         while (running.get() && !Thread.currentThread().isInterrupted()) {
             try {
-                // ── Backpressure ────────────────────────────────────────────
-                // Park (don't spin-yield) when the coordinator queue is full.
-                // parkNanos(100_000) actually releases the CPU for ~100μs,
-                // letting the coordinator's TransactionWorker and VMS threads
-                // make progress. With Thread.yield() we were burning CPU here
-                // and starving the coordinator — visible as the τ=2 collapse
-                // from 13K tps down to 845 tps.
+                // Backpressure: yield (no sleep) when coordinator queue is full.
+                // Mirrors the natural flow control in TPC-C where the client
+                // runs out of pre-generated inputs between batches.
                 long inFlight = coordinator.getNumTIDsSubmitted()
                         - coordinator.getNumTIDsCommitted();
-                if (inFlight > this.maxInFlight) {
-                    LockSupport.parkNanos(100_000);
+                if (inFlight > MAX_IN_FLIGHT) {
+                    Thread.yield();
                     continue;
                 }
 
@@ -120,12 +81,12 @@ public final class HATtrickTClientWorker implements Runnable {
                 }
 
                 coordinator.queueTransactionInput(txInput);
-                submitted.incrementAndGet();
+                submitted++;
 
                 long now = System.currentTimeMillis();
                 if (now - lastPrintAt >= 5000) {
                     System.out.printf("[T-client %d] Submitted %,d transactions total%n",
-                            clientId, submitted.get());
+                            clientId, submitted);
                     lastPrintAt = now;
                 }
 
@@ -138,19 +99,19 @@ public final class HATtrickTClientWorker implements Runnable {
 
         LOG.log(System.Logger.Level.INFO,
                 "T-client {0} stopped. Submitted {1} txns",
-                clientId, submitted.get());
+                clientId, submitted);
     }
 
     public long getSubmittedCount() {
-        return submitted.get();
+        return submitted;
     }
 
     private NewOrderWareIn generateNewOrder() {
-        int w_id = DataGenUtils.randomNumber(1, numWarehouses);
-        int d_id = DataGenUtils.randomNumber(1, TPCcConstants.NUM_DIST_PER_WARE);
-        int c_id = DataGenUtils.nuRand(1023, 259, 1, TPCcConstants.NUM_CUST_PER_DIST);
-
-        int ol_cnt = OL_CNT;
+        int w_id   = DataGenUtils.randomNumber(1, numWarehouses);
+        int d_id   = DataGenUtils.randomNumber(1, TPCcConstants.NUM_DIST_PER_WARE);
+        int c_id   = DataGenUtils.nuRand(1023, 259, 1, TPCcConstants.NUM_CUST_PER_DIST);
+        int ol_cnt = DataGenUtils.randomNumber(
+                TPCcConstants.MIN_NUM_ITEMS_PER_ORDER, TPCcConstants.MAX_NUM_ITEMS_PER_ORDER);
 
         int[] itemIds  = new int[ol_cnt];
         int[] supWares = new int[ol_cnt];
@@ -169,8 +130,6 @@ public final class HATtrickTClientWorker implements Runnable {
         int   d_id   = DataGenUtils.randomNumber(1, TPCcConstants.NUM_DIST_PER_WARE);
         int   c_id   = DataGenUtils.nuRand(1023, 259, 1, TPCcConstants.NUM_CUST_PER_DIST);
         float amount = DataGenUtils.randomNumber(100, 500000) / 100.0f;
-        // Always use by_id (by_name=false) — by-name throws "Empty customer list"
-        // in WarehouseService and crashes the VMS.
         return new PaymentIn(w_id, d_id, c_id, w_id, d_id, amount, "", false);
     }
 }
