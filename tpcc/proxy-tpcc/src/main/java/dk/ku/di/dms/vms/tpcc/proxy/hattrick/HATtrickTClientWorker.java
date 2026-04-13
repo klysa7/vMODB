@@ -8,28 +8,37 @@ import dk.ku.di.dms.vms.tpcc.common.events.NewOrderWareIn;
 import dk.ku.di.dms.vms.tpcc.common.events.PaymentIn;
 
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * HATtrick T-client for the throughput frontier experiment.
+ * HATtrick T-client — no fixed sleep, coordinator-aware backpressure.
  *
- * Workload: 50% new_order + 50% payment.
+ * The original TPC-C experiment (ExperimentUtils, SLEEP_MODE=false) works
+ * without sleep because it pre-generates a finite number of inputs and the
+ * client naturally runs out before flooding the queue. HATtrick generates
+ * inputs indefinitely, so we need equivalent flow control.
  *
- * Table stability: the delete logic lives INSIDE processNewOrder() on
- * the order VMS — every new_order atomically deletes the oldest order
- * for the same district. No separate delete transaction needed here.
+ * Flow control uses coordinator.getNumTIDsSubmitted() -
+ * coordinator.getNumTIDsCommitted() — the same values already exposed in
+ * Main.java for the cleanup check. When in-flight > MAX_IN_FLIGHT,
+ * Thread.yield() gives the coordinator thread CPU time to drain a batch.
+ * No sleep on the hot path.
+ *
+ * MAX_IN_FLIGHT = num_max_transactions_batch (10000) — matching the
+ * coordinator's own batch cap so we never queue more than one extra batch
+ * ahead of what the coordinator is currently processing.
  */
 public final class HATtrickTClientWorker implements Runnable {
 
     private static final System.Logger LOG =
             System.getLogger(HATtrickTClientWorker.class.getName());
 
+    private static final int MAX_IN_FLIGHT = 5_000;
     private final int           clientId;
     private final Coordinator   coordinator;
     private final AtomicBoolean running;
     private final int           numWarehouses;
 
-    private final AtomicLong submitted = new AtomicLong(0L);
+    private long submitted = 0L;
     private long lastPrintAt = 0;
 
     public HATtrickTClientWorker(int clientId,
@@ -48,6 +57,16 @@ public final class HATtrickTClientWorker implements Runnable {
 
         while (running.get() && !Thread.currentThread().isInterrupted()) {
             try {
+                // Backpressure: yield (no sleep) when coordinator queue is full.
+                // Mirrors the natural flow control in TPC-C where the client
+                // runs out of pre-generated inputs between batches.
+                long inFlight = coordinator.getNumTIDsSubmitted()
+                        - coordinator.getNumTIDsCommitted();
+                if (inFlight > MAX_IN_FLIGHT) {
+                    Thread.yield();
+                    continue;
+                }
+
                 TransactionInput txInput;
                 if (DataGenUtils.randomNumber(1, 2) == 1) {
                     NewOrderWareIn event = generateNewOrder();
@@ -62,22 +81,17 @@ public final class HATtrickTClientWorker implements Runnable {
                 }
 
                 coordinator.queueTransactionInput(txInput);
-                submitted.incrementAndGet();
+                submitted++;
 
-                // Print every 5 seconds to confirm throughput
                 long now = System.currentTimeMillis();
                 if (now - lastPrintAt >= 5000) {
-                    System.out.printf("[T-client %d] Submitted %d transactions total%n",
-                            clientId, submitted.get());
+                    System.out.printf("[T-client %d] Submitted %,d transactions total%n",
+                            clientId, submitted);
                     lastPrintAt = now;
                 }
 
-                Thread.sleep(1);
-
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                break;
             } catch (Exception e) {
+                if (Thread.currentThread().isInterrupted()) break;
                 LOG.log(System.Logger.Level.WARNING,
                         "T-client {0} error: {1}", clientId, e.getMessage());
             }
@@ -85,11 +99,11 @@ public final class HATtrickTClientWorker implements Runnable {
 
         LOG.log(System.Logger.Level.INFO,
                 "T-client {0} stopped. Submitted {1} txns",
-                clientId, submitted.get());
+                clientId, submitted);
     }
 
     public long getSubmittedCount() {
-        return submitted.get();
+        return submitted;
     }
 
     private NewOrderWareIn generateNewOrder() {
@@ -116,8 +130,6 @@ public final class HATtrickTClientWorker implements Runnable {
         int   d_id   = DataGenUtils.randomNumber(1, TPCcConstants.NUM_DIST_PER_WARE);
         int   c_id   = DataGenUtils.nuRand(1023, 259, 1, TPCcConstants.NUM_CUST_PER_DIST);
         float amount = DataGenUtils.randomNumber(100, 500000) / 100.0f;
-        // Always use by_id (by_name=false) — the by-name lookup throws
-        // "Empty customer list" in WarehouseService crashing the VMS.
         return new PaymentIn(w_id, d_id, c_id, w_id, d_id, amount, "", false);
     }
 }
