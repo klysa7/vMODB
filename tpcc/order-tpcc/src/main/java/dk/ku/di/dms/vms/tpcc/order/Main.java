@@ -25,9 +25,8 @@ public final class Main {
         int num_ware = Integer.parseInt(numWareStr);
         // num orders fixed = 30k * num_ware
         int numOrders = num_ware * 30_000;
-        // based on 20k tx/s and 10s run
-        numOrders += (20_000 * 10);
-        int numOrderLine = numOrders * 10;
+        numOrders += (20_000 * 10); // keep same for orders table
+        int numOrderLine = num_ware * 3_500_000; // ol_cnt=3, full grid buffer
 
         prop.setProperty("max_records.orders", String.valueOf(numOrders));
         prop.setProperty("max_records.new_orders", String.valueOf(numOrders));

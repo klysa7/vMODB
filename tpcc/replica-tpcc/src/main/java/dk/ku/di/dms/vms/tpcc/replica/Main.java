@@ -37,7 +37,7 @@ public final class Main {
         int numWare = Integer.parseInt(prop.getProperty("num_ware", "1"));
 
         int numOrders    = numWare * 30_000 + (20_000 * 10);
-        int numOrderLine = numOrders * 10;
+        int numOrderLine = numWare * 3_500_000;
 
         prop.setProperty("max_records.order_line",    String.valueOf(numOrderLine));
         prop.setProperty("table.order_line.chaining", "false");
