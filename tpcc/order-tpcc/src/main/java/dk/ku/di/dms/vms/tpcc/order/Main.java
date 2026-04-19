@@ -23,20 +23,26 @@ public final class Main {
         Properties prop = ConfigUtils.loadProperties();
         String numWareStr = prop.getProperty("num_ware");
         int num_ware = Integer.parseInt(numWareStr);
-        // num orders fixed = 30k * num_ware
-        int numOrders = num_ware * 30_000;
-        numOrders += (20_000 * 10); // keep same for orders table
-        int numOrderLine = num_ware * 3_500_000; // ol_cnt=3, full grid buffer
 
-        prop.setProperty("max_records.orders", String.valueOf(numOrders));
+        // orders and new_orders have NO eviction — they grow monotonically.
+        // At 12,000 tps × 50% new_order = ~6,000 new orders/sec.
+        // A single full grid run (~15 min) produces ~5.4M new orders.
+        // Allocate 3M per warehouse to survive multiple grid runs safely.
+        int numOrders = num_ware * 3_000_000;
+
+        // order_line is bounded by eviction (ol_cnt=3, stable at ~390K rows).
+        // Buffer is sized for the full grid including growth phase.
+        int numOrderLine = num_ware * 3_500_000;
+
+        prop.setProperty("max_records.orders",     String.valueOf(numOrders));
         prop.setProperty("max_records.new_orders", String.valueOf(numOrders));
         prop.setProperty("max_records.order_line", String.valueOf(numOrderLine));
-        prop.setProperty("max_records.history", "500000");
+        prop.setProperty("max_records.history",    "500000");
 
-        prop.setProperty("table.orders.chaining", "false");
+        prop.setProperty("table.orders.chaining",     "false");
         prop.setProperty("table.new_orders.chaining", "false");
         prop.setProperty("table.order_line.chaining", "false");
-        prop.setProperty("table.history.chaining", "false");
+        prop.setProperty("table.history.chaining",    "false");
         prop.setProperty("checkpointing", "true");
 
         VmsApplicationOptions options = VmsApplicationOptions.build(
@@ -46,11 +52,11 @@ public final class Main {
                         "dk.ku.di.dms.vms.tpcc.order",
                         "dk.ku.di.dms.vms.tpcc.common"
                 });
-        return VmsApplication.build(options, (x,y) -> new OrderHttpHandler(x,
-                (IOrderRepository) y.apply("orders"),
-                (INewOrderRepository) y.apply("new_orders"),
-                (IOrderLineRepository) y.apply("order_line"),
-                (IHistoryRepository) y.apply("history")
+        return VmsApplication.build(options, (x, y) -> new OrderHttpHandler(x,
+                        (IOrderRepository)    y.apply("orders"),
+                        (INewOrderRepository) y.apply("new_orders"),
+                        (IOrderLineRepository) y.apply("order_line"),
+                        (IHistoryRepository)  y.apply("history")
                 )
         );
     }

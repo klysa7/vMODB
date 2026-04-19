@@ -100,7 +100,7 @@ public final class HATtrickRunner {
                 GridPoint point = runSinglePoint(tau, alpha, lastCommittedTid);
                 results.add(point);
                 System.out.println("  Result: " + point);
-                Thread.sleep(3_000); // drain between grid points
+                Thread.sleep(15_000); // drain between grid points — allows backlog to clear
             }
         }
 
@@ -184,6 +184,25 @@ public final class HATtrickRunner {
 
         System.out.printf("  τ=%d α=%d  T-tps=%.2f  A-qps=%.4f  (window=%.1fs, committed=%d)%n",
                 tau, alpha, tTps, aQps, elapsedSec, committedInWindow);
+
+        // ── Drain: wait for coordinator backlog to clear ───────────────────
+        // After stopping T-clients, the coordinator may still have uncommitted
+        // transactions queued. If we start the next grid point immediately,
+        // the backpressure guard (inFlight > MAX_IN_FLIGHT) will block the
+        // next T-client from submitting anything — producing false zero results.
+        // We wait up to 20 seconds for inFlight to drop below 1000.
+        System.out.print("  Draining pipeline...");
+        long drainDeadline = System.currentTimeMillis() + 20_000;
+        while (System.currentTimeMillis() < drainDeadline) {
+            long inFlight = coordinator.getNumTIDsSubmitted()
+                    - coordinator.getNumTIDsCommitted();
+            if (inFlight < 1_000) break;
+            System.out.print(".");
+            Thread.sleep(500);
+        }
+        long remaining = coordinator.getNumTIDsSubmitted()
+                - coordinator.getNumTIDsCommitted();
+        System.out.printf(" done (remaining in-flight=%d)%n", remaining);
 
         return new GridPoint(tau, alpha, tTps, aQps);
     }
