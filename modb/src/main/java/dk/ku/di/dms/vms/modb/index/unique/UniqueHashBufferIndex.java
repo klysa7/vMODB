@@ -157,7 +157,7 @@ public class UniqueHashBufferIndex extends ReadWriteIndex<IKey> implements ReadW
             UNSAFE.copyMemory(null, srcAddress, null, pos, this.recordSize);
             return;
         }
-        LOGGER.log(WARNING, ERROR_FINDING);
+//        LOGGER.log(WARNING, ERROR_FINDING);
     }
 
     @Override
@@ -217,7 +217,7 @@ public class UniqueHashBufferIndex extends ReadWriteIndex<IKey> implements ReadW
             this.updateSize(-1);
             return;
         }
-        LOGGER.log(WARNING, ERROR_FINDING);
+//        LOGGER.log(WARNING, ERROR_FINDING);
     }
 
     @Override

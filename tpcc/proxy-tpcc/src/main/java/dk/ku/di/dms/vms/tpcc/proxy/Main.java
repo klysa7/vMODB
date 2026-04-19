@@ -210,20 +210,23 @@ public final class Main {
 
     public static Map<String, Integer> buildTransactionRatioMap(){
         Map<String, Integer> txRatioMap = new TreeMap<>();
-        boolean seen_100 = false;
+        int total = 0;
         if(!PROPERTIES.get("new_order").toString().equals("0")) {
-            txRatioMap.put("new_order", Integer.valueOf(PROPERTIES.get("new_order").toString()));
-            if(txRatioMap.get("new_order") == 100) seen_100 = true;
+            int v = Integer.parseInt(PROPERTIES.get("new_order").toString());
+            txRatioMap.put("new_order", v);
+            total += v;
         }
         if(!PROPERTIES.get("payment").toString().equals("0")) {
-            txRatioMap.put("payment", Integer.valueOf(PROPERTIES.get("payment").toString()));
-            if(txRatioMap.get("payment") == 100) seen_100 = true;
+            int v = Integer.parseInt(PROPERTIES.get("payment").toString());
+            txRatioMap.put("payment", v);
+            total += v;
         }
         if(!PROPERTIES.get("order_status").toString().equals("0")) {
-            txRatioMap.put("order_status", Integer.valueOf(PROPERTIES.get("order_status").toString()));
-            if(txRatioMap.get("order_status") == 100) seen_100 = true;
+            int v = Integer.parseInt(PROPERTIES.get("order_status").toString());
+            txRatioMap.put("order_status", v);
+            total += v;
         }
-        if(!seen_100) throw new RuntimeException("No transaction defined as 100 in app.properties!");
+        if(total != 100) throw new RuntimeException("Transaction ratios must sum to 100 in app.properties! Current sum: " + total);
         return txRatioMap;
     }
 

@@ -22,51 +22,36 @@ import dk.ku.di.dms.vms.tpcc.order.repositories.IOrderRepository;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static dk.ku.di.dms.vms.modb.api.enums.TransactionTypeEnum.R;
 import static dk.ku.di.dms.vms.modb.api.enums.TransactionTypeEnum.W;
 import static java.lang.System.Logger.Level.DEBUG;
 import static java.lang.System.Logger.Level.ERROR;
+import static java.lang.System.Logger.Level.INFO;
 
 @Microservice("order")
 public final class OrderService {
 
     private static final System.Logger LOGGER = System.getLogger(OrderService.class.getName());
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // EVICTION COUNTERS — Table Size Stabilization
-    //
-    // Tracks the next ol_o_id to evict per (w_id, d_id) combination.
-    // Key: (w_id << 16) | d_id    Value: next ol_o_id to delete (starts at 1)
-    //
-    // After populate, ol_o_id ranges from 1..3000 per district.
-    // Counter starts at 1. Each processNewOrder atomically increments it
-    // and deletes all ol_numbers (1..15) for that ol_o_id.
-    // Deletes for non-existent ol_numbers are silent no-ops (safe).
-    //
-    // WHY NOT A QUERY:
-    //   "ORDER BY ol_o_id ASC LIMIT 15" returned ALL matching rows instead of 15
-    //   due to a bug in the VMS FullScanWithOrder operator's LIMIT handling.
-    //   This wiped entire districts per transaction, crashing revenue.
-    //   Counter approach bypasses the query entirely — pure key-based deletes,
-    //   O(15) per transaction, zero scan overhead.
-    //
-    // THREAD SAFETY: AtomicInteger — concurrent @Parallel transactions on the
-    //   same district each evict a DIFFERENT order. No two transactions clash.
-    // ─────────────────────────────────────────────────────────────────────────
-    private static final int MAX_OL_NUMBER = 15; // TPC-C spec: ol_count in [5,15]
+    /**
+     * Populate seeds 3,000 orders per district.
+     * Eviction is only safe for rows inserted by transactions (o_id > 3000),
+     * because populated rows bypass the NonUniqueSecondaryIndex (FK index).
+     * Deleting a populated row causes a null-set crash in installWrites().
+     *
+     * Guard: only evict when evictOid > ORDERS_PER_DISTRICT (i.e., > 3000).
+     * This means the first ~30,000 new_orders (10 districts × 3000) grow the
+     * table by ol_cnt rows each, after which it stabilizes at ~390K rows.
+     */
+    private static final int ORDERS_PER_DISTRICT = 3_000;
 
-    private final ConcurrentHashMap<Integer, AtomicInteger> evictCounters =
-            new ConcurrentHashMap<>();
-
-    private int nextEvictOId(int w_id, int d_id) {
-        int key = (w_id << 16) | d_id;
-        return evictCounters
-                .computeIfAbsent(key, k -> new AtomicInteger(1))
-                .getAndIncrement();
-    }
+    // ── Runtime size tracking ──────────────────────────────────────────────────
+    private static final AtomicLong TOTAL_INSERTS = new AtomicLong(0);
+    private static final AtomicLong TOTAL_DELETES = new AtomicLong(0);
+    private static volatile long lastLogMs = 0;
+    private static final long LOG_INTERVAL_MS = 10_000; // log every 10 seconds
 
     private final IOrderRepository orderRepository;
     private final INewOrderRepository newOrderRepository;
@@ -151,15 +136,37 @@ public final class OrderService {
             orderLinesToInsert.add(i, orderLine);
         }
         this.orderLineRepository.insertAll(orderLinesToInsert);
+        TOTAL_INSERTS.addAndGet(in.itemsIds.length);
 
-        // ── EVICTION: delete oldest order for this (w_id, d_id) ──────────────
-        // Atomically claim the next ol_o_id to evict for this district.
-        // Attempt delete for ol_number 1..15 — missing rows are silent no-ops.
-        int evictOId = nextEvictOId(in.w_id, in.d_id);
-        for (int olNum = 1; olNum <= MAX_OL_NUMBER; olNum++) {
-            this.orderLineRepository.delete(
-                    new OrderLine(evictOId, in.d_id, in.w_id, olNum,
-                            0, 0, null, 0, 0f, null));
+        // ── Eviction ───────────────────────────────────────────────────────────
+        // Populate inserts o_id 1..3000 per district via a low-level path that
+        // bypasses NonUniqueSecondaryIndex. Deleting those rows crashes on null set.
+        // Only evict when evictOid > ORDERS_PER_DISTRICT (transaction-inserted rows).
+        // Growth phase: first ~30K new_orders add ol_cnt rows each (~390K peak).
+        // Stable phase: table stays at ~390K rows thereafter.
+        int evictOid = in.d_next_o_id - ORDERS_PER_DISTRICT;
+        if (evictOid > ORDERS_PER_DISTRICT) {
+            for (int ol = 1; ol <= in.itemsIds.length; ol++) {
+                this.orderLineRepository.delete(
+                        new OrderLine(evictOid, in.d_id, in.w_id, ol,
+                                0, 0, null, 0, 0f, ""));
+            }
+            TOTAL_DELETES.addAndGet(in.itemsIds.length);
+        }
+
+        // ── Periodic table size log ────────────────────────────────────────────
+        long nowMs = System.currentTimeMillis();
+        if (nowMs - lastLogMs >= LOG_INTERVAL_MS) {
+            lastLogMs = nowMs;
+            long inserted = TOTAL_INSERTS.get();
+            long deleted  = TOTAL_DELETES.get();
+            long net      = inserted - deleted;
+            long estimated = 300_000L + net;
+            LOGGER.log(INFO,
+                    "[order_line size] estimated={0} rows " +
+                            "(populate=300000 + net={1}; tx_inserted={2}, tx_deleted={3}). " +
+                            "Growing until evictOid > {4}.",
+                    estimated, net, inserted, deleted, ORDERS_PER_DISTRICT * 2);
         }
 
         return new NewOrderOut(
