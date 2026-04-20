@@ -15,16 +15,11 @@ import java.util.concurrent.atomic.AtomicLong;
  *
  * Workload: 50% new_order + 50% payment.
  *
- * Backpressure: no fixed sleep. Instead, we check how many transactions
- * are in-flight (submitted but not yet committed). If that number exceeds
- * MAX_IN_FLIGHT, we yield the thread and wait — this lets the coordinator
- * drain the current batch before we add more. MAX_IN_FLIGHT should match
- * num_max_transactions_batch in app.properties so the system never queues
- * more than one batch worth of transactions ahead of what is being processed.
- *
- * This is the same natural flow control that the original TPC-C experiment
- * achieves by running out of pre-generated input files: the client stops
- * submitting when the queue is full, giving the coordinator time to process.
+ * Backpressure: uses a SHARED submitted counter across all T-client workers.
+ * When τ=2, both workers check the same counter against committed — so the
+ * combined in-flight never exceeds MAX_IN_FLIGHT. Without sharing, each worker
+ * independently allows MAX_IN_FLIGHT, doubling the backlog and causing severe
+ * coordinator contention.
  */
 public final class HATtrickTClientWorker implements Runnable {
 
@@ -32,7 +27,6 @@ public final class HATtrickTClientWorker implements Runnable {
             System.getLogger(HATtrickTClientWorker.class.getName());
 
     // Match num_max_transactions_batch in app.properties.
-    // When in-flight transactions exceed this, yield until the coordinator drains.
     private static final int MAX_IN_FLIGHT = 5_000;
 
     private final int           clientId;
@@ -40,17 +34,40 @@ public final class HATtrickTClientWorker implements Runnable {
     private final AtomicBoolean running;
     private final int           numWarehouses;
 
-    private final AtomicLong submitted = new AtomicLong(0L);
+    // Shared across all T-client workers in the same grid point.
+    // All workers increment this counter and check it against committed.
+    // This ensures the combined in-flight never exceeds MAX_IN_FLIGHT.
+    private final AtomicLong sharedSubmitted;
+
+    // Per-worker counter for logging only
+    private final AtomicLong ownSubmitted = new AtomicLong(0L);
     private long lastPrintAt = 0;
 
+    /**
+     * Constructor with shared counter — use this when τ > 1.
+     * All workers in the same grid point must share the same sharedSubmitted instance.
+     */
+    public HATtrickTClientWorker(int clientId,
+                                 Coordinator coordinator,
+                                 AtomicBoolean running,
+                                 int numWarehouses,
+                                 AtomicLong sharedSubmitted) {
+        this.clientId        = clientId;
+        this.coordinator     = coordinator;
+        this.running         = running;
+        this.numWarehouses   = numWarehouses;
+        this.sharedSubmitted = sharedSubmitted;
+    }
+
+    /**
+     * Backwards-compatible constructor — creates its own counter.
+     * Safe for τ=1 (single worker). For τ>1 use the shared-counter constructor.
+     */
     public HATtrickTClientWorker(int clientId,
                                  Coordinator coordinator,
                                  AtomicBoolean running,
                                  int numWarehouses) {
-        this.clientId      = clientId;
-        this.coordinator   = coordinator;
-        this.running       = running;
-        this.numWarehouses = numWarehouses;
+        this(clientId, coordinator, running, numWarehouses, new AtomicLong(0L));
     }
 
     @Override
@@ -59,12 +76,10 @@ public final class HATtrickTClientWorker implements Runnable {
 
         while (running.get() && !Thread.currentThread().isInterrupted()) {
             try {
-                // Backpressure: if the coordinator queue has more than MAX_IN_FLIGHT
-                // transactions waiting to be committed, yield the thread and wait.
-                // This replaces Thread.sleep(1) with adaptive flow control —
-                // the client submits as fast as the coordinator can process,
-                // but never faster.
-                long inFlight = coordinator.getNumTIDsSubmitted()
+                // Backpressure: check SHARED submitted vs committed.
+                // All workers contribute to sharedSubmitted, so the total
+                // combined in-flight across all workers never exceeds MAX_IN_FLIGHT.
+                long inFlight = sharedSubmitted.get()
                         - coordinator.getNumTIDsCommitted();
                 if (inFlight > MAX_IN_FLIGHT) {
                     Thread.yield();
@@ -85,12 +100,13 @@ public final class HATtrickTClientWorker implements Runnable {
                 }
 
                 coordinator.queueTransactionInput(txInput);
-                submitted.incrementAndGet();
+                sharedSubmitted.incrementAndGet();
+                ownSubmitted.incrementAndGet();
 
                 long now = System.currentTimeMillis();
                 if (now - lastPrintAt >= 5000) {
                     System.out.printf("[T-client %d] Submitted %,d transactions total%n",
-                            clientId, submitted.get());
+                            clientId, ownSubmitted.get());
                     lastPrintAt = now;
                 }
 
@@ -103,11 +119,11 @@ public final class HATtrickTClientWorker implements Runnable {
 
         LOG.log(System.Logger.Level.INFO,
                 "T-client {0} stopped. Submitted {1} txns",
-                clientId, submitted.get());
+                clientId, ownSubmitted.get());
     }
 
     public long getSubmittedCount() {
-        return submitted.get();
+        return ownSubmitted.get();
     }
 
     private NewOrderWareIn generateNewOrder() {

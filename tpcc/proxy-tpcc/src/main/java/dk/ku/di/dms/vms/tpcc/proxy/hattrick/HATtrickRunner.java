@@ -2,7 +2,6 @@ package dk.ku.di.dms.vms.tpcc.proxy.hattrick;
 
 import dk.ku.di.dms.vms.coordinator.Coordinator;
 import dk.ku.di.dms.vms.modb.common.data_structure.Tuple;
-import dk.ku.di.dms.vms.tpcc.proxy.workload.WorkloadUtils;
 
 import java.io.BufferedWriter;
 import java.io.FileWriter;
@@ -17,10 +16,9 @@ import java.util.concurrent.atomic.AtomicLong;
 /**
  * HATtrick throughput frontier experiment runner.
  *
- * T-clients: HATtrickTClientWorker (new_order + payment, by_name=false).
- *   No pre-generated workload files needed — transactions are generated
- *   on the fly. This avoids the WorkloadUtils NPE that occurred when
- *   txRatioMap was empty, and matches the Phase 1 path exactly.
+ * T-clients: HATtrickTClientWorker (new_order + payment).
+ *   All workers in a grid point share ONE AtomicLong sharedSubmitted counter.
+ *   This ensures combined in-flight never exceeds MAX_IN_FLIGHT regardless of τ.
  *
  * A-clients: HATtrickAClientWorker (HTTP GET to gateway).
  *
@@ -32,14 +30,14 @@ public final class HATtrickRunner {
     private static final System.Logger LOG =
             System.getLogger(HATtrickRunner.class.getName());
 
-    private final Coordinator              coordinator;
-    private final String                   gatewayBaseUrl;
-    private final int[]                    tauValues;
-    private final int[]                    alphaValues;
-    private final int                      warmupSecs;
-    private final int                      measurementSecs;
-    private final int                      numWare;
-    private final String                   queryPath;
+    private final Coordinator coordinator;
+    private final String      gatewayBaseUrl;
+    private final int[]       tauValues;
+    private final int[]       alphaValues;
+    private final int         warmupSecs;
+    private final int         measurementSecs;
+    private final int         numWare;
+    private final String      queryPath;
 
     public record GridPoint(int tau, int alpha, double tTps, double aQps) {
         @Override public String toString() {
@@ -47,8 +45,6 @@ public final class HATtrickRunner {
         }
     }
 
-    // Full constructor — txRatio and numTxInputPerType no longer used for T-clients
-    // but kept for API compatibility with HATtrickMain
     public HATtrickRunner(Coordinator coordinator,
                           String gatewayBaseUrl,
                           int[] tauValues,
@@ -59,14 +55,14 @@ public final class HATtrickRunner {
                           Tuple<Integer, String>[] txRatio,
                           Map<String, Integer> numTxInputPerType,
                           String queryPath) {
-        this.coordinator     = coordinator;
-        this.gatewayBaseUrl  = gatewayBaseUrl;
-        this.tauValues       = tauValues;
-        this.alphaValues     = alphaValues;
-        this.warmupSecs      = warmupSecs;
+        this.coordinator    = coordinator;
+        this.gatewayBaseUrl = gatewayBaseUrl;
+        this.tauValues      = tauValues;
+        this.alphaValues    = alphaValues;
+        this.warmupSecs     = warmupSecs;
         this.measurementSecs = measurementSecs;
-        this.numWare         = numWare;
-        this.queryPath       = queryPath;
+        this.numWare        = numWare;
+        this.queryPath      = queryPath;
     }
 
     public List<GridPoint> run() throws InterruptedException, IOException {
@@ -80,13 +76,10 @@ public final class HATtrickRunner {
         System.out.printf ("  Warmup=%ds  Measurement=%ds%n", warmupSecs, measurementSecs);
         System.out.println("========================================================\n");
 
-        // Register batch commit listener — fires on every real commit
         AtomicLong lastCommittedTid = new AtomicLong(0L);
         coordinator.registerBatchCommitConsumer(
                 (batchId, lastTid) -> lastCommittedTid.set(lastTid));
 
-        // Pipeline warmup — send a few transactions so the coordinator
-        // pipeline is active before the first grid point
         System.out.print("  Warming up pipeline");
         warmupPipeline(lastCommittedTid);
         System.out.println(" ready.\n");
@@ -100,7 +93,7 @@ public final class HATtrickRunner {
                 GridPoint point = runSinglePoint(tau, alpha, lastCommittedTid);
                 results.add(point);
                 System.out.println("  Result: " + point);
-                Thread.sleep(15_000); // drain between grid points — allows backlog to clear
+                Thread.sleep(15_000);
             }
         }
 
@@ -115,7 +108,11 @@ public final class HATtrickRunner {
 
         System.out.printf("%n--- Running grid point τ=%d α=%d ---%n", tau, alpha);
 
-        // ── Start T-clients (HATtrickTClientWorker) ───────────────────────
+        // ONE shared counter for ALL T-workers in this grid point.
+        // This is the key fix: with τ=2, both workers share this counter,
+        // so combined in-flight never exceeds MAX_IN_FLIGHT.
+        AtomicLong sharedSubmitted = new AtomicLong(0L);
+
         AtomicBoolean tRunning = new AtomicBoolean(true);
         ExecutorService tPool = null;
         List<HATtrickTClientWorker> tWorkers = new ArrayList<>();
@@ -124,21 +121,18 @@ public final class HATtrickRunner {
             tPool = Executors.newFixedThreadPool(tau);
             for (int t = 0; t < tau; t++) {
                 HATtrickTClientWorker w = new HATtrickTClientWorker(
-                        t, coordinator, tRunning, numWare);
+                        t, coordinator, tRunning, numWare, sharedSubmitted);
                 tWorkers.add(w);
                 tPool.submit(w);
             }
         }
 
-        // ── Warmup ────────────────────────────────────────────────────────
         System.out.printf("  Warmup %ds...%n", warmupSecs);
         Thread.sleep(warmupSecs * 1_000L);
 
-        // ── Snapshot at start of measurement window ───────────────────────
         long tStart      = lastCommittedTid.get();
         long windowStart = System.currentTimeMillis();
 
-        // ── Start A-clients ───────────────────────────────────────────────
         AtomicBoolean aRunning = new AtomicBoolean(true);
         ExecutorService aPool = alpha > 0 ? Executors.newFixedThreadPool(alpha) : null;
         List<HATtrickAClientWorker> aWorkers = new ArrayList<>();
@@ -152,31 +146,26 @@ public final class HATtrickRunner {
         long aStart = aWorkers.stream()
                 .mapToLong(HATtrickAClientWorker::getCompletedCount).sum();
 
-        // ── Measurement window ────────────────────────────────────────────
         System.out.printf("  Measuring %ds...%n", measurementSecs);
         Thread.sleep(measurementSecs * 1_000L);
 
-        // ── Snapshots at end ──────────────────────────────────────────────
         long tEnd      = lastCommittedTid.get();
         long aEnd      = aWorkers.stream()
                 .mapToLong(HATtrickAClientWorker::getCompletedCount).sum();
         long windowEnd = System.currentTimeMillis();
 
-        // ── Stop A-clients ─────────────────────────────────────────────────
         aRunning.set(false);
         if (aPool != null) {
             aPool.shutdownNow();
             aPool.awaitTermination(3, TimeUnit.SECONDS);
         }
 
-        // ── Stop T-clients ─────────────────────────────────────────────────
         tRunning.set(false);
         if (tPool != null) {
             tPool.shutdownNow();
             tPool.awaitTermination(3, TimeUnit.SECONDS);
         }
 
-        // ── Compute throughputs ───────────────────────────────────────────
         double elapsedSec        = (windowEnd - windowStart) / 1000.0;
         long   committedInWindow = tEnd - tStart;
         double tTps              = committedInWindow / elapsedSec;
@@ -185,12 +174,6 @@ public final class HATtrickRunner {
         System.out.printf("  τ=%d α=%d  T-tps=%.2f  A-qps=%.4f  (window=%.1fs, committed=%d)%n",
                 tau, alpha, tTps, aQps, elapsedSec, committedInWindow);
 
-        // ── Drain: wait for coordinator backlog to clear ───────────────────
-        // After stopping T-clients, the coordinator may still have uncommitted
-        // transactions queued. If we start the next grid point immediately,
-        // the backpressure guard (inFlight > MAX_IN_FLIGHT) will block the
-        // next T-client from submitting anything — producing false zero results.
-        // We wait up to 20 seconds for inFlight to drop below 1000.
         System.out.print("  Draining pipeline...");
         long drainDeadline = System.currentTimeMillis() + 20_000;
         while (System.currentTimeMillis() < drainDeadline) {
@@ -207,18 +190,14 @@ public final class HATtrickRunner {
         return new GridPoint(tau, alpha, tTps, aQps);
     }
 
-    // ── Pipeline warmup ───────────────────────────────────────────────────────
-    // Sends 100 transactions via T-client worker to prime the coordinator
-    // pipeline before the first grid point measurement.
-
     private void warmupPipeline(AtomicLong lastCommittedTid) throws InterruptedException {
         AtomicBoolean warmupRunning = new AtomicBoolean(true);
+        AtomicLong warmupShared = new AtomicLong(0L);
         ExecutorService pool = Executors.newSingleThreadExecutor();
         HATtrickTClientWorker warmupWorker = new HATtrickTClientWorker(
-                0, coordinator, warmupRunning, numWare);
+                0, coordinator, warmupRunning, numWare, warmupShared);
         pool.submit(warmupWorker);
 
-        // Wait up to 30s for the first real commit
         long deadline = System.currentTimeMillis() + 30_000;
         while (System.currentTimeMillis() < deadline) {
             Thread.sleep(1_000);
@@ -226,14 +205,11 @@ public final class HATtrickRunner {
             if (lastCommittedTid.get() > 0) break;
         }
 
-        // Let it run 2 more seconds to stabilize
         Thread.sleep(2_000);
-
         warmupRunning.set(false);
         pool.shutdownNow();
         pool.awaitTermination(3, TimeUnit.SECONDS);
 
-        // Drain: wait until pipeline quiets
         long prev = lastCommittedTid.get();
         int stableCount = 0;
         while (stableCount < 2) {
@@ -243,8 +219,6 @@ public final class HATtrickRunner {
             else { stableCount = 0; prev = now; }
         }
     }
-
-    // ── CSV + summary ─────────────────────────────────────────────────────────
 
     private void writeCsv(List<GridPoint> results) throws IOException {
         String ts = LocalDateTime.now()

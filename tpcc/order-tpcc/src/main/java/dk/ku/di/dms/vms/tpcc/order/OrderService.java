@@ -22,36 +22,22 @@ import dk.ku.di.dms.vms.tpcc.order.repositories.IOrderRepository;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicLong;
 
 import static dk.ku.di.dms.vms.modb.api.enums.TransactionTypeEnum.R;
 import static dk.ku.di.dms.vms.modb.api.enums.TransactionTypeEnum.W;
 import static java.lang.System.Logger.Level.DEBUG;
 import static java.lang.System.Logger.Level.ERROR;
-import static java.lang.System.Logger.Level.INFO;
 
 @Microservice("order")
 public final class OrderService {
 
     private static final System.Logger LOGGER = System.getLogger(OrderService.class.getName());
 
-    /**
-     * Populate seeds 3,000 orders per district.
-     * Eviction is only safe for rows inserted by transactions (o_id > 3000),
-     * because populated rows bypass the NonUniqueSecondaryIndex (FK index).
-     * Deleting a populated row causes a null-set crash in installWrites().
-     *
-     * Guard: only evict when evictOid > ORDERS_PER_DISTRICT (i.e., > 3000).
-     * This means the first ~30,000 new_orders (10 districts × 3000) grow the
-     * table by ol_cnt rows each, after which it stabilizes at ~390K rows.
-     */
-    private static final int ORDERS_PER_DISTRICT = 3_000;
-
-    // ── Runtime size tracking ──────────────────────────────────────────────────
-    private static final AtomicLong TOTAL_INSERTS = new AtomicLong(0);
-    private static final AtomicLong TOTAL_DELETES = new AtomicLong(0);
-    private static volatile long lastLogMs = 0;
-    private static final long LOG_INTERVAL_MS = 10_000; // log every 10 seconds
+    // Populate seeds exactly 3,000 orders per district (o_id 1..3000).
+    // Guard: only evict when evictOid > 2 * ORDERS_PER_DISTRICT = 6,000,
+    // so we never touch populate-inserted rows (which bypass the secondary index).
+    private static final int ORDERS_PER_DISTRICT     = 3_000;
+    private static final int EVICTION_SAFE_THRESHOLD = 2 * ORDERS_PER_DISTRICT; // 6,000
 
     private final IOrderRepository orderRepository;
     private final INewOrderRepository newOrderRepository;
@@ -94,6 +80,21 @@ public final class OrderService {
         }
     }
 
+    /**
+     * Processes a new order and emits NewOrderOut to the Replica VMS.
+     *
+     * DAG: warehouse -> inventory -> order (internal) -> replica (terminal)
+     *
+     * Eviction:
+     *   Populate inserts 3,000 orders per district (o_id 1..3,000) bypassing
+     *   the VmsForeignKey secondary index. Deleting those rows crashes vMODB.
+     *   Guard: only evict when evictOid > EVICTION_SAFE_THRESHOLD (6,000),
+     *   meaning we only delete rows that were inserted via normal MVCC
+     *   (o_id > 6,000 per district) - never populate-inserted rows.
+     *
+     *   Table lifecycle: grows 300K -> ~390K during first cycle,
+     *   then stabilizes at ~90K (3,000 orders x 10 districts x ol_cnt rows).
+     */
     @Inbound(values = "new-order-inv-out")
     @Outbound("new-order-out")
     @Transactional(type = W)
@@ -136,37 +137,15 @@ public final class OrderService {
             orderLinesToInsert.add(i, orderLine);
         }
         this.orderLineRepository.insertAll(orderLinesToInsert);
-        TOTAL_INSERTS.addAndGet(in.itemsIds.length);
 
-        // ── Eviction ───────────────────────────────────────────────────────────
-        // Populate inserts o_id 1..3000 per district via a low-level path that
-        // bypasses NonUniqueSecondaryIndex. Deleting those rows crashes on null set.
-        // Only evict when evictOid > ORDERS_PER_DISTRICT (transaction-inserted rows).
-        // Growth phase: first ~30K new_orders add ol_cnt rows each (~390K peak).
-        // Stable phase: table stays at ~390K rows thereafter.
+        // Safe eviction: only delete rows inserted via MVCC (never populate rows).
         int evictOid = in.d_next_o_id - ORDERS_PER_DISTRICT;
-        if (evictOid > ORDERS_PER_DISTRICT) {
+        if (evictOid > EVICTION_SAFE_THRESHOLD) {
             for (int ol = 1; ol <= in.itemsIds.length; ol++) {
                 this.orderLineRepository.delete(
                         new OrderLine(evictOid, in.d_id, in.w_id, ol,
                                 0, 0, null, 0, 0f, ""));
             }
-            TOTAL_DELETES.addAndGet(in.itemsIds.length);
-        }
-
-        // ── Periodic table size log ────────────────────────────────────────────
-        long nowMs = System.currentTimeMillis();
-        if (nowMs - lastLogMs >= LOG_INTERVAL_MS) {
-            lastLogMs = nowMs;
-            long inserted = TOTAL_INSERTS.get();
-            long deleted  = TOTAL_DELETES.get();
-            long net      = inserted - deleted;
-            long estimated = 300_000L + net;
-            LOGGER.log(INFO,
-                    "[order_line size] estimated={0} rows " +
-                            "(populate=300000 + net={1}; tx_inserted={2}, tx_deleted={3}). " +
-                            "Growing until evictOid > {4}.",
-                    estimated, net, inserted, deleted, ORDERS_PER_DISTRICT * 2);
         }
 
         return new NewOrderOut(
