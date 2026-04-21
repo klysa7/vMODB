@@ -15,6 +15,13 @@ public final class HATtrickMain {
 
     private static Coordinator sharedCoordinator = null;
 
+    /**
+     * Per-T-client inflight budget for Phase 1.
+     * Mirrors HATtrickRunner's MAX_IN_FLIGHT_PER_CLIENT — effective budget
+     * passed to each worker is this × τ so per-client share is constant.
+     */
+    private static final int MAX_IN_FLIGHT_PER_CLIENT = 5_000;
+
     @SuppressWarnings("unchecked")
     public static void run(Coordinator existingCoordinator) {
         if (existingCoordinator != null) sharedCoordinator = existingCoordinator;
@@ -75,13 +82,18 @@ public final class HATtrickMain {
             if (tau == 0) { System.out.println("\n  Skipping τ=0"); continue; }
             System.out.printf("%n=== Running Pure OLTP with τ=%d T-workers ===%n", tau);
 
+            // Tau-scaled inflight budget — same formula as HATtrickRunner.
+            final int effectiveMaxInFlight = MAX_IN_FLIGHT_PER_CLIENT * tau;
+            System.out.printf("  Backpressure budget: %d (=%d × %d T-clients)%n",
+                    effectiveMaxInFlight, MAX_IN_FLIGHT_PER_CLIENT, tau);
+
             AtomicBoolean running = new AtomicBoolean(true);
             ExecutorService pool = Executors.newFixedThreadPool(tau);
             List<HATtrickTClientWorker> workers = new ArrayList<>();
 
             for (int t = 0; t < tau; t++) {
                 HATtrickTClientWorker w = new HATtrickTClientWorker(
-                        t, sharedCoordinator, running, numWare);
+                        t, sharedCoordinator, running, numWare, effectiveMaxInFlight);
                 workers.add(w);
                 pool.submit(w);
             }
@@ -220,15 +232,15 @@ public final class HATtrickMain {
         String queryChoice = scanner.nextLine().trim();
         String queryPath = queryChoice.isEmpty() ? "/olap/chq6" : "/olap/" + queryChoice;
 
-        System.out.print("T-client counts τ (comma-separated) [default: 0,1,2]: ");
-        int[] tauValues = parseInts(scanner.nextLine().trim(), new int[]{0, 1, 2});
+        System.out.print("T-client counts τ (comma-separated) [default: 0,1]: ");
+        int[] tauValues = parseInts(scanner.nextLine().trim(), new int[]{0, 1});
 
-        System.out.print("A-client counts α (comma-separated) [default: 0,1,2]: ");
-        int[] alphaValues = parseInts(scanner.nextLine().trim(), new int[]{0, 1, 2});
+        System.out.print("A-client counts α (comma-separated) [default: 0,1]: ");
+        int[] alphaValues = parseInts(scanner.nextLine().trim(), new int[]{0, 1});
 
-        System.out.print("Warmup seconds [default: 5]: ");
+        System.out.print("Warmup seconds [default: 10]: ");
         String wi = scanner.nextLine().trim();
-        int warmupSecs = wi.isEmpty() ? 5 : Integer.parseInt(wi);
+        int warmupSecs = wi.isEmpty() ? 10 : Integer.parseInt(wi);
 
         System.out.print("Measurement seconds [default: 30]: ");
         String mi = scanner.nextLine().trim();

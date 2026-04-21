@@ -18,19 +18,26 @@ import java.util.concurrent.atomic.AtomicLong;
  * HATtrick throughput frontier experiment runner.
  *
  * T-clients: HATtrickTClientWorker (new_order + payment, by_name=false).
- *   No pre-generated workload files needed — transactions are generated
- *   on the fly. This avoids the WorkloadUtils NPE that occurred when
- *   txRatioMap was empty, and matches the Phase 1 path exactly.
- *
  * A-clients: HATtrickAClientWorker (HTTP GET to gateway).
  *
  * T-tps: measured via registerBatchCommitConsumer (real committed TIDs).
  * A-qps: measured by sampling HATtrickAClientWorker.getCompletedCount().
+ *
+ * PER-CLIENT INFLIGHT BUDGET
+ *   Each T-client is given its own 5000-tx inflight budget. The global cap
+ *   passed to every worker in a point is MAX_IN_FLIGHT_PER_CLIENT * tau, so
+ *   two clients at τ=2 share a 10000-slot budget, three at τ=3 share 15000,
+ *   and so on. Without this scaling the two τ=2 clients thrash against a
+ *   single 5000-slot counter — one wins every race, the other yields almost
+ *   continuously, and combined CPU burn starves the coordinator.
  */
 public final class HATtrickRunner {
 
     private static final System.Logger LOG =
             System.getLogger(HATtrickRunner.class.getName());
+
+    /** Per-T-client inflight budget. Global backpressure cap = this × tau. */
+    private static final int MAX_IN_FLIGHT_PER_CLIENT = 5_000;
 
     private final Coordinator              coordinator;
     private final String                   gatewayBaseUrl;
@@ -47,8 +54,6 @@ public final class HATtrickRunner {
         }
     }
 
-    // Full constructor — txRatio and numTxInputPerType no longer used for T-clients
-    // but kept for API compatibility with HATtrickMain
     public HATtrickRunner(Coordinator coordinator,
                           String gatewayBaseUrl,
                           int[] tauValues,
@@ -78,18 +83,18 @@ public final class HATtrickRunner {
         System.out.printf ("  Grid: τ∈%s  α∈%s%n",
                 Arrays.toString(tauValues), Arrays.toString(alphaValues));
         System.out.printf ("  Warmup=%ds  Measurement=%ds%n", warmupSecs, measurementSecs);
+        System.out.printf ("  Per-T-client inflight budget: %d%n", MAX_IN_FLIGHT_PER_CLIENT);
         System.out.println("========================================================\n");
 
-        // Register batch commit listener — fires on every real commit
         AtomicLong lastCommittedTid = new AtomicLong(0L);
         coordinator.registerBatchCommitConsumer(
                 (batchId, lastTid) -> lastCommittedTid.set(lastTid));
 
-        // Pipeline warmup — send a few transactions so the coordinator
-        // pipeline is active before the first grid point
         System.out.print("  Warming up pipeline");
         warmupPipeline(lastCommittedTid);
         System.out.println(" ready.\n");
+
+        drainBacklog();
 
         for (int tau : tauValues) {
             for (int alpha : alphaValues) {
@@ -100,7 +105,7 @@ public final class HATtrickRunner {
                 GridPoint point = runSinglePoint(tau, alpha, lastCommittedTid);
                 results.add(point);
                 System.out.println("  Result: " + point);
-                Thread.sleep(3_000); // drain between grid points
+                drainBacklog();
             }
         }
 
@@ -109,36 +114,117 @@ public final class HATtrickRunner {
         return results;
     }
 
+    /** Aggressive inter-point drain: wait for inflight=0, 180s timeout, 5s settle. */
+    private void drainBacklog() throws InterruptedException {
+        final long DRAIN_TARGET_INFLIGHT = 0L;
+        final long MAX_DRAIN_MS          = 180_000L;
+        final long POLL_INTERVAL_MS      = 250L;
+        final long POST_DRAIN_SETTLE_MS  = 5_000L;
+
+        long start    = System.currentTimeMillis();
+        long deadline = start + MAX_DRAIN_MS;
+        long lastLog  = start;
+
+        long initialInflight = coordinator.getNumTIDsSubmitted()
+                - coordinator.getNumTIDsCommitted();
+
+        if (initialInflight <= DRAIN_TARGET_INFLIGHT) {
+            System.out.printf("  Drain: already clear (inflight=%d)", initialInflight);
+        } else {
+            System.out.printf("  Drain: waiting on backlog (inflight=%d)", initialInflight);
+
+            while (System.currentTimeMillis() < deadline) {
+                long submitted = coordinator.getNumTIDsSubmitted();
+                long committed = coordinator.getNumTIDsCommitted();
+                long inflight  = submitted - committed;
+
+                if (inflight <= DRAIN_TARGET_INFLIGHT) {
+                    double took = (System.currentTimeMillis() - start) / 1000.0;
+                    System.out.printf(" cleared in %.1fs (inflight=%d)", took, inflight);
+                    break;
+                }
+
+                long now = System.currentTimeMillis();
+                if (now - lastLog >= 5_000) {
+                    System.out.printf(" [inflight=%d @ %.1fs]", inflight, (now - start) / 1000.0);
+                    lastLog = now;
+                }
+                Thread.sleep(POLL_INTERVAL_MS);
+            }
+
+            long afterLoopInflight = coordinator.getNumTIDsSubmitted()
+                    - coordinator.getNumTIDsCommitted();
+            if (afterLoopInflight > DRAIN_TARGET_INFLIGHT) {
+                System.out.printf(" TIMEOUT after %.0fs (inflight still %d). Proceeding anyway.",
+                        MAX_DRAIN_MS / 1000.0, afterLoopInflight);
+            }
+        }
+
+        System.out.printf(" settling %ds...", POST_DRAIN_SETTLE_MS / 1000);
+        Thread.sleep(POST_DRAIN_SETTLE_MS);
+
+        long finalInflight = coordinator.getNumTIDsSubmitted()
+                - coordinator.getNumTIDsCommitted();
+        if (finalInflight > DRAIN_TARGET_INFLIGHT) {
+            System.out.printf(" WARNING: inflight rose to %d during settle — ", finalInflight);
+            System.out.printf("pipeline may be unstable.%n");
+        } else {
+            System.out.println(" done.");
+        }
+    }
+
     private GridPoint runSinglePoint(int tau, int alpha,
                                      AtomicLong lastCommittedTid)
             throws InterruptedException {
 
         System.out.printf("%n--- Running grid point τ=%d α=%d ---%n", tau, alpha);
 
-        // ── Start T-clients (HATtrickTClientWorker) ───────────────────────
+        long startInflight = coordinator.getNumTIDsSubmitted()
+                - coordinator.getNumTIDsCommitted();
+        if (startInflight > 0) {
+            System.out.printf("  WARNING: Start inflight=%d (drain did not fully clear)%n",
+                    startInflight);
+        }
+
+        // ── Start T-clients with tau-scaled inflight budget ─────────────────
+        // Budget grows linearly with number of T-clients so each client has
+        // the same effective per-client budget it would have had at τ=1.
+        final int effectiveMaxInFlight = MAX_IN_FLIGHT_PER_CLIENT * Math.max(tau, 1);
+
         AtomicBoolean tRunning = new AtomicBoolean(true);
         ExecutorService tPool = null;
         List<HATtrickTClientWorker> tWorkers = new ArrayList<>();
 
         if (tau > 0) {
+            System.out.printf("  Backpressure budget: %d (=%d × %d T-clients)%n",
+                    effectiveMaxInFlight, MAX_IN_FLIGHT_PER_CLIENT, tau);
             tPool = Executors.newFixedThreadPool(tau);
             for (int t = 0; t < tau; t++) {
                 HATtrickTClientWorker w = new HATtrickTClientWorker(
-                        t, coordinator, tRunning, numWare);
+                        t, coordinator, tRunning, numWare, effectiveMaxInFlight);
                 tWorkers.add(w);
                 tPool.submit(w);
             }
         }
 
-        // ── Warmup ────────────────────────────────────────────────────────
+        // ── Warmup ──────────────────────────────────────────────────────────
         System.out.printf("  Warmup %ds...%n", warmupSecs);
         Thread.sleep(warmupSecs * 1_000L);
 
-        // ── Snapshot at start of measurement window ───────────────────────
+        if (tau > 0) {
+            long totalSubmittedSoFar = tWorkers.stream()
+                    .mapToLong(HATtrickTClientWorker::getSubmittedCount).sum();
+            if (totalSubmittedSoFar == 0) {
+                System.out.printf("  WARNING: %d T-client(s) submitted 0 tx during warmup. "
+                                + "Inflight=%d — backpressure likely stuck.%n",
+                        tau, coordinator.getNumTIDsSubmitted() - coordinator.getNumTIDsCommitted());
+            }
+        }
+
+        // ── Measurement window snapshots ────────────────────────────────────
         long tStart      = lastCommittedTid.get();
         long windowStart = System.currentTimeMillis();
 
-        // ── Start A-clients ───────────────────────────────────────────────
         AtomicBoolean aRunning = new AtomicBoolean(true);
         ExecutorService aPool = alpha > 0 ? Executors.newFixedThreadPool(alpha) : null;
         List<HATtrickAClientWorker> aWorkers = new ArrayList<>();
@@ -148,58 +234,65 @@ public final class HATtrickRunner {
             aWorkers.add(w);
             aPool.submit(w);
         }
-
         long aStart = aWorkers.stream()
                 .mapToLong(HATtrickAClientWorker::getCompletedCount).sum();
 
-        // ── Measurement window ────────────────────────────────────────────
         System.out.printf("  Measuring %ds...%n", measurementSecs);
         Thread.sleep(measurementSecs * 1_000L);
 
-        // ── Snapshots at end ──────────────────────────────────────────────
         long tEnd      = lastCommittedTid.get();
         long aEnd      = aWorkers.stream()
                 .mapToLong(HATtrickAClientWorker::getCompletedCount).sum();
         long windowEnd = System.currentTimeMillis();
 
-        // ── Stop A-clients ─────────────────────────────────────────────────
         aRunning.set(false);
         if (aPool != null) {
             aPool.shutdownNow();
             aPool.awaitTermination(3, TimeUnit.SECONDS);
         }
-
-        // ── Stop T-clients ─────────────────────────────────────────────────
         tRunning.set(false);
         if (tPool != null) {
             tPool.shutdownNow();
             tPool.awaitTermination(3, TimeUnit.SECONDS);
         }
 
-        // ── Compute throughputs ───────────────────────────────────────────
         double elapsedSec        = (windowEnd - windowStart) / 1000.0;
         long   committedInWindow = tEnd - tStart;
         double tTps              = committedInWindow / elapsedSec;
         double aQps              = (aEnd - aStart) / elapsedSec;
 
-        System.out.printf("  τ=%d α=%d  T-tps=%.2f  A-qps=%.4f  (window=%.1fs, committed=%d)%n",
-                tau, alpha, tTps, aQps, elapsedSec, committedInWindow);
+        long windowSubmitted = tWorkers.stream()
+                .mapToLong(HATtrickTClientWorker::getSubmittedCount).sum();
+
+        // Per-client submitted counts — helps diagnose fairness issues.
+        if (tau > 1) {
+            StringBuilder perClient = new StringBuilder("  Per-client submitted: ");
+            for (int i = 0; i < tWorkers.size(); i++) {
+                perClient.append("c").append(i).append("=")
+                        .append(tWorkers.get(i).getSubmittedCount());
+                if (i < tWorkers.size() - 1) perClient.append(", ");
+            }
+            System.out.println(perClient);
+        }
+
+        System.out.printf("  τ=%d α=%d  T-tps=%.2f  A-qps=%.4f  "
+                        + "(window=%.1fs, submitted=%d, committed=%d)%n",
+                tau, alpha, tTps, aQps, elapsedSec, windowSubmitted, committedInWindow);
+
+        if (tau > 0 && windowSubmitted == 0) {
+            System.out.printf("  ** INVALID: T-clients submitted 0 tx — point discarded **%n");
+        }
 
         return new GridPoint(tau, alpha, tTps, aQps);
     }
-
-    // ── Pipeline warmup ───────────────────────────────────────────────────────
-    // Sends 100 transactions via T-client worker to prime the coordinator
-    // pipeline before the first grid point measurement.
 
     private void warmupPipeline(AtomicLong lastCommittedTid) throws InterruptedException {
         AtomicBoolean warmupRunning = new AtomicBoolean(true);
         ExecutorService pool = Executors.newSingleThreadExecutor();
         HATtrickTClientWorker warmupWorker = new HATtrickTClientWorker(
-                0, coordinator, warmupRunning, numWare);
+                0, coordinator, warmupRunning, numWare, MAX_IN_FLIGHT_PER_CLIENT);
         pool.submit(warmupWorker);
 
-        // Wait up to 30s for the first real commit
         long deadline = System.currentTimeMillis() + 30_000;
         while (System.currentTimeMillis() < deadline) {
             Thread.sleep(1_000);
@@ -207,14 +300,12 @@ public final class HATtrickRunner {
             if (lastCommittedTid.get() > 0) break;
         }
 
-        // Let it run 2 more seconds to stabilize
         Thread.sleep(2_000);
 
         warmupRunning.set(false);
         pool.shutdownNow();
         pool.awaitTermination(3, TimeUnit.SECONDS);
 
-        // Drain: wait until pipeline quiets
         long prev = lastCommittedTid.get();
         int stableCount = 0;
         while (stableCount < 2) {
@@ -224,8 +315,6 @@ public final class HATtrickRunner {
             else { stableCount = 0; prev = now; }
         }
     }
-
-    // ── CSV + summary ─────────────────────────────────────────────────────────
 
     private void writeCsv(List<GridPoint> results) throws IOException {
         String ts = LocalDateTime.now()

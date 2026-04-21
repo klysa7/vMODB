@@ -142,9 +142,9 @@ public class StreamingScanOperator implements CoordinatorOperator {
 
         if (tcpIterator == null) return null;
 
-        LOGGER.log(INFO, ">>> [StreamingScan] Blocking on tcpIterator.hasNext() for table: " + tbl + "...");
+//        LOGGER.log(INFO, ">>> [StreamingScan] Blocking on tcpIterator.hasNext() for table: " + tbl + "...");
         boolean hasData = tcpIterator.hasNext();
-        LOGGER.log(INFO, ">>> [StreamingScan] tcpIterator.hasNext() returned: " + hasData);
+//        LOGGER.log(INFO, ">>> [StreamingScan] tcpIterator.hasNext() returned: " + hasData);
 
         if (!hasData) {
             if (this.endTime == 0 && startTime != 0) {
@@ -163,12 +163,12 @@ public class StreamingScanOperator implements CoordinatorOperator {
             count++;
             rowCount++;
         }
-        LOGGER.log(INFO, ">>> [StreamingScan] Returning batch of size: " + count);
+//        LOGGER.log(INFO, ">>> [StreamingScan] Returning batch of size: " + count);
         return batch;
     }
 
     @Override
     public void close() {
-        LOGGER.log(INFO, "[StreamingScan] Closing operator for table: " + tableName());
+//        LOGGER.log(INFO, "[StreamingScan] Closing operator for table: " + tableName());
     }
 }

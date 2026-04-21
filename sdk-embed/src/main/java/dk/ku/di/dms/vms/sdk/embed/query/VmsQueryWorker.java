@@ -142,13 +142,13 @@ public final class VmsQueryWorker extends StoppableRunnable {
                     writeBuffer.put(joinedData);
 
                     count++;
-                    if (count % 5000 == 0)
-                        System.out.println(">>> [VMS WORKER] Joined and sent " + count + " rows from " + queryPayload.tableName());
+//                    if (count % 5000 == 0)
+//                        System.out.println(">>> [VMS WORKER] Joined and sent " + count + " rows from " + queryPayload.tableName());
                 }
             }
 
-            System.out.println(">>> [VMS WORKER] " + queryPayload.tableName()
-                    + " scan loop finished. Total rows: " + count);
+//            System.out.println(">>> [VMS WORKER] " + queryPayload.tableName()
+//                    + " scan loop finished. Total rows: " + count);
 
             if (writeError) {
                 // A4: write already failed, nothing left to send

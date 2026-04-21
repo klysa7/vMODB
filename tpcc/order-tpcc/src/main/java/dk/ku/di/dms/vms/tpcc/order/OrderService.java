@@ -22,16 +22,73 @@ import dk.ku.di.dms.vms.tpcc.order.repositories.IOrderRepository;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static dk.ku.di.dms.vms.modb.api.enums.TransactionTypeEnum.R;
 import static dk.ku.di.dms.vms.modb.api.enums.TransactionTypeEnum.W;
 import static java.lang.System.Logger.Level.DEBUG;
 import static java.lang.System.Logger.Level.ERROR;
+import static java.lang.System.Logger.Level.INFO;
 
 @Microservice("order")
 public final class OrderService {
 
     private static final System.Logger LOGGER = System.getLogger(OrderService.class.getName());
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // EVICTION STRATEGY — Table Size Target: ~350K rows per CHQ6 scan
+    //
+    // Per-(w_id, d_id) AtomicInteger counter. Each processNewOrder claims the
+    // next ol_o_id for its district. Eviction is skipped while the counter
+    // sits below ORDERS_PER_DISTRICT, then fires every transaction after that,
+    // deleting the (w_id, d_id, evictOId) rows from orders, new_orders, and
+    // order_line in the same write transaction.
+    //
+    // ORDERS_PER_DISTRICT = 4500  (paired with HATtrick ol_cnt = 3)
+    //   Tuned against prior observation: at guard=6000 with ol_cnt=3, the
+    //   CHQ6 scan stabilised around 390K rows. Each drop of 1000 in the
+    //   guard removes ~1000 × 10 districts × 3 ol = ~30K rows from the
+    //   scan. Dropping 6000 → 4500 removes ~45K, landing at ~345K — right
+    //   on the 350K target.
+    //
+    //   Expected steady-state CHQ6 scan result:
+    //     populate visible to predicates (~210K, inferred from 390K scan
+    //     minus 180K net tx contribution in the guard=6000 run) plus
+    //     4500 × 10 × 3 = 135K tx-created rows = ~345K total.
+    //
+    // DELETE LOOP SIZING
+    //   Loop bound = in.itemsIds.length (the current tx's ol_cnt = 3).
+    //   Since the eviction counter starts at 1 and eviction only fires past
+    //   the guard (counter > 4500), the first order evicted has o_id=4501,
+    //   which is well inside the tx-created range (tx orders start at
+    //   d_next_o_id ≈ 3001). Populate orders (o_id 1-3000) are never
+    //   targeted by eviction — they remain and form the bulk of the CHQ6
+    //   scan result.
+    //
+    // THREAD SAFETY
+    //   AtomicInteger — concurrent @Parallel transactions on the same district
+    //   each evict a distinct ol_o_id. No two transactions target the same PK.
+    // ─────────────────────────────────────────────────────────────────────────
+    private static final int ORDERS_PER_DISTRICT = 4_500;
+
+    private final ConcurrentHashMap<Integer, AtomicInteger> evictCounters =
+            new ConcurrentHashMap<>();
+
+    private int nextEvictOId(int w_id, int d_id) {
+        int key = (w_id << 16) | d_id;
+        return evictCounters
+                .computeIfAbsent(key, k -> new AtomicInteger(1))
+                .getAndIncrement();
+    }
+
+    // ── Runtime size tracking (INFO log every 10s) ───────────────────────────
+    private static final AtomicLong TOTAL_INSERTS          = new AtomicLong(0);
+    private static final AtomicLong TOTAL_DELETES          = new AtomicLong(0);
+    private static final AtomicLong EVICTIONS_PERFORMED    = new AtomicLong(0);
+    private static volatile long lastLogMs = 0;
+    private static final long LOG_INTERVAL_MS = 10_000;
 
     private final IOrderRepository orderRepository;
     private final INewOrderRepository newOrderRepository;
@@ -74,29 +131,14 @@ public final class OrderService {
         }
     }
 
-    /**
-     * Processes a new order and emits NewOrderOut to the Replica VMS.
-     *
-     * The order VMS is now an INTERNAL node in the new_order DAG:
-     *
-     *   warehouse → inventory → order (internal) → replica (terminal)
-     *
-     * By emitting NewOrderOut, the order VMS forwards the computed order
-     * line data to the replica. The replica inserts into its own order_line
-     * table and acts as the terminal node — it votes to commit the batch.
-     *
-     * Freshness = 0: the replica data is committed atomically in the same
-     * batch as the order VMS insert.
-     *
-     * Overhead: the order VMS must now serialize and emit an extra event
-     * per new_order transaction. This is the measurable cost of Experiment II
-     * vs Experiment I.
-     */
     @Inbound(values = "new-order-inv-out")
     @Outbound("new-order-out")
     @Transactional(type = W)
     @Parallel
     public NewOrderOut processNewOrder(NewOrderInvOut in) {
+        final int olCnt = in.itemsIds.length;
+
+        // ── INSERT: new Order + NewOrder + OrderLine rows ────────────────────
         Order order = new Order(
                 in.d_next_o_id,
                 in.d_id,
@@ -104,7 +146,7 @@ public final class OrderService {
                 in.c_id,
                 new Date(),
                 -1,
-                in.itemsIds.length,
+                olCnt,
                 in.allLocal ? 1 : 0
         );
         NewOrder newOrder = new NewOrder(in.d_next_o_id, in.d_id, in.w_id);
@@ -112,10 +154,10 @@ public final class OrderService {
         this.orderRepository.insert(order);
         this.newOrderRepository.insert(newOrder);
 
-        List<OrderLine> orderLinesToInsert = new ArrayList<>(in.itemsIds.length);
-        float[] ol_amounts = new float[in.itemsIds.length];
+        List<OrderLine> orderLinesToInsert = new ArrayList<>(olCnt);
+        float[] ol_amounts = new float[olCnt];
 
-        for (int i = 0; i < in.itemsIds.length; i++) {
+        for (int i = 0; i < olCnt; i++) {
             float ol_amount = (float) (in.qty[i] * in.itemsIds[i]
                     * (1 + in.w_tax + in.d_tax) * (1 - in.c_discount));
             ol_amounts[i] = ol_amount;
@@ -134,8 +176,41 @@ public final class OrderService {
             orderLinesToInsert.add(i, orderLine);
         }
         this.orderLineRepository.insertAll(orderLinesToInsert);
+        TOTAL_INSERTS.addAndGet(olCnt);
 
-        // Emit NewOrderOut to replica VMS
+        // ── EVICT: oldest (w_id, d_id, evictOId) across all three tables ─────
+        int evictOId = nextEvictOId(in.w_id, in.d_id);
+        if (evictOId > ORDERS_PER_DISTRICT) {
+            this.orderRepository.delete(
+                    new Order(evictOId, in.d_id, in.w_id, 0, null, 0, 0, 0));
+
+            this.newOrderRepository.delete(
+                    new NewOrder(evictOId, in.d_id, in.w_id));
+
+            for (int olNum = 1; olNum <= olCnt; olNum++) {
+                this.orderLineRepository.delete(
+                        new OrderLine(evictOId, in.d_id, in.w_id, olNum,
+                                0, 0, null, 0, 0f, null));
+            }
+            TOTAL_DELETES.addAndGet(olCnt);
+            EVICTIONS_PERFORMED.incrementAndGet();
+        }
+
+        // ── Periodic size log (every 10s) ────────────────────────────────────
+        long nowMs = System.currentTimeMillis();
+        if (nowMs - lastLogMs >= LOG_INTERVAL_MS) {
+            lastLogMs = nowMs;
+            long inserted  = TOTAL_INSERTS.get();
+            long deleted   = TOTAL_DELETES.get();
+            long evictions = EVICTIONS_PERFORMED.get();
+            long net       = inserted - deleted;
+            LOGGER.log(INFO,
+                    "[order_line size] tx_inserted={0}, tx_deleted={1}, " +
+                            "evictions_performed={2}, net={3}. " +
+                            "Target: ~350K rows per CHQ6 scan with ORDERS_PER_DISTRICT={4}.",
+                    inserted, deleted, evictions, net, ORDERS_PER_DISTRICT);
+        }
+
         return new NewOrderOut(
                 in.w_id,
                 in.d_id,
