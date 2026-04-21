@@ -54,6 +54,25 @@ public final class HATtrickMain {
         }
     }
 
+    // ── Query path resolution ─────────────────────────────────────────────────
+    //
+    // Menu accepts three forms for the "Query to run" prompt:
+    //   (a) empty             → default /olap/chq6
+    //   (b) short name        → "chq6"           → /olap/chq6
+    //                           "replica/chq1"   → /olap/replica/chq1
+    //   (c) full path         → "/direct/chq6"   → /direct/chq6   (used verbatim)
+    //                           "/olap/chq6"     → /olap/chq6
+    //
+    // Form (c) lets the user reach any handler namespace — specifically the
+    // QPO-2 hot path at /direct/chq6 — without the menu forcing the /olap/
+    // prefix. Anything starting with '/' is treated as an absolute path.
+    private static String resolveQueryPath(String userInput) {
+        String trimmed = userInput.trim();
+        if (trimmed.isEmpty()) return "/olap/chq6";
+        if (trimmed.startsWith("/")) return trimmed;
+        return "/olap/" + trimmed;
+    }
+
     // ── Phase 1: Pure OLTP ────────────────────────────────────────────────────
 
     private static void runPhase1(Properties props, Scanner scanner, int numWare) {
@@ -143,19 +162,21 @@ public final class HATtrickMain {
         boolean useReplica = Boolean.parseBoolean(props.getProperty("use_replica", "false"));
 
         System.out.println("  Available queries (live order VMS, use_replica=false):");
-        System.out.println("    chq6  — SUM(ol_amount) full scan");
-        System.out.println("    chq1  — GROUP BY ol_number aggregate");
-        System.out.println("    chq4  — JOIN semi-join (orders + order_line)");
-        System.out.println("    chq3  — cross-VMS broadcast join");
-        System.out.println("    q1    — original cross-VMS join");
+        System.out.println("    chq6           — SUM(ol_amount) full scan (general Calcite path)");
+        System.out.println("    chq1           — GROUP BY ol_number aggregate");
+        System.out.println("    chq4           — JOIN semi-join (orders + order_line)");
+        System.out.println("    chq3           — cross-VMS broadcast join");
+        System.out.println("    q1             — original cross-VMS join");
+        System.out.println("  QPO-2 hot path (hardcoded, bypasses Calcite — must start with '/'):");
+        System.out.println("    /direct/chq6   — SUM(ol_amount) via raw socket to order VMS");
         if (useReplica) {
             System.out.println("  Available queries (replica VMS, use_replica=true):");
             System.out.println("    replica/chq6  — SUM(ol_amount) from replica AtomicLong");
             System.out.println("    replica/chq1  — GROUP BY ol_number from replica buckets");
         }
         System.out.print("  Query to run [default: chq6]: ");
-        String queryChoice = scanner.nextLine().trim();
-        String queryPath = queryChoice.isEmpty() ? "/olap/chq6" : "/olap/" + queryChoice;
+        String queryPath = resolveQueryPath(scanner.nextLine());
+        System.out.println("  Resolved query path: " + queryPath);
 
         System.out.print("A-client counts α (comma-separated) [default: 1,2]: ");
         int[] alphaValues = parseInts(scanner.nextLine().trim(), new int[]{1, 2});
@@ -223,14 +244,16 @@ public final class HATtrickMain {
 
         System.out.println("  use_replica=" + useReplica);
         System.out.println("  Available queries (live order VMS):");
-        System.out.println("    chq6, chq1, chq4, chq3, q1");
+        System.out.println("    chq6, chq1, chq4, chq3, q1  (general Calcite path)");
+        System.out.println("  QPO-2 hot path (must start with '/'):");
+        System.out.println("    /direct/chq6                (hardcoded, bypasses Calcite)");
         if (useReplica) {
             System.out.println("  Available queries (replica VMS):");
             System.out.println("    replica/chq6, replica/chq1");
         }
         System.out.print("  Query to run [default: chq6]: ");
-        String queryChoice = scanner.nextLine().trim();
-        String queryPath = queryChoice.isEmpty() ? "/olap/chq6" : "/olap/" + queryChoice;
+        String queryPath = resolveQueryPath(scanner.nextLine());
+        System.out.println("  Resolved query path: " + queryPath);
 
         System.out.print("T-client counts τ (comma-separated) [default: 0,1]: ");
         int[] tauValues = parseInts(scanner.nextLine().trim(), new int[]{0, 1});

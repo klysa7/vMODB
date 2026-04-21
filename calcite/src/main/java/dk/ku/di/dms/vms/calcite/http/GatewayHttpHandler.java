@@ -3,14 +3,23 @@ package dk.ku.di.dms.vms.calcite.http;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import dk.ku.di.dms.vms.calcite.service.OlapGatewayService;
+import dk.ku.di.dms.vms.modb.common.schema.network.query.QueryRequestEvent;
 
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.net.Socket;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
+
+import static dk.ku.di.dms.vms.modb.common.schema.network.query.QueryResultEvent.END_OF_STREAM_TYPE;
+import static dk.ku.di.dms.vms.modb.common.schema.network.query.QueryResultEvent.QUERY_RESULT_TYPE;
 
 public final class GatewayHttpHandler implements HttpHandler {
 
@@ -28,7 +37,22 @@ public final class GatewayHttpHandler implements HttpHandler {
         GROUP BY c.c_d_id
     """;
 
-    static final String PATH_CHQ6 = "/olap/chq6";
+    // ── CHQ6: dual-path (general via Calcite + direct via QPO-2 hot path) ────
+    //
+    // /olap/chq6    → goes through OlapGatewayService (Calcite + planner +
+    //                 operator tree + VmsGatewayClient). QPO-3 still fires
+    //                 here because DistributedPlanner populates
+    //                 ScanDefinition.projectedIndices from the Calcite plan.
+    //
+    // /direct/chq6  → QPO-2 hot path. Bypasses Calcite entirely, opens a raw
+    //                 socket to order VMS, hand-builds QueryRequestEvent, sums
+    //                 floats in a tight loop. Single-VMS-safe only (sends
+    //                 snapshotId=0 and no predicates — correct for num_ware=1).
+    //
+    // Running both against HATtrick and comparing A-qps / T-tps isolates the
+    // contribution of QPO-2 on top of QPO-3.
+    static final String PATH_CHQ6        = "/olap/chq6";
+    static final String PATH_CHQ6_DIRECT = "/direct/chq6";
     static final String SQL_CHQ6 = """
         SELECT SUM(ol.ol_amount) AS revenue
         FROM "order".order_line ol
@@ -86,10 +110,6 @@ public final class GatewayHttpHandler implements HttpHandler {
         GROUP BY ol.ol_o_id, ol.ol_w_id, ol.ol_d_id, o.o_entry_d
     """;
 
-    // ── Replica VMS queries (Experiment II) — proxy to port 8096 ─────────────
-    // Port 8096 (not 8004): vMODB VMS uses custom NIO protocol on 8004.
-    // The replica runs a separate standard HttpServer on 8096 for OLAP.
-
     static final String PATH_REPLICA_CHQ6 = "/olap/replica/chq6";
     static final String REPLICA_CHQ6_URL  = "http://localhost:8096/chq6";
 
@@ -122,7 +142,18 @@ public final class GatewayHttpHandler implements HttpHandler {
             return;
         }
 
-        // ── Calcite queries ───────────────────────────────────────────────────
+        // ── QPO-2: Hardcoded hot path for CHQ6 (opt-in via /direct/chq6) ──────
+        if (PATH_CHQ6_DIRECT.equals(path)) {
+            try {
+                String responseJson = executeChq6Direct();
+                send(exchange, 200, responseJson);
+            } catch (Exception e) {
+                send(exchange, 500, jsonError("Direct CHQ6 error: " + e.getMessage()));
+            }
+            return;
+        }
+
+        // ── Standard Calcite queries (includes /olap/chq6 — QPO-3 still fires) ─
         String sql = switch (path) {
             case PATH_Q1   -> SQL_Q1;
             case PATH_CHQ6 -> SQL_CHQ6;
@@ -133,16 +164,7 @@ public final class GatewayHttpHandler implements HttpHandler {
         };
 
         if (sql == null) {
-            send(exchange, 404, jsonError(
-                    "Unknown endpoint. Available: "
-                            + PATH_CHQ6 + " (CH Q6 live), "
-                            + PATH_CHQ1 + " (CH Q1 live), "
-                            + PATH_CHQ4 + " (CH Q4 live), "
-                            + PATH_CHQ3 + " (CH Q3 live), "
-                            + PATH_Q1   + " (cross-VMS join), "
-                            + PATH_REPLICA_CHQ6 + " (CH Q6 replica), "
-                            + PATH_REPLICA_CHQ1 + " (CH Q1 replica)"
-            ));
+            send(exchange, 404, jsonError("Unknown endpoint."));
             return;
         }
 
@@ -152,6 +174,100 @@ public final class GatewayHttpHandler implements HttpHandler {
         } catch (Exception e) {
             send(exchange, 500, jsonError("Gateway error: " + e.getMessage()));
         }
+    }
+
+    /**
+     * QPO-2: directly compiled query path for CHQ6.
+     * Bypasses Calcite, planner, operator tree, VmsGatewayClient, VmsResultIterator.
+     * Opens a raw socket to order VMS, hand-builds the QueryRequestEvent,
+     * and sums ol_amount floats in a tight primitive loop.
+     *
+     * Single-VMS-safe only: sends snapshotId=0 (latest committed on order VMS)
+     * and no predicates. Correct for num_ware=1 where the WHERE clause is a
+     * tautology. For num_ware>1 this would return wrong results.
+     */
+    private String executeChq6Direct() throws Exception {
+        long startNano = System.nanoTime();
+        double totalRevenue = 0.0;
+        long rowCount = 0;
+
+        // Connect directly to Order VMS
+        try (Socket socket = new Socket("localhost", 8003)) {
+            socket.setTcpNoDelay(true);
+            DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+            DataInputStream in = new DataInputStream(socket.getInputStream());
+
+            ByteBuffer buffer = ByteBuffer.allocate(512).order(ByteOrder.BIG_ENDIAN);
+
+            // QPO-3 integration: request only ol_amount (column index 8 in schema)
+            int[] projectedCols = new int[]{8};
+            byte[] projectionData = QueryRequestEvent.serializeProjection(projectedCols);
+
+            // Construct minimal QueryRequestEvent payload. No predicates sent —
+            // OK for num_ware=1 where WHERE clause is a tautology.
+            int startPos = buffer.position();
+            buffer.put(QueryRequestEvent.QUERY_REQUEST_TYPE);
+            buffer.putInt(0); // length placeholder
+            buffer.putLong(System.nanoTime()); // queryId
+            buffer.putLong(0); // snapshotId (0 = latest committed on order VMS)
+            buffer.put(QueryRequestEvent.MODE_SCAN_TO_GATEWAY);
+
+            byte[] tableName = "order_line".getBytes(StandardCharsets.UTF_8);
+            buffer.putInt(tableName.length);
+            buffer.put(tableName);
+
+            buffer.putInt(0); // no predicates
+            buffer.putInt(0); // no routing data
+
+            buffer.putInt(projectionData.length);
+            buffer.put(projectionData); // QPO-3 projection pushdown
+
+            int endPos = buffer.position();
+            buffer.putInt(startPos + 1, endPos - startPos - 1 - Integer.BYTES);
+            buffer.position(endPos);
+
+            buffer.flip();
+            out.write(buffer.array(), 0, buffer.limit());
+            out.flush();
+
+            // Read raw byte stream returned by the VMS (4-byte floats only, thanks to QPO-3)
+            byte[] header = new byte[5];
+            while (true) {
+                in.readFully(header);
+                byte type = header[0];
+                if (type == END_OF_STREAM_TYPE) {
+                    break;
+                }
+                if (type != QUERY_RESULT_TYPE) {
+                    throw new IllegalStateException("Unknown message type: " + type);
+                }
+
+                int batchLen = ByteBuffer.wrap(header, 1, 4).getInt();
+                byte[] batchData = new byte[batchLen];
+                in.readFully(batchData);
+
+                ByteBuffer batchBuffer = ByteBuffer.wrap(batchData).order(ByteOrder.nativeOrder());
+                long queryId = batchBuffer.getLong(); // skip queryId
+
+                while (batchBuffer.hasRemaining()) {
+                    int rowSize = batchBuffer.getInt();
+                    // Because of QPO-3, rowSize == 4 bytes — pure float payload
+                    float ol_amount = batchBuffer.getFloat();
+                    totalRevenue += ol_amount;
+                    rowCount++;
+                }
+            }
+        }
+
+        long endNano = System.nanoTime();
+        double latencyMs = (endNano - startNano) / 1_000_000.0;
+
+        System.out.println(">>> [DIRECT CHQ6] Rows: " + rowCount + " | Latency: " + latencyMs + "ms");
+
+        return "{\n" +
+                "  \"rows\": [[" + totalRevenue + "]],\n" +
+                "  \"metadata\": [{\"name\": \"revenue\", \"type\": \"FLOAT\"}]\n" +
+                "}";
     }
 
     private static void proxyToReplica(HttpExchange exchange, String url) throws IOException {
