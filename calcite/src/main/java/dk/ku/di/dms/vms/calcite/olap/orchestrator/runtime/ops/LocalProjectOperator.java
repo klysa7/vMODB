@@ -31,12 +31,12 @@ public class LocalProjectOperator implements CoordinatorOperator {
 
     @Override
     public List<Object[]> nextBatch() {
-        LOGGER.log(INFO, ">>> [LocalProject] nextBatch() called! Asking input for data...");
+//        LOGGER.log(INFO, ">>> [LocalProject] nextBatch() called! Asking input for data...");
 
         List<Object[]> inputBatch = input.nextBatch();
 
         if (inputBatch == null) {
-            LOGGER.log(INFO, ">>> [LocalProject] Input returned NULL! Pipeline is stopping.");
+//            LOGGER.log(INFO, ">>> [LocalProject] Input returned NULL! Pipeline is stopping.");
             return null;
         }
 
@@ -55,7 +55,7 @@ public class LocalProjectOperator implements CoordinatorOperator {
             outputBatch.add(outRow);
         }
 
-        LOGGER.log(INFO, ">>> [LocalProject] Returning projected batch of size: " + outputBatch.size());
+//        LOGGER.log(INFO, ">>> [LocalProject] Returning projected batch of size: " + outputBatch.size());
         return outputBatch;
     }
 

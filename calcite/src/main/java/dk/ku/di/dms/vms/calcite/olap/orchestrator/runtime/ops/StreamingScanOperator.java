@@ -141,7 +141,7 @@ public class StreamingScanOperator implements CoordinatorOperator {
     @Override
     public List<Object[]> nextBatch() {
         String tbl = tableName();
-        LOGGER.log(INFO, ">>> [StreamingScan] nextBatch() called for table: " + tbl);
+//        LOGGER.log(INFO, ">>> [StreamingScan] nextBatch() called for table: " + tbl);
 
         if (this.firstByteTime == 0) {
             this.firstByteTime = System.nanoTime();
@@ -151,10 +151,10 @@ public class StreamingScanOperator implements CoordinatorOperator {
 
         if (tcpIterator == null) return null;
 
-        LOGGER.log(INFO, ">>> [StreamingScan] Blocking on tcpIterator.hasNext() for table: "
-                + tbl + "...");
+//        LOGGER.log(INFO, ">>> [StreamingScan] Blocking on tcpIterator.hasNext() for table: "
+//                + tbl + "...");
         boolean hasData = tcpIterator.hasNext();
-        LOGGER.log(INFO, ">>> [StreamingScan] tcpIterator.hasNext() returned: " + hasData);
+//        LOGGER.log(INFO, ">>> [StreamingScan] tcpIterator.hasNext() returned: " + hasData);
 
         if (!hasData) {
             if (this.endTime == 0 && startTime != 0) {
@@ -162,7 +162,7 @@ public class StreamingScanOperator implements CoordinatorOperator {
                 System.out.println("[Metrics] Total Duration: "
                         + (endTime - startTime) / 1_000_000.0 + " ms | Rows: " + rowCount);
             }
-            LOGGER.log(INFO, ">>> [StreamingScan] No more data. Returning null.");
+//            LOGGER.log(INFO, ">>> [StreamingScan] No more data. Returning null.");
             return null;
         }
 
@@ -173,7 +173,7 @@ public class StreamingScanOperator implements CoordinatorOperator {
             count++;
             rowCount++;
         }
-        LOGGER.log(INFO, ">>> [StreamingScan] Returning batch of size: " + count);
+//        LOGGER.log(INFO, ">>> [StreamingScan] Returning batch of size: " + count);
         return batch;
     }
 

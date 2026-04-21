@@ -53,6 +53,8 @@ public final class GatewayHttpHandler implements HttpHandler {
     // contribution of QPO-2 on top of QPO-3.
     static final String PATH_CHQ6        = "/olap/chq6";
     static final String PATH_CHQ6_DIRECT = "/direct/chq6";
+    static final String PATH_CHQ6_FAST = "/olap/chq6-fast"; // <-- NEW: Optimized Route
+
     static final String SQL_CHQ6 = """
         SELECT SUM(ol.ol_amount) AS revenue
         FROM "order".order_line ol
