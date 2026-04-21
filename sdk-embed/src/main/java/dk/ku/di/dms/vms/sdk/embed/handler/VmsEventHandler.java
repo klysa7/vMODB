@@ -9,6 +9,7 @@ import dk.ku.di.dms.vms.modb.common.schema.network.node.IdentifiableNode;
 import dk.ku.di.dms.vms.modb.common.schema.network.node.ServerNode;
 import dk.ku.di.dms.vms.modb.common.schema.network.node.VmsNode;
 import dk.ku.di.dms.vms.modb.common.schema.network.query.JoinRoutingData;
+import dk.ku.di.dms.vms.modb.common.schema.network.query.LocalJoinSpec;
 import dk.ku.di.dms.vms.modb.common.schema.network.query.QueryRequestEvent;
 import dk.ku.di.dms.vms.modb.common.schema.network.transaction.TransactionAbort;
 import dk.ku.di.dms.vms.modb.common.schema.network.transaction.TransactionEvent;
@@ -705,6 +706,42 @@ public final class VmsEventHandler extends ModbHttpServer {
                         activeJoins.put(payload.queryId(),
                                 new JoinContext(payload, (AsynchronousSocketChannel) connectionMetadata.channel, jrd));
                         LOGGER.log(INFO, ">>> [ORDER VMS] JOIN MODE active. Awaiting broadcast...");
+                    } else if (payload.mode() == QueryRequestEvent.MODE_LOCAL_JOIN) {
+                        // QPO-5: Intra-VMS local join — both tables co-located in this VMS.
+                        // Decode the join spec from routingData, run fully in local memory.
+                        LocalJoinSpec spec = LocalJoinSpec.fromBytes(payload.routingData());
+
+                        List<TransactionManager.SimplePredicate> buildPredicates = null;
+                        if (spec.buildPredicatesJson != null && !spec.buildPredicatesJson.isEmpty()) {
+                            PredicateDTO[] dtos = (PredicateDTO[]) serdesProxy.deserialize(
+                                    spec.buildPredicatesJson, PredicateDTO[].class);
+                            if (dtos != null) {
+                                buildPredicates = new ArrayList<>();
+                                for (PredicateDTO dto : dtos) {
+                                    ExpressionTypeEnum expr = ExpressionTypeEnum.valueOf(dto.expression());
+                                    buildPredicates.add(new TransactionManager.SimplePredicate(
+                                            dto.columnReference().columnPosition(), expr, dto.value()));
+                                }
+                            }
+                        }
+                        final List<TransactionManager.SimplePredicate> finalBuildPredicates = buildPredicates;
+
+                        Iterator<byte[]> joinIter = tm.getLocalJoinIterator(
+                                spec.buildTableName,
+                                payload.tableName(),
+                                spec.buildJoinCols,
+                                spec.probeJoinCols,
+                                finalBuildPredicates,
+                                spec.groupByCol,
+                                payload.snapshotId());
+
+                        VmsQueryWorker worker = new VmsQueryWorker(
+                                (AsynchronousSocketChannel) connectionMetadata.channel,
+                                joinIter, payload,
+                                options.networkBufferSize(), options.networkSendTimeout());
+                        Thread.ofPlatform()
+                                .name("query-worker-local-join-" + payload.queryId())
+                                .start(worker);
                     }
 
                 } catch (Exception e) {

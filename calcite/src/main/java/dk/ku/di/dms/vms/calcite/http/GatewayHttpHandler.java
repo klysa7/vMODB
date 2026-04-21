@@ -56,8 +56,6 @@ public final class GatewayHttpHandler implements HttpHandler {
     // contribution of QPO-2 on top of QPO-3.
     static final String PATH_CHQ6        = "/olap/chq6";
     static final String PATH_CHQ6_DIRECT = "/direct/chq6";
-    static final String PATH_CHQ6_FAST = "/olap/chq6-fast"; // <-- NEW: Optimized Route
-    static final String PATH_CHQ4_FAST = "/olap/chq4-fast"; // <-- NEW: Optimized Route
 
     static final String SQL_CHQ6 = """
         SELECT SUM(ol.ol_amount) AS revenue
@@ -79,7 +77,31 @@ public final class GatewayHttpHandler implements HttpHandler {
         GROUP BY ol.ol_number
     """;
 
-    static final String PATH_CHQ4 = "/olap/chq4";
+    // ── CHQ4: dual-path (general via Calcite + direct via QPO-5 hot path) ────
+    //
+    // /olap/chq4    → general Calcite path. Executes as a two-phase broadcast
+    //                 join: gateway issues MODE_RECEIVE_AND_JOIN to the order
+    //                 VMS, then MODE_BROADCAST_TO_VMS to the warehouse VMS
+    //                 (even though orders and order_line both live in the
+    //                 order VMS). Gateway-side LocalJoinOperator materialises
+    //                 the result before probing.
+    //
+    // /direct/chq4  → QPO-5 hot path. Bypasses the broadcast protocol and the
+    //                 gateway LocalJoinOperator entirely. Sends a single
+    //                 MODE_LOCAL_JOIN request to the order VMS; the VMS runs
+    //                 the hash build + probe + GROUP BY in local memory and
+    //                 streams back only aggregated rows (~10 groups).
+    //                 Single-VMS-safe only: both tables must live on the
+    //                 target VMS. Predicate on o_entry_d is expressed as
+    //                 epoch-millis longs to avoid Date-vs-Number comparison
+    //                 pitfalls on the VMS side.
+    //
+    // Running both against HATtrick and comparing A-qps / T-tps / latency
+    // distributions isolates QPO-5's contribution: join pushdown + aggregation
+    // pushdown + elimination of the 100ms broadcast delay (B44).
+    static final String PATH_CHQ4        = "/olap/chq4";
+    static final String PATH_CHQ4_DIRECT = "/direct/chq4";
+
     static final String SQL_CHQ4 = """
         SELECT o.o_ol_cnt, COUNT(*) AS order_count
         FROM "order".orders o
@@ -148,12 +170,13 @@ public final class GatewayHttpHandler implements HttpHandler {
             return;
         }
 
-        if (PATH_CHQ4_FAST.equals(path)) {
+        // ── QPO-5: Hardcoded hot path for CHQ4 (opt-in via /direct/chq4) ──────
+        if (PATH_CHQ4_DIRECT.equals(path)) {
             try {
                 String responseJson = executeChq4Direct();
                 send(exchange, 200, responseJson);
             } catch (Exception e) {
-                send(exchange, 500, jsonError("CHQ4 local join error: " + e.getMessage()));
+                send(exchange, 500, jsonError("Direct CHQ4 error: " + e.getMessage()));
             }
             return;
         }
@@ -169,7 +192,7 @@ public final class GatewayHttpHandler implements HttpHandler {
             return;
         }
 
-        // ── Standard Calcite queries (includes /olap/chq6 — QPO-3 still fires) ─
+        // ── Standard Calcite queries (includes /olap/chq6 and /olap/chq4) ─────
         String sql = switch (path) {
             case PATH_Q1   -> SQL_Q1;
             case PATH_CHQ6 -> SQL_CHQ6;
@@ -191,6 +214,7 @@ public final class GatewayHttpHandler implements HttpHandler {
             send(exchange, 500, jsonError("Gateway error: " + e.getMessage()));
         }
     }
+
     /**
      * QPO-5: CHQ4 direct — intra-VMS local hash join.
      *
@@ -237,16 +261,15 @@ public final class GatewayHttpHandler implements HttpHandler {
         // ── Send MODE_LOCAL_JOIN to order VMS ─────────────────────────────────
         Map<Integer, Long> groups = new LinkedHashMap<>();
 
-        try (java.net.Socket socket = new java.net.Socket("localhost", 8003)) {
+        try (Socket socket = new Socket("localhost", 8003)) {
             socket.setTcpNoDelay(true);
-            java.io.DataOutputStream out = new java.io.DataOutputStream(socket.getOutputStream());
-            java.io.DataInputStream  in  = new java.io.DataInputStream(socket.getInputStream());
+            DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+            DataInputStream  in  = new DataInputStream(socket.getInputStream());
 
-            byte[] tableBytes   = "order_line".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            byte[] tableBytes   = "order_line".getBytes(StandardCharsets.UTF_8);
             byte[] routingBytes = spec.toBytes();
 
-            java.nio.ByteBuffer buf = java.nio.ByteBuffer.allocate(512)
-                    .order(java.nio.ByteOrder.BIG_ENDIAN);
+            ByteBuffer buf = ByteBuffer.allocate(512).order(ByteOrder.BIG_ENDIAN);
 
             int startPos = buf.position();
             buf.put(QueryRequestEvent.QUERY_REQUEST_TYPE);
@@ -281,12 +304,11 @@ public final class GatewayHttpHandler implements HttpHandler {
                 if (type != QUERY_RESULT_TYPE)
                     throw new IllegalStateException("Unexpected type: " + type);
 
-                int batchLen = java.nio.ByteBuffer.wrap(header, 1, 4).getInt();
+                int batchLen = ByteBuffer.wrap(header, 1, 4).getInt();
                 byte[] batchData = new byte[batchLen];
                 in.readFully(batchData);
 
-                java.nio.ByteBuffer batchBuf = java.nio.ByteBuffer.wrap(batchData)
-                        .order(java.nio.ByteOrder.nativeOrder());
+                ByteBuffer batchBuf = ByteBuffer.wrap(batchData).order(ByteOrder.nativeOrder());
                 batchBuf.getLong(); // skip queryId
 
                 while (batchBuf.remaining() >= 16) { // 4 (rowSize) + 12 (row)
@@ -299,7 +321,7 @@ public final class GatewayHttpHandler implements HttpHandler {
         }
 
         double latencyMs = (System.nanoTime() - startNano) / 1_000_000.0;
-        System.out.printf(">>> [CHQ4 LOCAL JOIN] Groups: %d | Latency: %.2f ms%n",
+        System.out.printf(">>> [DIRECT CHQ4] Groups: %d | Latency: %.2f ms%n",
                 groups.size(), latencyMs);
 
         // ── Build JSON response ───────────────────────────────────────────────
@@ -317,7 +339,6 @@ public final class GatewayHttpHandler implements HttpHandler {
         sb.append("]}");
         return sb.toString();
     }
-
 
     /**
      * QPO-2: directly compiled query path for CHQ6.

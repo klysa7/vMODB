@@ -61,16 +61,39 @@ public final class HATtrickMain {
     //   (b) short name        → "chq6"           → /olap/chq6
     //                           "replica/chq1"   → /olap/replica/chq1
     //   (c) full path         → "/direct/chq6"   → /direct/chq6   (used verbatim)
+    //                           "/direct/chq4"   → /direct/chq4   (used verbatim)
     //                           "/olap/chq6"     → /olap/chq6
     //
     // Form (c) lets the user reach any handler namespace — specifically the
-    // QPO-2 hot path at /direct/chq6 — without the menu forcing the /olap/
-    // prefix. Anything starting with '/' is treated as an absolute path.
+    // QPO-2 / QPO-5 hot paths at /direct/* — without the menu forcing the
+    // /olap/ prefix. Anything starting with '/' is treated as an absolute path.
     private static String resolveQueryPath(String userInput) {
         String trimmed = userInput.trim();
         if (trimmed.isEmpty()) return "/olap/chq6";
         if (trimmed.startsWith("/")) return trimmed;
         return "/olap/" + trimmed;
+    }
+
+    /**
+     * Prints the query menu shared by Phase 2 and Phase 3.
+     * Keeping this in one place makes it easy to add new direct paths
+     * (QPO-5, QPO-6, etc.) without drifting between phases.
+     */
+    private static void printQueryMenu(boolean useReplica) {
+        System.out.println("  Available queries (live order VMS, use_replica=false):");
+        System.out.println("    chq6           — SUM(ol_amount) full scan (general Calcite path)");
+        System.out.println("    chq1           — GROUP BY ol_number aggregate");
+        System.out.println("    chq4           — JOIN semi-join (orders + order_line, general Calcite path)");
+        System.out.println("    chq3           — cross-VMS broadcast join");
+        System.out.println("    q1             — original cross-VMS join");
+        System.out.println("  Direct hot paths (hardcoded, bypass Calcite — must start with '/'):");
+        System.out.println("    /direct/chq6   — QPO-2: SUM(ol_amount) via raw socket to order VMS");
+        System.out.println("    /direct/chq4   — QPO-5: intra-VMS local hash join, aggregation pushed to VMS");
+        if (useReplica) {
+            System.out.println("  Available queries (replica VMS, use_replica=true):");
+            System.out.println("    replica/chq6   — SUM(ol_amount) from replica AtomicLong");
+            System.out.println("    replica/chq1   — GROUP BY ol_number from replica buckets");
+        }
     }
 
     // ── Phase 1: Pure OLTP ────────────────────────────────────────────────────
@@ -161,19 +184,7 @@ public final class HATtrickMain {
 
         boolean useReplica = Boolean.parseBoolean(props.getProperty("use_replica", "false"));
 
-        System.out.println("  Available queries (live order VMS, use_replica=false):");
-        System.out.println("    chq6           — SUM(ol_amount) full scan (general Calcite path)");
-        System.out.println("    chq1           — GROUP BY ol_number aggregate");
-        System.out.println("    chq4           — JOIN semi-join (orders + order_line)");
-        System.out.println("    chq3           — cross-VMS broadcast join");
-        System.out.println("    q1             — original cross-VMS join");
-        System.out.println("  QPO-2 hot path (hardcoded, bypasses Calcite — must start with '/'):");
-        System.out.println("    /direct/chq6   — SUM(ol_amount) via raw socket to order VMS");
-        if (useReplica) {
-            System.out.println("  Available queries (replica VMS, use_replica=true):");
-            System.out.println("    replica/chq6  — SUM(ol_amount) from replica AtomicLong");
-            System.out.println("    replica/chq1  — GROUP BY ol_number from replica buckets");
-        }
+        printQueryMenu(useReplica);
         System.out.print("  Query to run [default: chq6]: ");
         String queryPath = resolveQueryPath(scanner.nextLine());
         System.out.println("  Resolved query path: " + queryPath);
@@ -243,14 +254,7 @@ public final class HATtrickMain {
         boolean useReplica = Boolean.parseBoolean(props.getProperty("use_replica", "false"));
 
         System.out.println("  use_replica=" + useReplica);
-        System.out.println("  Available queries (live order VMS):");
-        System.out.println("    chq6, chq1, chq4, chq3, q1  (general Calcite path)");
-        System.out.println("  QPO-2 hot path (must start with '/'):");
-        System.out.println("    /direct/chq6                (hardcoded, bypasses Calcite)");
-        if (useReplica) {
-            System.out.println("  Available queries (replica VMS):");
-            System.out.println("    replica/chq6, replica/chq1");
-        }
+        printQueryMenu(useReplica);
         System.out.print("  Query to run [default: chq6]: ");
         String queryPath = resolveQueryPath(scanner.nextLine());
         System.out.println("  Resolved query path: " + queryPath);
