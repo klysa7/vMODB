@@ -24,22 +24,20 @@ import dk.ku.di.dms.vms.modb.query.execution.operators.minmax.IndexAggregateScan
 import dk.ku.di.dms.vms.modb.query.execution.operators.scan.FullScan;
 import dk.ku.di.dms.vms.modb.query.execution.operators.scan.IndexScan;
 import dk.ku.di.dms.vms.modb.query.planner.SimplePlanner;
-import dk.ku.di.dms.vms.modb.storage.iterator.IRecordIterator;
 import dk.ku.di.dms.vms.modb.transaction.multiversion.index.IMultiVersionIndex;
 import dk.ku.di.dms.vms.modb.transaction.multiversion.index.NonUniqueSecondaryIndex;
 import dk.ku.di.dms.vms.modb.transaction.multiversion.index.PrimaryIndex;
 import dk.ku.di.dms.vms.modb.transaction.multiversion.index.UniqueSecondaryIndex;
 
-import java.util.*;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
+import java.util.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-import static dk.ku.di.dms.vms.modb.common.memory.MemoryUtils.UNSAFE;
 import static dk.ku.di.dms.vms.modb.definition.Schema.RECORD_HEADER;
 import static java.lang.System.Logger.Level.DEBUG;
 import static java.lang.System.Logger.Level.INFO;

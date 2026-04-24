@@ -390,7 +390,6 @@ public final class GatewayHttpHandler implements HttpHandler {
                 batch.getLong(); // skip queryId
 
                 while (batch.remaining() >= 16) { // 4 (rowSize) + 12 (row)
-                    int rowSize   = batch.getInt(); // should be 12
                     int olNumber  = batch.getInt();
                     int olQty     = batch.getInt();
                     float olAmt   = batch.getFloat();
@@ -599,7 +598,6 @@ public final class GatewayHttpHandler implements HttpHandler {
                 batchBuffer.getLong();
 
                 while (batchBuffer.hasRemaining()) {
-                    int rowSize = batchBuffer.getInt();
                     float ol_amount = batchBuffer.getFloat();
                     totalRevenue += ol_amount;
                     rowCount++;

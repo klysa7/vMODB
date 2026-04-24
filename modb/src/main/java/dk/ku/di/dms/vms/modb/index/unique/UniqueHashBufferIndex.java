@@ -15,7 +15,6 @@ import dk.ku.di.dms.vms.modb.storage.iterator.unique.RecordIterator;
 import dk.ku.di.dms.vms.modb.storage.record.RecordBufferContext;
 
 import java.nio.ByteBuffer;
-import java.util.Iterator;
 import java.util.concurrent.locks.ReentrantLock;
 
 import static dk.ku.di.dms.vms.modb.common.memory.MemoryUtils.UNSAFE;
