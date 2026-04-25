@@ -742,6 +742,42 @@ public final class VmsEventHandler extends ModbHttpServer {
                         Thread.ofPlatform()
                                 .name("query-worker-local-join-" + payload.queryId())
                                 .start(worker);
+                    } else if (payload.mode() == QueryRequestEvent.MODE_LOCAL_JOIN_CHQ3) {
+                        // QPO-7: CHQ3 local join with semi-join filter, multi-column group-by, SUM aggregate.
+                        LocalJoinSpec spec = LocalJoinSpec.fromBytes(payload.routingData());
+
+                        List<TransactionManager.SimplePredicate> buildPredicates = null;
+                        if (spec.buildPredicatesJson != null && !spec.buildPredicatesJson.isEmpty()) {
+                            PredicateDTO[] dtos = (PredicateDTO[]) serdesProxy.deserialize(
+                                    spec.buildPredicatesJson, PredicateDTO[].class);
+                            if (dtos != null) {
+                                buildPredicates = new ArrayList<>();
+                                for (PredicateDTO dto : dtos) {
+                                    ExpressionTypeEnum expr = ExpressionTypeEnum.valueOf(dto.expression());
+                                    buildPredicates.add(new TransactionManager.SimplePredicate(
+                                            dto.columnReference().columnPosition(), expr, dto.value()));
+                                }
+                            }
+                        }
+                        final List<TransactionManager.SimplePredicate> finalBuildPredicates = buildPredicates;
+
+                        Iterator<byte[]> joinIter = tm.getLocalJoinIteratorChq3(
+                                spec.buildTableName,
+                                payload.tableName(),
+                                spec.buildJoinCols,
+                                spec.probeJoinCols,
+                                finalBuildPredicates,
+                                spec.semiJoinBuildCols,
+                                spec.semiJoinKeysData,
+                                payload.snapshotId());
+
+                        VmsQueryWorker worker = new VmsQueryWorker(
+                                (AsynchronousSocketChannel) connectionMetadata.channel,
+                                joinIter, payload,
+                                options.networkBufferSize(), options.networkSendTimeout());
+                        Thread.ofPlatform()
+                                .name("query-worker-local-join-chq3-" + payload.queryId())
+                                .start(worker);
                     }
 
                 } catch (Exception e) {

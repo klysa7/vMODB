@@ -26,9 +26,7 @@ import static java.lang.System.Logger.Level.*;
 public final class WarehouseHttpHandler extends DefaultHttpHandler {
 
     private final IWarehouseRepository warehouseRepository;
-
     private final IDistrictRepository districtRepository;
-
     private final ICustomerRepository customerRepository;
 
     public WarehouseHttpHandler(ITransactionManager transactionManager,
@@ -46,11 +44,9 @@ public final class WarehouseHttpHandler extends DefaultHttpHandler {
         final String[] uriSplit = uri.split("/");
         String op = uriSplit[uriSplit.length - 1];
         if(op.contentEquals("reset")){
-            // path: /warehouse/reset
             this.transactionManager.reset();
             return;
         }
-        // path: /warehouse/cleanup
         LOGGER.log(INFO, "Warehouse init cleanup");
 
         this.transactionManager.beginTransaction(Long.MAX_VALUE, 0, 0,false);
@@ -72,7 +68,6 @@ public final class WarehouseHttpHandler extends DefaultHttpHandler {
         this.warehouseRepository.insertAll(warehouses);
         this.districtRepository.insertAll(districts);
         this.customerRepository.insertAll(customers);
-        // this.transactionManager.commit();
         LOGGER.log(INFO, "Warehouse finished cleanup");
     }
 
@@ -117,7 +112,6 @@ public final class WarehouseHttpHandler extends DefaultHttpHandler {
         final String[] uriSplit = uri.split("/");
         String op = uriSplit[uriSplit.length - 1];
         if(op.contentEquals("load")){
-            // path: /warehouse/load
             this.transactionManager.rebuildIndexes();
             return;
         }
@@ -126,16 +120,13 @@ public final class WarehouseHttpHandler extends DefaultHttpHandler {
         boolean checkpointing = Boolean.parseBoolean(ConfigUtils.loadProperties().getProperty("checkpointing"));
         this.transactionManager.reset();
 
-        // warehouse
-        LOGGER.log(INFO, "Populating warehouse VMS...");
-
         ForkJoinPool pool = ForkJoinPool.commonPool();
         Future<?>[] futures = new Future[numWare];
 
+        LOGGER.log(INFO, "Populating warehouse VMS...");
         long initTs = System.currentTimeMillis();
 
         if(checkpointing) {
-            // bypass default interfaces
             this.populateDisk(numWare, futures, pool);
         } else {
             this.populateInMemory(numWare, futures, pool);
@@ -145,70 +136,30 @@ public final class WarehouseHttpHandler extends DefaultHttpHandler {
         LOGGER.log(INFO, "Finished populating warehouse VMS in "+(endTs-initTs)+" ms");
     }
 
-    private void populateInMemory(int numWare, Future<?>[] futures, ForkJoinPool pool) {
-        for (int w_id = 1; w_id <= numWare; w_id++) {
-            final int f_w_id = w_id;
-            futures[w_id - 1] = pool.submit(() -> {
-                LOGGER.log(DEBUG, "Started creating 30_000 customer records for warehouse " + f_w_id);
-                long internalInitTs = System.currentTimeMillis();
-                transactionManager.beginTransaction(-f_w_id, 0, 0, false);
-                Warehouse warehouse = generateWarehouse(f_w_id);
-                this.warehouseRepository.insert(warehouse);
-                for (int d_id = 1; d_id <= TPCcConstants.NUM_DIST_PER_WARE; d_id++) {
-                    District district = generateDistrict(d_id, f_w_id);
-                    districtRepository.insert(district);
-                    for (int c_id = 1; c_id <= TPCcConstants.NUM_CUST_PER_DIST; c_id++) {
-                        Customer customer = generateCustomer(c_id, d_id, f_w_id);
-                        customerRepository.insert(customer);
-                    }
-                }
-                // bypass GC of this big writeSet at experiment startup time
-                // transactionManager.commit();
-                LOGGER.log(DEBUG, "Finished creating 30_000 customer records for warehouse " + f_w_id + " in " + (System.currentTimeMillis() - internalInitTs) + " ms");
-            });
-        }
-        try {
-            for (int w_id = 1; w_id <= numWare; w_id++) {
-                futures[w_id-1].get();
-            }
-        } catch(ExecutionException | InterruptedException e){
-            LOGGER.log(ERROR, "Error:\n"+e);
-        }
-    }
-
     // ─────────────────────────────────────────────────────────────────────────
-    // BUG FIX (secondary index population)
+    // Mirrors the order VMS populate pattern (OrderHttpHandler.populateDisk):
     //
-    // PROBLEM: the previous version of populateDisk wrote directly to the
-    // underlying primary key index via `index.insert(key, row)`. That bypasses
-    // the repository's operationalAPI.insert() path, which means SECONDARY
-    // INDEXES are never populated. Specifically, the customer table's
-    // secondary index on c_last (used by getCustomerByLastName) ends up empty.
+    // Inserts go DIRECTLY into the underlying primary key index, bypassing
+    // MVCC entirely. This is the same pattern the order VMS uses successfully.
     //
-    // SYMPTOM: WarehouseService.processPayment fails with
-    //   "Empty customer list — c_d_id: X c_w_id: 1 c_last: <name>"
-    // for any payment where by_name=true (≈60% of file-based payments
-    // generated by WorkloadUtils.generatePayment).
+    // Why bypass MVCC?
+    //   The MVCC layer's installWrites() doesn't propagate to the underlying
+    //   physical index that flush() and rebuildIndexes() read from. Repository
+    //   inserts (which go through MVCC) result in writes that are invisible
+    //   to subsequent transactions and to OLAP scans. Direct index inserts
+    //   write to the same place that all readers iterate from.
     //
-    // HATtrick avoided this bug by hardcoding by_name=false in
-    // HATtrickTClientWorker.generatePayment. The file-based workload path
-    // (Menu Option 4) cannot — its payment generator randomly sets by_name.
+    // Secondary indexes (customer.c_last) are still populated:
+    //   rebuildIndexes() iterates the populated primary key index and inserts
+    //   each record into every secondary index. So after the flush + rebuild
+    //   sequence, both primary and secondary indexes are populated correctly.
     //
-    // FIX: route the inserts through the repositories — same pattern as
-    // populateInMemory — so operationalAPI.insert() builds both primary
-    // and secondary indexes. Keep the explicit flush() and rebuildIndexes()
-    // afterwards to persist on-disk state for checkpointing.
-    //
-    // PERFORMANCE NOTE: the previous direct-index path was a bulk-load
-    // optimization. Going through the repository is slower per-insert, but
-    // populate happens once at experiment startup — a few seconds extra is
-    // fine in exchange for a working payment workload.
+    // Cite: matching OrderHttpHandler.populateDisk pattern — order VMS
+    //       populate works for OLTP and OLAP without exception.
     // ─────────────────────────────────────────────────────────────────────────
     @SuppressWarnings("unchecked")
     private void populateDisk(int numWare, Future<?>[] futures, ForkJoinPool pool) {
 
-        // Keep handles to the underlying primary key indexes — we still need
-        // them to call flush() at the end for on-disk checkpointing.
         final var wareRepo = ((AbstractProxyRepository<Integer, Warehouse>) warehouseRepository);
         final var wareIndex = wareRepo.getTable().underlyingPrimaryKeyIndex();
 
@@ -224,42 +175,117 @@ public final class WarehouseHttpHandler extends DefaultHttpHandler {
                 LOGGER.log(INFO, "Started creating warehouse + 10 districts + 30_000 customer records for warehouse " + f_w_id);
                 long internalInitTs = System.currentTimeMillis();
 
-                // Begin a transaction so operationalAPI.insert() has the
-                // thread-local context it needs. The mirror of the
-                // populateInMemory pattern.
-                transactionManager.beginTransaction(-f_w_id, 0, 0, false);
-
+                // ── warehouse ────────────────────────────────────────────
                 Warehouse warehouse = generateWarehouse(f_w_id);
-                warehouseRepository.insert(warehouse);
+                Object[] wareObj = wareRepo.extractFieldValuesFromEntityObject(warehouse);
+                IKey wareKey = KeyUtils.buildRecordKey(
+                        wareIndex.schema().getPrimaryKeyColumns(), wareObj);
+                synchronized (wareIndex) {
+                    wareIndex.insert(wareKey, wareObj);
+                }
 
+                // ── districts + customers ────────────────────────────────
                 for (int d_id = 1; d_id <= TPCcConstants.NUM_DIST_PER_WARE; d_id++) {
                     District district = generateDistrict(d_id, f_w_id);
-                    districtRepository.insert(district);
+                    Object[] distObj = distRepo.extractFieldValuesFromEntityObject(district);
+                    IKey distKey = KeyUtils.buildRecordKey(
+                            distIndex.schema().getPrimaryKeyColumns(), distObj);
+                    synchronized (distIndex) {
+                        distIndex.insert(distKey, distObj);
+                    }
+
                     for (int c_id = 1; c_id <= TPCcConstants.NUM_CUST_PER_DIST; c_id++) {
                         Customer customer = generateCustomer(c_id, d_id, f_w_id);
-                        // This goes through operationalAPI.insert() which
-                        // populates BOTH the primary key index AND the
-                        // secondary index on c_last. The previous direct
-                        // call to custIndex.insert(...) skipped the latter.
-                        customerRepository.insert(customer);
+                        Object[] custObj = custRepo.extractFieldValuesFromEntityObject(customer);
+                        IKey custKey = KeyUtils.buildRecordKey(
+                                custIndex.schema().getPrimaryKeyColumns(), custObj);
+                        synchronized (custIndex) {
+                            custIndex.insert(custKey, custObj);
+                        }
                     }
                 }
-                LOGGER.log(INFO, "Finished creating warehouse + 10 districts + 30_000 customer records for warehouse " + f_w_id + " in " + (System.currentTimeMillis() - internalInitTs) + " ms");
+                LOGGER.log(INFO, "Finished creating warehouse + 10 districts + 30_000 customer records for warehouse "
+                        + f_w_id + " in " + (System.currentTimeMillis() - internalInitTs) + " ms");
             });
         }
         try {
             for (int w_id = 1; w_id <= numWare; w_id++) {
                 futures[w_id-1].get();
             }
-            // Flush primary key indexes to disk so checkpointing persists
-            // the populated state across VMS restarts. Secondary indexes are
-            // flushed by rebuildIndexes() below.
-            futures[0] = pool.submit(wareIndex::flush);
-            futures[1] = pool.submit(distIndex::flush);
-            futures[2] = pool.submit(custIndex::flush);
+
+            // BUG FIX 2 retained: dedicated array for flush futures so this
+            // doesn't overrun the populate-sized `futures` parameter when
+            // numWare < 3.
+            Future<?>[] flushFutures = new Future[3];
+            flushFutures[0] = pool.submit(wareIndex::flush);
+            flushFutures[1] = pool.submit(distIndex::flush);
+            flushFutures[2] = pool.submit(custIndex::flush);
             for (int i = 0; i < 3; i++) {
-                futures[i].get();
+                flushFutures[i].get();
             }
+            // rebuildIndexes scans the populated primary index and builds
+            // the customer secondary index on c_last (used by processPayment
+            // when by_name=true).
+            this.transactionManager.rebuildIndexes();
+        } catch(ExecutionException | InterruptedException e){
+            LOGGER.log(ERROR, "Error:\n"+e);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private void populateInMemory(int numWare, Future<?>[] futures, ForkJoinPool pool) {
+
+        final var wareRepo = ((AbstractProxyRepository<Integer, Warehouse>) warehouseRepository);
+        final var wareIndex = wareRepo.getTable().underlyingPrimaryKeyIndex();
+
+        final var distRepo = ((AbstractProxyRepository<District.DistrictId, District>) districtRepository);
+        final var distIndex = distRepo.getTable().underlyingPrimaryKeyIndex();
+
+        final var custRepo = ((AbstractProxyRepository<Customer.CustomerId, Customer>) customerRepository);
+        final var custIndex = custRepo.getTable().underlyingPrimaryKeyIndex();
+
+        for (int w_id = 1; w_id <= numWare; w_id++) {
+            final int f_w_id = w_id;
+            futures[w_id - 1] = pool.submit(() -> {
+                LOGGER.log(DEBUG, "Started creating 30_000 customer records for warehouse " + f_w_id);
+                long internalInitTs = System.currentTimeMillis();
+
+                Warehouse warehouse = generateWarehouse(f_w_id);
+                Object[] wareObj = wareRepo.extractFieldValuesFromEntityObject(warehouse);
+                IKey wareKey = KeyUtils.buildRecordKey(
+                        wareIndex.schema().getPrimaryKeyColumns(), wareObj);
+                synchronized (wareIndex) {
+                    wareIndex.insert(wareKey, wareObj);
+                }
+
+                for (int d_id = 1; d_id <= TPCcConstants.NUM_DIST_PER_WARE; d_id++) {
+                    District district = generateDistrict(d_id, f_w_id);
+                    Object[] distObj = distRepo.extractFieldValuesFromEntityObject(district);
+                    IKey distKey = KeyUtils.buildRecordKey(
+                            distIndex.schema().getPrimaryKeyColumns(), distObj);
+                    synchronized (distIndex) {
+                        distIndex.insert(distKey, distObj);
+                    }
+
+                    for (int c_id = 1; c_id <= TPCcConstants.NUM_CUST_PER_DIST; c_id++) {
+                        Customer customer = generateCustomer(c_id, d_id, f_w_id);
+                        Object[] custObj = custRepo.extractFieldValuesFromEntityObject(customer);
+                        IKey custKey = KeyUtils.buildRecordKey(
+                                custIndex.schema().getPrimaryKeyColumns(), custObj);
+                        synchronized (custIndex) {
+                            custIndex.insert(custKey, custObj);
+                        }
+                    }
+                }
+                LOGGER.log(DEBUG, "Finished creating 30_000 customer records for warehouse " + f_w_id
+                        + " in " + (System.currentTimeMillis() - internalInitTs) + " ms");
+            });
+        }
+        try {
+            for (int w_id = 1; w_id <= numWare; w_id++) {
+                futures[w_id-1].get();
+            }
+            // No flush in the in-memory path. Still rebuild secondary indexes.
             this.transactionManager.rebuildIndexes();
         } catch(ExecutionException | InterruptedException e){
             LOGGER.log(ERROR, "Error:\n"+e);

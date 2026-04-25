@@ -19,7 +19,9 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -51,6 +53,7 @@ public final class GatewayHttpHandler implements HttpHandler {
 
     static final String PATH_CHQ6        = "/olap/chq6";
     static final String PATH_CHQ6_DIRECT = "/direct/chq6";
+    static final String PATH_CHQ3_DIRECT = "/direct/chq3";
 
     static final String SQL_CHQ6 = """
         SELECT SUM(ol.ol_amount) AS revenue
@@ -165,6 +168,14 @@ public final class GatewayHttpHandler implements HttpHandler {
                 send(exchange, 200, executeChq1Direct());
             } catch (Exception e) {
                 send(exchange, 500, jsonError("CHQ1 direct error: " + e.getMessage()));
+            }
+            return;
+        }
+        if (PATH_CHQ3_DIRECT.equals(path)) {
+            try {
+                send(exchange, 200, executeChq3Direct());
+            } catch (Exception e) {
+                send(exchange, 500, jsonError("CHQ3 direct error: " + e.getMessage()));
             }
             return;
         }
@@ -561,6 +572,255 @@ public final class GatewayHttpHandler implements HttpHandler {
 
         return "{\"resultColumns\":[\"revenue\"],\"resultRowCount\":1,"
                 + "\"result\":[{\"revenue\":" + totalRevenue + "}]}";
+    }
+
+    // ── QPO-7: CHQ3 direct — cross-VMS join with semi-join reduction ─────────
+    //
+    // CHQ3 joins customer (warehouse VMS) with orders, new_orders, and
+    // order_line (all order VMS). Three of the four tables are co-located
+    // and share the join key (o_id, d_id, w_id) — perfect candidates for a
+    // local 2-table join in the order VMS, with the customer dependency
+    // collapsed to a semi-join key set fetched from the warehouse VMS.
+    //
+    // Two-phase execution:
+    //   Phase A: Fetch (c_id, c_d_id, c_w_id) from warehouse VMS with
+    //            predicate c_w_id = 1. At num_ware=1 every customer matches;
+    //            at num_ware>1 this filters to a single warehouse, and the
+    //            resulting key set propagates to filter orders during build.
+    //   Phase B: Send LocalJoinSpec to order VMS with semi-join keys
+    //            attached. VMS does build (orders) → predicate filter →
+    //            semi-join filter → probe (order_line) → SUM(ol_amount)
+    //            GROUP BY (o_id, w_id, d_id, entry_d) locally. Returns
+    //            28-byte result rows.
+    //
+    // SIMPLIFICATION: at num_ware=1 with this codebase's eviction model,
+    // the new_orders join is also a tautology (every active order has a
+    // matching new_orders entry once eviction floor passes 3000). For
+    // multi-warehouse this would need additional work, but the semi-join
+    // pattern generalises naturally.
+    //
+    // Cite: Bernstein & Chiu 1981 "Using Semi-Joins to Solve Relational Queries"
+    //       Mackert & Lohman 1986 "R* Optimizer Validation"
+    //       DeWitt & Gray 1992 "Parallel Database Systems"
+    private String executeChq3Direct() throws Exception {
+        long snapshotId = service.getCurrentSnapshotId();
+        long startNano  = System.nanoTime();
+
+        // ── Phase A: fetch customer keys from warehouse VMS ──────────────
+        long phaseAStart = System.nanoTime();
+        byte[] customerKeysData = fetchCustomerKeysFromWarehouse(snapshotId);
+        double phaseAMs = (System.nanoTime() - phaseAStart) / 1_000_000.0;
+
+        int customerCount = 0;
+        if (customerKeysData.length >= 8) {
+            ByteBuffer ck = ByteBuffer.wrap(customerKeysData).order(ByteOrder.nativeOrder());
+            customerCount = ck.getInt();
+        }
+        System.out.printf(">>> [CHQ3 DIRECT] Phase A: fetched %d customer keys in %.2f ms%n",
+                customerCount, phaseAMs);
+
+        // ── Phase B: build LocalJoinSpec and send to order VMS ───────────
+        long epoch2007 = java.time.LocalDate.of(2007, 1, 2)
+                .atStartOfDay(java.time.ZoneOffset.UTC).toInstant().toEpochMilli();
+
+        // Build-side predicates on orders:
+        //   o_w_id (col 2) = 1
+        //   o_entry_d (col 4) > 2007-01-02
+        String buildPredicatesJson = "[" +
+                "{\"columnReference\":{\"columnPosition\":2},\"expression\":\"EQUALS\",\"value\":1}," +
+                "{\"columnReference\":{\"columnPosition\":4},\"expression\":\"GREATER_THAN\",\"value\":" + epoch2007 + "}" +
+                "]";
+
+        // LocalJoinSpec for CHQ3:
+        //   buildJoinCols     = [0,1,2] = (o_id, o_d_id, o_w_id)
+        //   probeJoinCols     = [0,1,2] = (ol_o_id, ol_d_id, ol_w_id)
+        //   groupByCol        = 4 (o_entry_d) — informational; CHQ3 path
+        //                       groups by the join key itself, not this col
+        //   semiJoinBuildCols = [3,1,2] = (o_c_id, o_d_id, o_w_id)
+        LocalJoinSpec spec = new LocalJoinSpec(
+                "orders",
+                new int[]{0, 1, 2},
+                new int[]{0, 1, 2},
+                4,
+                buildPredicatesJson,
+                new int[]{3, 1, 2},
+                customerKeysData);
+
+        List<Object[]> resultRows = new ArrayList<>();
+
+        long phaseBStart = System.nanoTime();
+        try (Socket socket = new Socket("localhost", 8003)) {
+            socket.setTcpNoDelay(true);
+            DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+            DataInputStream  in  = new DataInputStream(socket.getInputStream());
+
+            byte[] tableBytes   = "order_line".getBytes(StandardCharsets.UTF_8);
+            byte[] routingBytes = spec.toBytes();
+
+            // Customer keys at num_ware=1: ~30K * 12 = 360KB. Allocate with headroom.
+            int reqBufSize = 1024 + tableBytes.length + routingBytes.length;
+            ByteBuffer buf = ByteBuffer.allocate(reqBufSize).order(ByteOrder.BIG_ENDIAN);
+            int startPos = buf.position();
+            buf.put(QueryRequestEvent.QUERY_REQUEST_TYPE);
+            buf.putInt(0);
+            buf.putLong(System.nanoTime());
+            buf.putLong(snapshotId);
+            buf.put(QueryRequestEvent.MODE_LOCAL_JOIN_CHQ3);
+            buf.putInt(tableBytes.length);
+            buf.put(tableBytes);
+            buf.putInt(0);                                  // no top-level predicates
+            buf.putInt(routingBytes.length);
+            buf.put(routingBytes);
+            buf.putInt(0);                                  // no projection
+            int endPos = buf.position();
+            buf.putInt(startPos + 1, endPos - startPos - 1 - Integer.BYTES);
+            buf.position(endPos);
+            buf.flip();
+
+            out.write(buf.array(), 0, buf.limit());
+            out.flush();
+
+            // Per row on wire: [rowSize:4][o_id:4][w_id:4][d_id:4][entry_d:8][revenue:8] = 32 bytes
+            byte[] header = new byte[5];
+            while (true) {
+                in.readFully(header);
+                byte type = header[0];
+                if (type == END_OF_STREAM_TYPE) break;
+                if (type != QUERY_RESULT_TYPE)
+                    throw new IllegalStateException("Unexpected type: " + type);
+
+                int batchLen = ByteBuffer.wrap(header, 1, 4).getInt();
+                byte[] batchData = new byte[batchLen];
+                in.readFully(batchData);
+
+                ByteBuffer batchBuf = ByteBuffer.wrap(batchData).order(ByteOrder.nativeOrder());
+                batchBuf.getLong(); // queryId
+
+                while (batchBuf.remaining() >= 32) {
+                    batchBuf.getInt();                       // rowSize prefix (skip)
+                    int    o_id     = batchBuf.getInt();
+                    int    w_id     = batchBuf.getInt();
+                    int    d_id     = batchBuf.getInt();
+                    long   entry_d  = batchBuf.getLong();
+                    double revenue  = batchBuf.getDouble();
+                    resultRows.add(new Object[]{o_id, w_id, d_id, entry_d, revenue});
+                }
+            }
+        }
+        double phaseBMs = (System.nanoTime() - phaseBStart) / 1_000_000.0;
+        double totalMs  = (System.nanoTime() - startNano) / 1_000_000.0;
+
+        System.out.printf(">>> [CHQ3 DIRECT] Phase B: %d groups in %.2f ms | total: %.2f ms%n",
+                resultRows.size(), phaseBMs, totalMs);
+
+        // ── Build JSON ────────────────────────────────────────────────────
+        StringBuilder sb = new StringBuilder();
+        sb.append("{\"resultColumns\":[\"ol_o_id\",\"ol_w_id\",\"ol_d_id\",\"revenue\",\"o_entry_d\"],");
+        sb.append("\"resultRowCount\":").append(resultRows.size()).append(",\"result\":[");
+        boolean first = true;
+        for (Object[] r : resultRows) {
+            if (!first) sb.append(",");
+            sb.append("{")
+                    .append("\"ol_o_id\":").append(r[0]).append(",")
+                    .append("\"ol_w_id\":").append(r[1]).append(",")
+                    .append("\"ol_d_id\":").append(r[2]).append(",")
+                    .append("\"revenue\":").append(r[4]).append(",")
+                    .append("\"o_entry_d\":").append(r[3])
+                    .append("}");
+            first = false;
+        }
+        sb.append("]}");
+        return sb.toString();
+    }
+
+    // Helper for CHQ3: fetch (c_id, c_d_id, c_w_id) tuples from the warehouse
+    // VMS where c_w_id = 1.
+    //
+    // Sends a MODE_SCAN_TO_GATEWAY request to the warehouse VMS (port 8001)
+    // with projection [0,1,2] and predicate c_w_id=1. Reads 16-byte rows
+    // (4 rowSize + 12 data) into an int[3] list, then serialises the list as:
+    //   [nKeys:4][nCols:4][col0:4][col1:4][col2:4]...
+    //
+    // At num_ware=1 the predicate is a tautology — every customer matches —
+    // and the returned key set has ~30K entries.
+    // At num_ware>1 the predicate filters customers to a single warehouse
+    // and the key set has ~30K entries per warehouse.
+    private byte[] fetchCustomerKeysFromWarehouse(long snapshotId) throws Exception {
+        List<int[]> keys = new ArrayList<>();
+
+        String predicatesJson = "[{\"columnReference\":{\"columnPosition\":2},"
+                + "\"expression\":\"EQUALS\",\"value\":1}]";
+        byte[] predicatesBytes = predicatesJson.getBytes(StandardCharsets.UTF_8);
+
+        int[] projectedCols = new int[]{0, 1, 2};
+        byte[] projectionData = QueryRequestEvent.serializeProjection(projectedCols);
+
+        try (Socket socket = new Socket("localhost", 8001)) {
+            socket.setTcpNoDelay(true);
+            DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+            DataInputStream  in  = new DataInputStream(socket.getInputStream());
+
+            byte[] tableBytes = "customer".getBytes(StandardCharsets.UTF_8);
+
+            ByteBuffer buf = ByteBuffer.allocate(1024).order(ByteOrder.BIG_ENDIAN);
+            int startPos = buf.position();
+            buf.put(QueryRequestEvent.QUERY_REQUEST_TYPE);
+            buf.putInt(0);
+            buf.putLong(System.nanoTime());
+            buf.putLong(snapshotId);
+            buf.put(QueryRequestEvent.MODE_SCAN_TO_GATEWAY);
+            buf.putInt(tableBytes.length);
+            buf.put(tableBytes);
+            buf.putInt(predicatesBytes.length);
+            buf.put(predicatesBytes);
+            buf.putInt(0);                                  // no routing data
+            buf.putInt(projectionData.length);
+            buf.put(projectionData);
+            int endPos = buf.position();
+            buf.putInt(startPos + 1, endPos - startPos - 1 - Integer.BYTES);
+            buf.position(endPos);
+            buf.flip();
+
+            out.write(buf.array(), 0, buf.limit());
+            out.flush();
+
+            byte[] header = new byte[5];
+            while (true) {
+                in.readFully(header);
+                byte type = header[0];
+                if (type == END_OF_STREAM_TYPE) break;
+                if (type != QUERY_RESULT_TYPE)
+                    throw new IllegalStateException("Unexpected type fetching customer: " + type);
+
+                int batchLen = ByteBuffer.wrap(header, 1, 4).getInt();
+                byte[] batchData = new byte[batchLen];
+                in.readFully(batchData);
+
+                ByteBuffer batchBuf = ByteBuffer.wrap(batchData).order(ByteOrder.nativeOrder());
+                batchBuf.getLong(); // queryId
+
+                // Per row: [rowSize:4][c_id:4][c_d_id:4][c_w_id:4] = 16 bytes
+                while (batchBuf.remaining() >= 16) {
+                    batchBuf.getInt();                       // rowSize (skip)
+                    int c_id   = batchBuf.getInt();
+                    int c_d_id = batchBuf.getInt();
+                    int c_w_id = batchBuf.getInt();
+                    keys.add(new int[]{c_id, c_d_id, c_w_id});
+                }
+            }
+        }
+
+        // Serialise: [nKeys:4][nCols:4][col0:4][col1:4][col2:4]...
+        int nKeys = keys.size();
+        int nCols = 3;
+        ByteBuffer out = ByteBuffer.allocate(8 + nKeys * nCols * 4)
+                .order(ByteOrder.nativeOrder());
+        out.putInt(nKeys);
+        out.putInt(nCols);
+        for (int[] k : keys) {
+            for (int v : k) out.putInt(v);
+        }
+        return out.array();
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

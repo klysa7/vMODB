@@ -38,40 +38,41 @@ public final class OrderService {
     private static final System.Logger LOGGER = System.getLogger(OrderService.class.getName());
 
     // ─────────────────────────────────────────────────────────────────────────
-    // EVICTION STRATEGY — Table Size Target: ~350K rows per CHQ6 scan
+    // EVICTION STRATEGY — Steady-state target ~300K rows per CHQ6 scan
     //
-    // Per-(w_id, d_id) AtomicInteger counter. Each processNewOrder claims the
-    // next ol_o_id for its district. Eviction is skipped while the counter
-    // sits below ORDERS_PER_DISTRICT, then fires every transaction after that,
-    // deleting the (w_id, d_id, evictOId) rows from orders, new_orders, and
-    // order_line in the same write transaction.
+    // Two-phase per-(w_id, d_id) FIFO eviction. Each district has an
+    // AtomicInteger evictionFloor starting at 1. Every processNewOrder
+    // claims floor.getAndIncrement() — the OLDEST unevicted o_id — and
+    // deletes that order from orders, new_orders, and order_line.
     //
-    // ORDERS_PER_DISTRICT = 4500  (paired with HATtrick ol_cnt = 3)
-    //   Tuned against prior observation: at guard=6000 with ol_cnt=3, the
-    //   CHQ6 scan stabilised around 390K rows. Each drop of 1000 in the
-    //   guard removes ~1000 × 10 districts × 3 ol = ~30K rows from the
-    //   scan. Dropping 6000 → 4500 removes ~45K, landing at ~345K — right
-    //   on the 350K target.
+    // Phase 1 — counter ∈ [1, 3000]: populate orders are evicted.
+    //   These are the rows seeded by populateDisk() in OrderHttpHandler.
+    //   They have ol_count ∈ [5, 15], so we delete ol_number 1..15
+    //   defensively (delete-by-key on a non-existent key is a silent no-op
+    //   in vMODB, so the extra deletes for orders with ol_count < 15 cost
+    //   nothing semantically).
     //
-    //   Expected steady-state CHQ6 scan result:
-    //     populate visible to predicates (~210K, inferred from 390K scan
-    //     minus 180K net tx contribution in the guard=6000 run) plus
-    //     4500 × 10 × 3 = 135K tx-created rows = ~345K total.
+    // Phase 2 — counter > 3000: tx-created orders are evicted.
+    //   Tx orders have ol_count = in.itemsIds.length (= 3 with HATtrick's
+    //   ol_cnt = 3), so delete-loop stops at olCnt for those.
     //
-    // DELETE LOOP SIZING
-    //   Loop bound = in.itemsIds.length (the current tx's ol_cnt = 3).
-    //   Since the eviction counter starts at 1 and eviction only fires past
-    //   the guard (counter > 4500), the first order evicted has o_id=4501,
-    //   which is well inside the tx-created range (tx orders start at
-    //   d_next_o_id ≈ 3001). Populate orders (o_id 1-3000) are never
-    //   targeted by eviction — they remain and form the bulk of the CHQ6
-    //   scan result.
+    // PACING — eviction fires from the FIRST transaction onward, 1:1 with
+    // inserts. Since populate seeds 3000 orders/district × 10 districts =
+    // 30K orders × ~10 ol = ~300K rows, and every new tx replaces one
+    // populate row, the table size stays anchored at ~300K throughout the
+    // run.
     //
-    // THREAD SAFETY
-    //   AtomicInteger — concurrent @Parallel transactions on the same district
-    //   each evict a distinct ol_o_id. No two transactions target the same PK.
+    // ROLLBACK — we don't roll back the floor on transaction abort. A
+    // failed tx that did getAndIncrement() will leave a "skipped" o_id
+    // that's never evicted. With at most a handful of aborts per run, the
+    // drift is in the tens of rows out of 300K — invisible at this scale.
+    //
+    // THREAD SAFETY — AtomicInteger.getAndIncrement is atomic per district,
+    // so concurrent @Parallel transactions on the same (w_id, d_id) each
+    // claim a distinct evictOId.
     // ─────────────────────────────────────────────────────────────────────────
-    private static final int ORDERS_PER_DISTRICT = 4_500;
+    private static final int POPULATE_ORDERS_PER_DISTRICT = 3_000;
+    private static final int MAX_OL_NUMBER_POPULATE       = 15;
 
     private final ConcurrentHashMap<Integer, AtomicInteger> evictCounters =
             new ConcurrentHashMap<>();
@@ -179,22 +180,31 @@ public final class OrderService {
         TOTAL_INSERTS.addAndGet(olCnt);
 
         // ── EVICT: oldest (w_id, d_id, evictOId) across all three tables ─────
+        // Floor advances 1, 2, 3, ... — strictly oldest-first.
+        // Phase 1 (evictOId ≤ 3000): we're evicting populate rows.
+        //   Populate orders have ol_count ∈ [5, 15], so we issue deletes for
+        //   ol_number 1..15. Deletes for non-existent (o_id, ol_number) keys
+        //   are silent no-ops — vMODB checks the index and skips missing rows.
+        // Phase 2 (evictOId > 3000): we're evicting tx-created rows.
+        //   These have ol_count = olCnt (= 3 with HATtrick), so we limit the
+        //   delete loop to olCnt to avoid unnecessary index probes.
         int evictOId = nextEvictOId(in.w_id, in.d_id);
-        if (evictOId > ORDERS_PER_DISTRICT) {
-            this.orderRepository.delete(
-                    new Order(evictOId, in.d_id, in.w_id, 0, null, 0, 0, 0));
 
-            this.newOrderRepository.delete(
-                    new NewOrder(evictOId, in.d_id, in.w_id));
+        this.orderRepository.delete(
+                new Order(evictOId, in.d_id, in.w_id, 0, null, 0, 0, 0));
+        this.newOrderRepository.delete(
+                new NewOrder(evictOId, in.d_id, in.w_id));
 
-            for (int olNum = 1; olNum <= olCnt; olNum++) {
-                this.orderLineRepository.delete(
-                        new OrderLine(evictOId, in.d_id, in.w_id, olNum,
-                                0, 0, null, 0, 0f, null));
-            }
-            TOTAL_DELETES.addAndGet(olCnt);
-            EVICTIONS_PERFORMED.incrementAndGet();
+        int olDeleteBound = (evictOId <= POPULATE_ORDERS_PER_DISTRICT)
+                ? MAX_OL_NUMBER_POPULATE
+                : olCnt;
+        for (int olNum = 1; olNum <= olDeleteBound; olNum++) {
+            this.orderLineRepository.delete(
+                    new OrderLine(evictOId, in.d_id, in.w_id, olNum,
+                            0, 0, null, 0, 0f, null));
         }
+        TOTAL_DELETES.addAndGet(olDeleteBound);
+        EVICTIONS_PERFORMED.incrementAndGet();
 
         // ── Periodic size log (every 10s) ────────────────────────────────────
         long nowMs = System.currentTimeMillis();
@@ -207,8 +217,8 @@ public final class OrderService {
             LOGGER.log(INFO,
                     "[order_line size] tx_inserted={0}, tx_deleted={1}, " +
                             "evictions_performed={2}, net={3}. " +
-                            "Target: ~350K rows per CHQ6 scan with ORDERS_PER_DISTRICT={4}.",
-                    inserted, deleted, evictions, net, ORDERS_PER_DISTRICT);
+                            "Target: ~300K rows steady-state (FIFO, oldest-first).",
+                    inserted, deleted, evictions, net);
         }
 
         return new NewOrderOut(

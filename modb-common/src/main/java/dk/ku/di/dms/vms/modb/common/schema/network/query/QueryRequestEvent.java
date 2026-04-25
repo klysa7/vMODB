@@ -13,6 +13,10 @@ public final class QueryRequestEvent {
     public static final byte MODE_BROADCAST_TO_VMS = 1;
     public static final byte MODE_RECEIVE_AND_JOIN = 2;
     public static final byte MODE_LOCAL_JOIN = 3;
+    // QPO-7: CHQ3 local join with optional semi-join filter,
+    // multi-column group-by, SUM aggregate. Distinct from MODE_LOCAL_JOIN
+    // (CHQ4) because the result row format and aggregation shape differ.
+    public static final byte MODE_LOCAL_JOIN_CHQ3 = 4;
 
 
     // Wire format:

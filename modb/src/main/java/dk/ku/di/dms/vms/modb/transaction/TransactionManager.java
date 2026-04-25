@@ -599,6 +599,176 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
         };
     }
 
+
+    // ─────────────────────────────────────────────────────────────────────────
+// QPO-7: CHQ3 local join with semi-join filter, multi-column group-by,
+// SUM aggregate. Distinct from CHQ4's getLocalJoinIterator because:
+//   1. Result row format is wider: 28 bytes (3 ints + long + double) vs CHQ4's 12.
+//   2. Group key is the join key itself (each order is its own group).
+//   3. Aggregate is SUM(ol_amount) over order_line, not COUNT.
+//   4. Optional semi-join filter on (o_c_id, o_d_id, o_w_id) using a
+//      pre-fetched customer key set from the warehouse VMS.
+//
+// Hardcoded TPC-C column positions:
+//   orders.o_entry_d   = 4   (long, epoch ms)
+//   order_line.ol_amount = 8 (float)
+//
+// At num_ware=1 the semi-join filter is a tautology (every order matches
+// some customer with c_w_id=1) — its presence has correctness value (proves
+// the path works for multi-warehouse) but no filtering effect.
+//
+// Cite: Bernstein & Chiu 1981 "Using Semi-Joins to Solve Relational Queries"
+//       Mackert & Lohman 1986 "R* Optimizer Validation"
+//       DeWitt & Gray 1992 "Parallel Database Systems"
+// ─────────────────────────────────────────────────────────────────────────
+    public Iterator<byte[]> getLocalJoinIteratorChq3(
+            String buildTableName,           // "orders"
+            String probeTableName,           // "order_line"
+            int[]  buildJoinCols,            // [0,1,2] = (o_id, o_d_id, o_w_id)
+            int[]  probeJoinCols,            // [0,1,2] = (ol_o_id, ol_d_id, ol_w_id)
+            List<SimplePredicate> buildPredicates,
+            int[]  semiJoinBuildCols,        // [3,1,2] = (o_c_id, o_d_id, o_w_id), or empty
+            byte[] semiJoinKeysData,         // serialized customer keys, or empty
+            long   snapshotId) {
+
+        final int ENTRY_D_COL    = 4;  // orders.o_entry_d
+        final int OL_AMOUNT_COL  = 8;  // order_line.ol_amount
+
+        Table buildTable = this.catalog.get(buildTableName);
+        Table probeTable = this.catalog.get(probeTableName);
+        if (buildTable == null) throw new IllegalArgumentException("Build table not found: " + buildTableName);
+        if (probeTable == null) throw new IllegalArgumentException("Probe table not found: " + probeTableName);
+
+        var buildUnderlying = buildTable.primaryKeyIndex().underlyingIndex();
+        var probeUnderlying = probeTable.primaryKeyIndex().underlyingIndex();
+        if (!(buildUnderlying instanceof UniqueHashBufferIndex buildRaw))
+            throw new IllegalStateException("Build table requires UniqueHashBufferIndex");
+        if (!(probeUnderlying instanceof UniqueHashBufferIndex probeRaw))
+            throw new IllegalStateException("Probe table requires UniqueHashBufferIndex");
+
+        byte[] buildColTypes = resolveColumnTypes(buildRaw.schema(), buildJoinCols);
+        byte[] probeColTypes = resolveColumnTypes(probeRaw.schema(), probeJoinCols);
+
+        // ── Decode semi-join key set (if provided) ───────────────────────────
+        Set<String> semiJoinKeySet = null;
+        byte[] semiJoinTypes = null;
+        if (semiJoinKeysData != null && semiJoinKeysData.length > 0
+                && semiJoinBuildCols != null && semiJoinBuildCols.length > 0) {
+            semiJoinKeySet = new HashSet<>();
+            ByteBuffer skBuf = ByteBuffer.wrap(semiJoinKeysData).order(ByteOrder.nativeOrder());
+            int nKeys = skBuf.getInt();
+            int nCols = skBuf.getInt();
+            for (int i = 0; i < nKeys; i++) {
+                StringBuilder sb = new StringBuilder();
+                for (int j = 0; j < nCols; j++) {
+                    if (j > 0) sb.append('-');
+                    sb.append(skBuf.getInt());
+                }
+                semiJoinKeySet.add(sb.toString());
+            }
+            semiJoinTypes = resolveColumnTypes(buildRaw.schema(), semiJoinBuildCols);
+            LOGGER.log(INFO, ">>> [LOCAL JOIN CHQ3] Semi-join key set loaded: " + nKeys
+                    + " keys, " + nCols + " cols/key");
+        } else {
+            LOGGER.log(INFO, ">>> [LOCAL JOIN CHQ3] No semi-join filter (num_ware=1 degenerate case)");
+        }
+
+        // ── Build phase: orders filtered by predicates + optional semi-join ──
+        TransactionContext buildCtx = new TransactionContext(0, snapshotId, true);
+        Iterator<Object[]> buildIter = buildTable.primaryKeyIndex().iterator(buildCtx);
+
+        // buildMap: join-key -> entry_d (epoch ms). Each (o_id, d_id, w_id)
+        // is unique on the orders PK so no collisions to worry about.
+        Map<String, Long> buildMap = new HashMap<>();
+        int filteredByPred = 0, filteredBySemi = 0, kept = 0;
+
+        while (buildIter.hasNext()) {
+            Object[] row = buildIter.next();
+            if (row == null) continue;
+
+            if (buildPredicates != null && !buildPredicates.isEmpty()
+                    && !checkPredicates(row, buildPredicates)) {
+                filteredByPred++;
+                continue;
+            }
+
+            if (semiJoinKeySet != null) {
+                String semiKey = extractKeyFromRow(row, semiJoinBuildCols, semiJoinTypes);
+                if (!semiJoinKeySet.contains(semiKey)) {
+                    filteredBySemi++;
+                    continue;
+                }
+            }
+
+            String key = extractKeyFromRow(row, buildJoinCols, buildColTypes);
+            Object entryD = row[ENTRY_D_COL];
+            long entryDLong = (entryD instanceof java.util.Date d)
+                    ? d.getTime() : ((Number) entryD).longValue();
+            buildMap.put(key, entryDLong);
+            kept++;
+        }
+
+        LOGGER.log(INFO, ">>> [LOCAL JOIN CHQ3] Build phase complete. kept=" + kept
+                + ", filteredByPred=" + filteredByPred
+                + ", filteredBySemi=" + filteredBySemi
+                + " | snapshot=" + snapshotId);
+
+        // ── Probe phase: order_line, sum ol_amount per matching join key ─────
+        TransactionContext probeCtx = new TransactionContext(0, snapshotId, true);
+        Iterator<Object[]> probeIter = probeTable.primaryKeyIndex().iterator(probeCtx);
+
+        Map<String, Double> sumMap = new HashMap<>();
+        int probedRows = 0, matchedRows = 0;
+
+        while (probeIter.hasNext()) {
+            Object[] row = probeIter.next();
+            if (row == null) continue;
+            probedRows++;
+            String key = extractKeyFromRow(row, probeJoinCols, probeColTypes);
+            if (buildMap.containsKey(key)) {
+                float olAmount = ((Number) row[OL_AMOUNT_COL]).floatValue();
+                sumMap.merge(key, (double) olAmount, Double::sum);
+                matchedRows++;
+            }
+        }
+
+        LOGGER.log(INFO, ">>> [LOCAL JOIN CHQ3] Probe phase complete. probedRows=" + probedRows
+                + ", matchedRows=" + matchedRows + ", groups=" + sumMap.size());
+
+        // ── Emit result rows ──────────────────────────────────────────────────
+        // Wire row: [o_id:4][w_id:4][d_id:4][entry_d:8][revenue:8] = 28 bytes
+        // Output column order matches the SQL projection:
+        //   ol_o_id, ol_w_id, ol_d_id, revenue, o_entry_d
+        // (we write entry_d before revenue here for fixed-offset alignment;
+        //  the gateway parses in the same order)
+        List<byte[]> results = new ArrayList<>(sumMap.size());
+        for (Map.Entry<String, Double> entry : sumMap.entrySet()) {
+            String key = entry.getKey();
+            // key format from extractKeyFromRow with buildJoinCols=[0,1,2]:
+            // "o_id-d_id-w_id"
+            String[] parts = key.split("-");
+            int o_id = Integer.parseInt(parts[0]);
+            int d_id = Integer.parseInt(parts[1]);
+            int w_id = Integer.parseInt(parts[2]);
+            long entry_d = buildMap.get(key);
+            double revenue = entry.getValue();
+
+            ByteBuffer buf = ByteBuffer.allocate(28).order(ByteOrder.nativeOrder());
+            buf.putInt(o_id);
+            buf.putInt(w_id);
+            buf.putInt(d_id);
+            buf.putLong(entry_d);
+            buf.putDouble(revenue);
+            results.add(buf.array());
+        }
+
+        Iterator<byte[]> it = results.iterator();
+        return new Iterator<byte[]>() {
+            @Override public boolean hasNext() { return it.hasNext(); }
+            @Override public byte[] next()     { return it.next();    }
+        };
+    }
+
     private static int[] resolveColumnOffsets(dk.ku.di.dms.vms.modb.definition.Schema schema, int[] colIndices) {
         int[] all = schema.columnOffset();
         int[] result = new int[colIndices.length];

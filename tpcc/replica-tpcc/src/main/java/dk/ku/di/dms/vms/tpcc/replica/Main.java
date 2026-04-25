@@ -61,25 +61,16 @@ public final class Main {
     /**
      * OLAP HTTP server on port 8096.
      *
-     * Pattern: same as the marketplace Seller VMS — open a read-only MVCC
-     * snapshot, scan via repository (no AtomicLong counters), aggregate in
-     * Java. Differences vs the original AtomicLong design:
+     * Endpoints:
+     *   /chq6   — SUM(ol_amount) over snapshot
+     *   /chq1   — GROUP BY ol_number aggregates over snapshot
+     *   /size   — current row count (cheap, no aggregation)
+     *   /status — replica metadata (lastTid, ports, eviction threshold)
      *
-     *   AtomicLong design        Repository scan design (this file)
-     *   ─────────────────        ──────────────────────────────────
-     *   constant-time query      O(N) scan over order_line
-     *   not snapshot-isolated    snapshot at lastTidFinished()
-     *   incremental updates      no per-write hot path
-     *   ad-hoc to one query      generalizable to any aggregate
-     *
-     * The scan goes through IRepository.getAll() — which calls
-     * TransactionManager.getAll(Table) — bypassing the @Query planner that
-     * crashes on composite-PK tables. Predicates (ol_w_id = 1, ol_quantity
-     * range) are tautologies for num_ware=1 and applied defensively in the
-     * Java aggregation loop.
-     *
-     * Response envelopes match /olap/chq6 and /olap/chq1 exactly so
-     * gateway-level diff against the live paths is byte-comparable.
+     * All scans go through IRepository.getAll() under a read-only MVCC
+     * snapshot at lastTidFinished(). Eviction runs synchronously inside
+     * ReplicaService.processNewOrder, so each scan sees a self-consistent
+     * post-eviction state.
      */
     private static void startOlapHttpServer(ITransactionManager txManager,
                                             IOrderLineReplicaRepository repo) {
@@ -88,10 +79,6 @@ public final class Main {
                     new InetSocketAddress("0.0.0.0", REPLICA_HTTP_PORT), 0);
 
             // ── /chq6 ────────────────────────────────────────────────────
-            //
-            // SUM(ol_amount) WHERE ol_quantity BETWEEN 1 AND 100000.
-            // Predicate is a tautology in standard TPC-C (max ol_quantity
-            // is 10) but applied defensively post-scan.
             httpServer.createContext("/chq6", exchange -> {
                 try {
                     long startNano = System.nanoTime();
@@ -124,14 +111,6 @@ public final class Main {
             });
 
             // ── /chq1 ────────────────────────────────────────────────────
-            //
-            // GROUP BY ol_number WHERE ol_w_id = 1, aggregating
-            // qty / amount / count. Same MVCC pattern; same primitive-array
-            // accumulation as /direct/chq1 (ol_number ∈ [1..15], indexed
-            // directly into long[16] / double[16] — no HashMap).
-            //
-            // ol_w_id = 1 is a tautology for num_ware = 1 but applied
-            // defensively post-scan.
             httpServer.createContext("/chq1", exchange -> {
                 try {
                     long startNano = System.nanoTime();
@@ -193,20 +172,66 @@ public final class Main {
                 }
             });
 
+            // ── /size ────────────────────────────────────────────────────
+            //
+            // Cheap row-count read for benchmark verification. Same MVCC
+            // snapshot as /chq* — opens a read-only transaction at
+            // lastTidFinished, walks the index, returns the count.
+            //
+            // Cost: same as a CHQ scan minus the aggregation (negligible
+            // difference). For 300K rows on this hardware: ~80-200 ms.
+            //
+            // Use this between benchmark phases to confirm eviction is
+            // tracking inserts:
+            //
+            //   $ curl localhost:8095/olap/replica/size   # before run
+            //   $ ./run_hattrick_phase.sh
+            //   $ curl localhost:8095/olap/replica/size   # after run
+            //
+            // Both numbers should be ~300K. Drift > 5K means eviction is
+            // not keeping up with inserts (or vice versa).
+            httpServer.createContext("/size", exchange -> {
+                try {
+                    long startNano = System.nanoTime();
+                    long lastTid = VMS == null ? 1L : VMS.lastTidFinished();
+                    txManager.beginTransaction(lastTid, 0, lastTid, true);
+
+                    List<OrderLineReplica> rows = repo.getAll();
+                    long size = rows.size();
+
+                    double latencyMs = (System.nanoTime() - startNano) / 1_000_000.0;
+                    LOGGER.log(System.Logger.Level.INFO,
+                            String.format(">>> [REPLICA SIZE] Rows: %d | Latency: %.2f ms",
+                                    size, latencyMs));
+
+                    String body = "{\"size\":" + size
+                            + ",\"latency_ms\":" + String.format("%.2f", latencyMs)
+                            + ",\"snapshot\":" + lastTid
+                            + ",\"eviction_threshold\":" + ReplicaService.EVICTION_SAFE_THRESHOLD
+                            + "}";
+                    sendHttp(exchange, 200, body);
+                } catch (Exception e) {
+                    LOGGER.log(System.Logger.Level.WARNING, "size error: " + e.getMessage());
+                    sendHttp(exchange, 500, "{\"error\":\"" + e.getMessage() + "\"}");
+                }
+            });
+
             // ── /status ──────────────────────────────────────────────────
             httpServer.createContext("/status", exchange -> {
                 long lastTid = VMS == null ? 0 : VMS.lastTidFinished();
                 sendHttp(exchange, 200,
                         "{\"lastTid\":" + lastTid
                                 + ",\"vmsPort\":" + REPLICA_VMS_PORT
-                                + ",\"httpPort\":" + REPLICA_HTTP_PORT + "}");
+                                + ",\"httpPort\":" + REPLICA_HTTP_PORT
+                                + ",\"evictionThreshold\":" + ReplicaService.EVICTION_SAFE_THRESHOLD
+                                + "}");
             });
 
             httpServer.setExecutor(Executors.newFixedThreadPool(4));
             httpServer.start();
             LOGGER.log(System.Logger.Level.INFO,
                     "Replica OLAP HTTP server started on port " + REPLICA_HTTP_PORT
-                            + " (endpoints: /chq6, /chq1, /status)");
+                            + " (endpoints: /chq6, /chq1, /size, /status)");
 
         } catch (IOException e) {
             throw new RuntimeException("Failed to start replica OLAP HTTP server", e);
