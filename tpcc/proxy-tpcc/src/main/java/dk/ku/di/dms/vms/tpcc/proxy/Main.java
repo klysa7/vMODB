@@ -250,12 +250,34 @@ public final class Main {
         return txRatioMap;
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // BUG FIX: convert raw percentages to CUMULATIVE thresholds.
+    //
+    // BEFORE (broken):
+    //   For ratios { new_order=50, payment=50 }, this method produced
+    //   [(50, "new_order"), (50, "payment")]. WorkloadUtils.Worker.run rolls
+    //   ratio in [1..100] and picks the first entry where ratio <= t1. With
+    //   raw percentages, a roll of 75 fails both checks (75 ≤ 50 is false
+    //   twice), the loop exits with tx=null, and input.get(null) returns null
+    //   → NullPointerException at Worker.run line 162.
+    //
+    // AFTER (correct):
+    //   The same input now produces [(50, "new_order"), (100, "payment")].
+    //   Roll of 1..50 picks new_order, 51..100 picks payment. Every roll in
+    //   [1..100] now finds a match.
+    //
+    // The bug was hidden when ratios were 100/0/0 (single entry) — every roll
+    // matched the only entry. It only manifests with multi-type ratios, which
+    // is exactly what the recent revert (multi-type ratios sum to 100) enabled.
+    // ─────────────────────────────────────────────────────────────────────────
     @SuppressWarnings("unchecked")
     private static Tuple<Integer, String>[] buildTransactionRatio(Map<String, Integer> txRatioMap) {
         Tuple<Integer, String>[] txRatio = new Tuple[txRatioMap.size()];
         int i = 0;
-        for(var entry : txRatioMap.entrySet()) {
-            txRatio[i] = Tuple.of(entry.getValue(), entry.getKey());
+        int cumulative = 0;
+        for (var entry : txRatioMap.entrySet()) {
+            cumulative += entry.getValue();
+            txRatio[i] = Tuple.of(cumulative, entry.getKey());
             i++;
         }
         return txRatio;

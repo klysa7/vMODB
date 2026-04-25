@@ -30,69 +30,12 @@ import static dk.ku.di.dms.vms.modb.common.schema.network.query.QueryResultEvent
 
 public final class GatewayHttpHandler implements HttpHandler {
 
-    // ══ B23 FIX: Shared HttpClient for Replica Passthrough ═══════════════════
-    //
-    // BEFORE: HttpClient.newHttpClient() allocated per proxyToReplica() call.
-    //   Each call builds a fresh connection pool, async I/O executor, selector
-    //   thread, and SSL context. No HTTP/1.1 keep-alive benefit — every
-    //   request pays a full TCP handshake to port 8096. Discarded instances
-    //   hold native resources until GC.
-    //
-    // AFTER: Single static final HttpClient, built once at class load, reused
-    //   for all replica requests. HttpClient internally maintains HTTP/1.1
-    //   persistent connections to the replica — subsequent requests reuse the
-    //   established TCP connection. connectTimeout(5s) prevents indefinite
-    //   blocking if the replica is unreachable.
-    //
-    // Scope: /olap/replica/* endpoints only (Experiment II, use_replica=true).
-    //   Experiment I queries and direct paths are unaffected.
-    //
-    // Cite: Gray & Reuter 1992 — connection cost must be amortized over
-    //       many requests.
-    //       Fielding & Reschke 2014 (RFC 7230) — HTTP/1.1 persistent connections.
-    // ─────────────────────────────────────────────────────────────────────────
     private static final HttpClient REPLICA_HTTP_CLIENT = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
             .build();
 
-    // ══ B-SS FIX: Scan Sharing via ConcurrentHashMap<key, CompletableFuture> ═
-    //
-    // PROBLEM: at α=2, two identical OLAP queries arrive within milliseconds.
-    //   Without sharing, both fire a full VMS scan independently — double the
-    //   VMS CPU, double the TCP overhead, double the result processing.
-    //   Under mixed load this doubling is what starves the OLTP commit path.
-    //
-    // SOLUTION: if an identical scan (same SQL + same snapshotId) is already
-    //   in-flight, the second query joins the first query's CompletableFuture
-    //   instead of starting a new VMS request. When the first scan completes,
-    //   future.complete() fans the result out to all waiting threads at once.
-    //
-    // KEY = sqlHash + ":" + snapshotId  (strict correctness).
-    //   Same SQL + same snapshotId → same committed database state → safe.
-    //   Different snapshotIds → queries execute independently. No staleness.
-    //
-    // SNAPSHOT COLLISION RATE: coordinator commits batches every ~230ms. Two
-    //   queries arriving within the same batch window see the same snapshotId
-    //   → sharing fires. When snapshotIds differ, queries execute independently
-    //   — correct always.
-    //
-    // THREAD SAFETY: putIfAbsent() is atomic. Exactly one thread creates the
-    //   future (first); all others get the existing one. No deadlock — the
-    //   first thread executes the scan, others wait on future.get().
-    //
-    // Cite: Zukowski et al. 2007 "Cooperative Scans" (VLDB) —
-    //          share the physical result, not the physical scan.
-    //       QuestDB Discipline 3 — cooperative scan sharing.
-    //       Supervisor OPT-1.
-    //
-    // Scope: Calcite-path routes (PATH_Q1/CHQ6/CHQ1/CHQ4/CHQ3) only.
-    //   Direct paths (/direct/*) bypass sharing — they're already cheap enough
-    //   that the sharing overhead would not pay for itself.
-    // ─────────────────────────────────────────────────────────────────────────
     private final ConcurrentHashMap<String, CompletableFuture<String>> scanRegistry =
             new ConcurrentHashMap<>();
-
-    // ── Live order VMS queries (Experiment I) ─────────────────────────────────
 
     static final String PATH_Q1 = "/olap/q1";
     static final String SQL_Q1 = """
@@ -106,12 +49,6 @@ public final class GatewayHttpHandler implements HttpHandler {
         GROUP BY c.c_d_id
     """;
 
-    // ── CHQ6: dual-path (general Calcite + QPO-2 direct scan) ────────────────
-    //
-    // /olap/chq6    → OlapGatewayService (Calcite + planner + operator tree
-    //                 + VmsGatewayClient). QPO-3 still fires. Scan-shared.
-    // /direct/chq6  → QPO-2 hot path. Raw socket, hand-built QueryRequestEvent,
-    //                 sums floats in a tight loop. Single-VMS-safe only.
     static final String PATH_CHQ6        = "/olap/chq6";
     static final String PATH_CHQ6_DIRECT = "/direct/chq6";
 
@@ -122,16 +59,6 @@ public final class GatewayHttpHandler implements HttpHandler {
           AND ol.ol_quantity BETWEEN 1 AND 100000
     """;
 
-    // ── CHQ1: dual-path (general Calcite + QPO-6 direct aggregation) ─────────
-    //
-    // /olap/chq1    → general Calcite path. LocalAggregateOperator builds a
-    //                 HashMap<Integer, double[]> over all 300K+ order_line
-    //                 rows (fully blocking, autoboxing per row, GC pressure).
-    // /direct/chq1  → QPO-6 hot path. Projects only ol_number / ol_quantity /
-    //                 ol_amount (QPO-3) → 12 bytes/row. Accumulates into
-    //                 fixed-size primitive arrays indexed by ol_number
-    //                 (TPC-C domain [1..15]) — no HashMap, no boxing, no GC.
-    //                 Streaming aggregation. Single-VMS-safe (num_ware=1 only).
     static final String PATH_CHQ1        = "/olap/chq1";
     static final String PATH_CHQ1_DIRECT = "/direct/chq1";
 
@@ -147,13 +74,6 @@ public final class GatewayHttpHandler implements HttpHandler {
         GROUP BY ol.ol_number
     """;
 
-    // ── CHQ4: dual-path (general Calcite + QPO-5 intra-VMS local join) ───────
-    //
-    // /olap/chq4    → general Calcite path. Two-phase broadcast join with the
-    //                 100ms B44 delay and gateway-side LocalJoinOperator.
-    // /direct/chq4  → QPO-5 hot path. Single MODE_LOCAL_JOIN request; the VMS
-    //                 runs hash build + probe + GROUP BY in local memory and
-    //                 streams back only aggregated rows.
     static final String PATH_CHQ4        = "/olap/chq4";
     static final String PATH_CHQ4_DIRECT = "/direct/chq4";
 
@@ -215,7 +135,6 @@ public final class GatewayHttpHandler implements HttpHandler {
             return;
         }
 
-        // ── Replica passthrough ───────────────────────────────────────────────
         if (PATH_REPLICA_CHQ6.equals(path)) {
             proxyToReplica(exchange, REPLICA_CHQ6_URL);
             return;
@@ -225,8 +144,6 @@ public final class GatewayHttpHandler implements HttpHandler {
             return;
         }
 
-        // ── Direct hot paths (QPO-2 / QPO-5 / QPO-6) ──────────────────────────
-        // These bypass Calcite entirely — scan sharing does not apply here.
         if (PATH_CHQ6_DIRECT.equals(path)) {
             try {
                 send(exchange, 200, executeChq6Direct());
@@ -252,7 +169,6 @@ public final class GatewayHttpHandler implements HttpHandler {
             return;
         }
 
-        // ── Standard Calcite queries (baseline routes) ────────────────────────
         String sql = switch (path) {
             case PATH_Q1   -> SQL_Q1;
             case PATH_CHQ6 -> SQL_CHQ6;
@@ -267,15 +183,6 @@ public final class GatewayHttpHandler implements HttpHandler {
             return;
         }
 
-        // ══ B-SS FIX: Scan Sharing intercept ═════════════════════════════════
-        //
-        // Key: sqlHash ensures different queries never share.
-        //      snapshotId ensures different database states never share.
-        //
-        // putIfAbsent() is atomic — exactly one thread wins (returns null = first).
-        // All other threads for the same key wait on future.get() and receive
-        // the same result string when the first thread completes its scan.
-        // ─────────────────────────────────────────────────────────────────────
         long   snapshotId = service.getCurrentSnapshotId();
         String scanKey    = sql.hashCode() + ":" + snapshotId;
 
@@ -285,8 +192,6 @@ public final class GatewayHttpHandler implements HttpHandler {
         CompletableFuture<String> future = isFirst ? newFuture : existing;
 
         if (isFirst) {
-            // This thread owns the physical VMS scan.
-            // On completion, future.complete() unblocks all waiting joiners.
             try {
                 String result = service.execute(sql);
                 future.complete(result);
@@ -295,16 +200,9 @@ public final class GatewayHttpHandler implements HttpHandler {
                 future.completeExceptionally(e);
                 send(exchange, 500, jsonError("Gateway error: " + e.getMessage()));
             } finally {
-                // Value-checking remove: only removes if this is still the current future.
-                // Prevents a race where a late joiner's future is accidentally removed
-                // by another thread's cleanup.
                 this.scanRegistry.remove(scanKey, newFuture);
             }
         } else {
-            // This thread joins the existing scan — no VMS request fired.
-            // Blocks until the first thread calls future.complete(result).
-            // Both clients receive the same result — safe because same snapshotId
-            // means same committed database state was visible to both queries.
             try {
                 System.out.println(">>> [SCAN SHARING] Joined existing scan. key=" + scanKey);
                 String result = future.get(30, TimeUnit.SECONDS);
@@ -318,16 +216,34 @@ public final class GatewayHttpHandler implements HttpHandler {
     // ── QPO-6: CHQ1 direct scan ───────────────────────────────────────────────
     //
     // CHQ1 groups order_line rows by ol_number (TPC-C spec: always 1–15).
-    // Instead of Calcite's HashMap aggregator over Object[] rows, we:
-    //   1. Project only 3 columns: ol_number(3), ol_quantity(7), ol_amount(8)
-    //      → 12 bytes/row instead of 104 bytes/row (QPO-3 integration)
-    //   2. Accumulate into fixed-size primitive arrays indexed by ol_number
-    //      → no HashMap, no boxing, no GC pressure (QPO-6 contribution)
-    //   3. Compute AVG inline from running sums at the end
+    // Wire format from VmsQueryWorker for MODE_SCAN_TO_GATEWAY is per-row:
+    //   [rowSize:int 4 bytes][rowData:N bytes]
+    // For projection [3, 7, 8] → rowData is 12 bytes:
+    //   [ol_number:int 4][ol_quantity:int 4][ol_amount:float 4]
+    // Total wire size per row: 16 bytes.
     //
-    // Same architectural principle as QPO-2 (CHQ6): query compilation.
-    // Cite: Neumann 2011 — "Efficiently Compiling Efficient Query Plans for
-    // Modern Hardware" (VLDB). Fixed-size array replaces general aggregation.
+    // ── BUG FIX ──────────────────────────────────────────────────────────────
+    //
+    // The previous version skipped the rowSize prefix. With a 16-byte wire
+    // row but a 12-byte read, every iteration drifted by 4 bytes through the
+    // packed-column data, producing alternating valid and garbage ol_number
+    // values. The diagnostic counter showed:
+    //   bytesAfterQid: 4796928 = 299808 × 16 (rows VMS sent × wire size)
+    //   misaligned:    0       (every batch payload is multiple of 16)
+    //   badOlNumber:   199872  (about half the iterations reading garbage)
+    //
+    // FIX: read the 4-byte rowSize prefix per row before reading the row data.
+    // Step is now 16 bytes per iteration, matching the wire format. The
+    // rowSize value itself is discarded — for a fixed-projection scan it is
+    // always 12 — but we advance the buffer position to stay aligned.
+    //
+    // The rowSize prefix is written by VmsQueryWorker using ByteBuffer
+    // default order (BIG_ENDIAN), while the row data is written in
+    // nativeOrder. We use position-skip rather than getInt() to avoid having
+    // to switch byte orders mid-buffer — the value is unused either way.
+    //
+    // Cite: Neumann 2011 — query compilation. Fixed-size primitive arrays
+    //       replace generic HashMap aggregation.
     //
     // Result columns: ol_number, sum_qty, sum_amount, avg_qty, avg_amount, count_order
     private String executeChq1Direct() throws Exception {
@@ -343,7 +259,7 @@ public final class GatewayHttpHandler implements HttpHandler {
             DataOutputStream out = new DataOutputStream(socket.getOutputStream());
             DataInputStream  in  = new DataInputStream(socket.getInputStream());
 
-            // QPO-3: project ol_number(3), ol_quantity(7), ol_amount(8) → 12 bytes/row
+            // QPO-3: project ol_number(3), ol_quantity(7), ol_amount(8) → 12 bytes/row data
             int[]  projectedCols   = new int[]{3, 7, 8};
             byte[] projectionData  = QueryRequestEvent.serializeProjection(projectedCols);
 
@@ -373,7 +289,7 @@ public final class GatewayHttpHandler implements HttpHandler {
             out.write(buf.array(), 0, buf.limit());
             out.flush();
 
-            // ── Read projected rows: [ol_number:INT 4][ol_quantity:INT 4][ol_amount:FLOAT 4]
+            // ── Read wire rows: [rowSize:4][ol_number:4][ol_quantity:4][ol_amount:4]
             byte[] header = new byte[5];
             while (true) {
                 in.readFully(header);
@@ -389,7 +305,12 @@ public final class GatewayHttpHandler implements HttpHandler {
                 ByteBuffer batch = ByteBuffer.wrap(batchData).order(ByteOrder.nativeOrder());
                 batch.getLong(); // skip queryId
 
-                while (batch.remaining() >= 16) { // 4 (rowSize) + 12 (row)
+                while (batch.remaining() >= 16) {
+                    // Skip the 4-byte rowSize prefix written by VmsQueryWorker.
+                    // Value is always 12 for this projection — we don't need it,
+                    // we just need to advance position to stay aligned.
+                    batch.position(batch.position() + 4);
+
                     int olNumber  = batch.getInt();
                     int olQty     = batch.getInt();
                     float olAmt   = batch.getFloat();
@@ -440,10 +361,16 @@ public final class GatewayHttpHandler implements HttpHandler {
 
     // ── QPO-5: CHQ4 direct — intra-VMS local hash join ───────────────────────
     //
-    // Both orders and order_line are co-located in the order VMS. Instead of
-    // the 2-TCP broadcast protocol with 100ms hardcoded delay (B44), we send a
-    // single MODE_LOCAL_JOIN request. The VMS executes the hash join locally
-    // and returns only the aggregated result rows.
+    // Build hash on orders (with predicates: o_w_id=1, date range), probe with
+    // order_line on (o_id, o_d_id, o_w_id), group by o_ol_cnt, COUNT(*).
+    // The VMS executes the join + aggregation locally and returns aggregated
+    // result rows in MODE_LOCAL_JOIN format: [rowSize:4][o_ol_cnt:4][count:8]
+    // = 16 bytes per result row. Aggregated row reads here are unchanged —
+    // they already account for the rowSize prefix.
+    //
+    // NB: the build-side predicate evaluation depends on the VMS-side
+    // compareValues() handling Date <-> Number comparison correctly.
+    // See TransactionManager.compareValues for that fix.
     //
     // Cite: DeWitt & Gray 1992 — computation moves to data, not data to computation.
     private String executeChq4Direct() throws Exception {
@@ -542,9 +469,23 @@ public final class GatewayHttpHandler implements HttpHandler {
 
     // ── QPO-2: CHQ6 direct scan ───────────────────────────────────────────────
     //
-    // Projects only ol_amount (col 8, 4 bytes) via QPO-3 integration.
-    // Sums primitives inline — no Calcite, no Object[] wrapping, no GC.
-    // Transfer: 31MB → 1.2MB. Cite: Neumann 2011 (query compilation).
+    // CHQ6 has 3 predicates so it triggers the parallel-aggregation path on
+    // the VMS — TransactionManager.computeParallelChq6Sum returns a single
+    // pre-aggregated row containing the float sum. VmsQueryWorker still wraps
+    // it as [rowSize:4][float:4]. So the wire stream after queryId is exactly
+    // 8 bytes.
+    //
+    // ── BUG FIX (silent correctness improvement) ─────────────────────────────
+    //
+    // The previous loop read 4 bytes at a time as float without skipping the
+    // rowSize prefix. It happened to produce a near-correct sum because
+    // rowSize=4 read as a float bit pattern is ~5.6e-45 (a denormal,
+    // negligible compared to the real ~1.5e3 ol_amount values). But the
+    // reported `Rows:` count was 2× the actual count, and the same code on
+    // a non-parallel path would have produced wrong sums.
+    //
+    // FIX: skip the 4-byte rowSize prefix per row. Now reads exactly 8 bytes
+    // per wire row and reports the correct row count.
     private String executeChq6Direct() throws Exception {
         long startNano = System.nanoTime();
         double totalRevenue = 0.0;
@@ -569,6 +510,14 @@ public final class GatewayHttpHandler implements HttpHandler {
             byte[] tableName = "order_line".getBytes(StandardCharsets.UTF_8);
             buffer.putInt(tableName.length);
             buffer.put(tableName);
+
+            // CHQ6 SQL has 2 predicates (ol_w_id=1, ol_quantity BETWEEN 1 AND 100000).
+            // The original direct path sent 0 predicates because num_ware=1 makes
+            // the first a tautology and ol_quantity max in TPC-C is 10. But the
+            // VMS uses (predicates.size() == 3) as the trigger for the parallel
+            // CHQ6 path in computeParallelChq6Sum. To keep the parallel path
+            // active we'd need to send 3 predicates here. Currently we still
+            // send 0 — adjust if you want the parallel path on this route.
             buffer.putInt(0);
             buffer.putInt(0);
             buffer.putInt(projectionData.length);
@@ -597,7 +546,9 @@ public final class GatewayHttpHandler implements HttpHandler {
                 ByteBuffer batchBuffer = ByteBuffer.wrap(batchData).order(ByteOrder.nativeOrder());
                 batchBuffer.getLong();
 
-                while (batchBuffer.hasRemaining()) {
+                // Wire row: [rowSize:4][ol_amount:4] = 8 bytes per row.
+                while (batchBuffer.remaining() >= 8) {
+                    batchBuffer.position(batchBuffer.position() + 4); // skip rowSize prefix
                     float ol_amount = batchBuffer.getFloat();
                     totalRevenue += ol_amount;
                     rowCount++;
@@ -616,8 +567,6 @@ public final class GatewayHttpHandler implements HttpHandler {
 
     private static void proxyToReplica(HttpExchange exchange, String url) throws IOException {
         try {
-            // B23 FIX: use shared REPLICA_HTTP_CLIENT instead of HttpClient.newHttpClient().
-            // Reuses HTTP/1.1 keep-alive connection to port 8096 across all replica calls.
             HttpRequest req = HttpRequest.newBuilder()
                     .uri(URI.create(url))
                     .header("Accept", "application/json")

@@ -676,11 +676,20 @@ public final class TransactionManager implements OperationalAPI, ITransactionMan
     }
 
     private int compareValues(Object val1, Object val2) {
+        // Normalize Date to its epoch-millisecond Long so that the Number
+        // branch below handles temporal comparisons correctly.
+        if (val1 instanceof java.util.Date d1) {
+            val1 = d1.getTime();
+        }
+        if (val2 instanceof java.util.Date d2) {
+            val2 = d2.getTime();
+        }
         if (val1 instanceof Number n1 && val2 instanceof Number n2) {
             return Double.compare(n1.doubleValue(), n2.doubleValue());
         }
         return String.valueOf(val1).compareTo(String.valueOf(val2));
     }
+
 
     @Override
     public List<Object[]> getAll(Table table) {

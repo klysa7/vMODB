@@ -108,7 +108,7 @@ public final class WorkloadUtils {
             final Map<String, Iterator<Object>> workerInput = input.get(i);
             int finalI = i;
             Thread thread = new Thread(()-> submittedArray[finalI] =
-                            Worker.run(allThreadsStart, allThreadsAreDone, txRatio, workerInput, func, runtime));
+                    Worker.run(allThreadsStart, allThreadsAreDone, txRatio, workerInput, func, runtime));
             thread.start();
         }
 
@@ -159,12 +159,38 @@ public final class WorkloadUtils {
                 }
 
                 try {
-                    if(!input.get(tx).hasNext()){
+                    // ─────────────────────────────────────────────────────────
+                    // DEFENSIVE GUARDS — surface configuration errors as clear
+                    // exceptions instead of NullPointerExceptions.
+                    //
+                    // Without these, two distinct misconfigurations produce
+                    // confusing NPEs at this exact line:
+                    //   1. txRatio thresholds aren't cumulative → ratio falls
+                    //      through every entry, tx stays null.
+                    //   2. txRatioMap and txRatio disagree → tx is set to a
+                    //      type that has no corresponding entry in `input`.
+                    // ─────────────────────────────────────────────────────────
+                    if (tx == null) {
+                        throw new IllegalStateException(
+                                "Transaction ratio did not cover roll value " + ratio
+                                        + " — txRatio thresholds are misconfigured. They must be "
+                                        + "CUMULATIVE (e.g. [(50,'new_order'),(100,'payment')]) "
+                                        + "rather than raw percentages.");
+                    }
+                    Iterator<Object> it = input.get(tx);
+                    if (it == null) {
+                        throw new IllegalStateException(
+                                "No workload input loaded for transaction type '" + tx
+                                        + "'. Run option 3 (Create workload) with this type "
+                                        + "included in numTxInputPerType, or remove it from "
+                                        + "the transaction ratio in app.properties.");
+                    }
+                    if (!it.hasNext()) {
                         LOGGER.log(WARNING,"Not enough transaction inputs for: "+tx+". Closing submission loop earlier...");
                         Thread.sleep(runTime - (System.currentTimeMillis() - initTs));
                         break;
                     }
-                    long batchId = func.apply(input.get(tx).next());
+                    long batchId = func.apply(it.next());
                     if(!startTsMap.containsKey(batchId)){
                         startTsMap.put(batchId, new ArrayList<>());
                     }
@@ -347,7 +373,7 @@ public final class WorkloadUtils {
         long endTs = System.currentTimeMillis();
         LOGGER.log(INFO, "Transaction generation finished in "+(endTs-initTs)+" ms");
     }
-    
+
     public static void deleteWorkloadInputFiles(){
         String basePathStr = StorageUtils.getBasePath("proxy");
         Path basePath = Paths.get(basePathStr);

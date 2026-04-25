@@ -182,10 +182,10 @@ public final class ExperimentUtils {
 
     private static Function<Object, Long> tpccInputBuilder(final Coordinator coordinator) {
         return input -> {
-//            if (SLEEP_MODE) {
-//                try { Thread.sleep(1000); }
-//                catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-//            }
+            if (SLEEP_MODE) {
+                try { Thread.sleep(1000); }
+                catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            }
 
             TransactionInput.Event eventPayload;
             String txIdentifier;

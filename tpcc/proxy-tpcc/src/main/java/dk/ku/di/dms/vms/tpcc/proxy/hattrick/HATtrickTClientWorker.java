@@ -18,51 +18,74 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * inputs indefinitely, so we need equivalent flow control.
  *
  * Flow control uses coordinator.getNumTIDsSubmitted() -
- * coordinator.getNumTIDsCommitted() — the same values already exposed in
- * Main.java for the cleanup check. When in-flight > MAX_IN_FLIGHT,
+ * coordinator.getNumTIDsCommitted(). When in-flight > maxInFlight,
  * Thread.yield() gives the coordinator thread CPU time to drain a batch.
  * No sleep on the hot path.
  *
- * MAX_IN_FLIGHT = num_max_transactions_batch (10000) — matching the
- * coordinator's own batch cap so we never queue more than one extra batch
- * ahead of what the coordinator is currently processing.
+ * BACKPRESSURE BUDGET (maxInFlight)
+ *   The runner passes a tau-scaled budget — MAX_IN_FLIGHT_PER_CLIENT × τ —
+ *   so each worker has the same effective per-client share regardless of how
+ *   many T-clients are running. Without this scaling, two τ=2 clients would
+ *   thrash against a single 5000-slot counter (one wins every race, the
+ *   other yields almost continuously).
  */
 public final class HATtrickTClientWorker implements Runnable {
 
     private static final System.Logger LOG =
             System.getLogger(HATtrickTClientWorker.class.getName());
 
-    private static final int MAX_IN_FLIGHT = 5_000;
+    /** Default budget if the legacy 4-arg constructor is used. */
+    private static final int DEFAULT_MAX_IN_FLIGHT = 5_000;
+
     private final int           clientId;
     private final Coordinator   coordinator;
     private final AtomicBoolean running;
     private final int           numWarehouses;
+    private final int           maxInFlight;
 
     private long submitted = 0L;
     private long lastPrintAt = 0;
 
+    /**
+     * Primary constructor used by HATtrickRunner and HATtrickMain.
+     *
+     * @param maxInFlight tau-scaled global backpressure budget
+     */
     public HATtrickTClientWorker(int clientId,
                                  Coordinator coordinator,
                                  AtomicBoolean running,
-                                 int numWarehouses) {
+                                 int numWarehouses,
+                                 int maxInFlight) {
         this.clientId      = clientId;
         this.coordinator   = coordinator;
         this.running       = running;
         this.numWarehouses = numWarehouses;
+        this.maxInFlight   = maxInFlight;
+    }
+
+    /**
+     * Backwards-compatible 4-arg constructor.
+     * Falls back to DEFAULT_MAX_IN_FLIGHT if no budget is specified.
+     */
+    public HATtrickTClientWorker(int clientId,
+                                 Coordinator coordinator,
+                                 AtomicBoolean running,
+                                 int numWarehouses) {
+        this(clientId, coordinator, running, numWarehouses, DEFAULT_MAX_IN_FLIGHT);
     }
 
     @Override
     public void run() {
-        LOG.log(System.Logger.Level.INFO, "T-client {0} started", clientId);
+        LOG.log(System.Logger.Level.INFO,
+                "T-client {0} started (maxInFlight={1})",
+                clientId, maxInFlight);
 
         while (running.get() && !Thread.currentThread().isInterrupted()) {
             try {
                 // Backpressure: yield (no sleep) when coordinator queue is full.
-                // Mirrors the natural flow control in TPC-C where the client
-                // runs out of pre-generated inputs between batches.
                 long inFlight = coordinator.getNumTIDsSubmitted()
                         - coordinator.getNumTIDsCommitted();
-                if (inFlight > MAX_IN_FLIGHT) {
+                if (inFlight > maxInFlight) {
                     Thread.yield();
                     continue;
                 }
