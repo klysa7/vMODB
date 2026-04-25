@@ -1,29 +1,42 @@
 package dk.ku.di.dms.vms.tpcc.replica.repositories;
 
-import dk.ku.di.dms.vms.modb.api.annotations.Query;
 import dk.ku.di.dms.vms.modb.api.annotations.Repository;
 import dk.ku.di.dms.vms.modb.api.interfaces.IRepository;
 import dk.ku.di.dms.vms.tpcc.replica.entities.OrderLineReplica;
 
-import java.util.List;
-
 /**
- * Mirrors the Seller pattern exactly:
- *   Seller:  @Query("select * from order_entries where seller_id = :sellerId")
- *   Replica: @Query("select * from order_line")
+ * Replica order_line repository — uses only the base IRepository methods.
  *
- * The HTTP handler calls beginTransaction(lastTid, 0, lastTid, true) before
- * invoking the query, giving the same MVCC snapshot guarantee as the live
- * order VMS's chq6 scan.
+ * No @Query annotations. The two we need are inherited:
  *
- * We use select * + aggregate in Java instead of SELECT SUM(ol_amount)
- * because vMODB's aggregate queries crash on composite PK tables with
- * "Index 7 out of bounds for length 4".
+ *   List<OrderLineReplica> getAll()              — scan-all, MVCC-aware
+ *   void insertAll(List<OrderLineReplica>)       — bulk insert (used by populate)
+ *
+ * Why no @Query for our scans:
+ *   The order_line composite PK is (ol_o_id, ol_d_id, ol_w_id, ol_number).
+ *   vMODB's @Query planner only handles WHERE clauses that are a PK-prefix
+ *   lookup or a single equality on the leading PK column. Anything else —
+ *   filtering on a non-leading PK column like ol_w_id alone, on a non-PK
+ *   column like ol_quantity, or no WHERE at all — fails at metadata-load
+ *   time with
+ *
+ *     "Error on processing the query annotation: Index 7 out of bounds
+ *      for length 4"
+ *
+ *   (the runtime form of which is "arraycopy: source index -1 out of
+ *   bounds for int[0]"). It's a known framework limitation.
+ *
+ *   The Seller marketplace's @Query("select * from order_entries where
+ *   seller_id = :sellerId") works because seller_id IS the leading PK of
+ *   order_entries — a clean PK-prefix lookup. There is no analogous
+ *   single-column equality on order_line that returns the whole table.
+ *
+ * IRepository.getAll() bypasses @Query entirely, so the planner never
+ * runs. TransactionManager.getAll(Table) walks the primary key index
+ * under the current transaction context — exactly the MVCC scan
+ * semantics we want, identical in spirit to the seller pattern.
  */
 @Repository
 public interface IOrderLineReplicaRepository
         extends IRepository<OrderLineReplica.OrderLineReplicaId, OrderLineReplica> {
-
-    @Query("select * from order_line where ol_quantity >= 1 and ol_quantity <= 100000")
-    List<OrderLineReplica> getOrderLinesForChq6();
 }

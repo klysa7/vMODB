@@ -61,23 +61,25 @@ public final class Main {
     /**
      * OLAP HTTP server on port 8096.
      *
-     * /chq6 mirrors the Seller VMS pattern exactly:
+     * Pattern: same as the marketplace Seller VMS — open a read-only MVCC
+     * snapshot, scan via repository (no AtomicLong counters), aggregate in
+     * Java. Differences vs the original AtomicLong design:
      *
-     *   Seller (marketplace):
-     *     long lastTid = VMS.lastTidFinished();
-     *     transactionManager.beginTransaction(lastTid, 0, lastTid, true);
-     *     List<OrderEntry> rows = repo.getOrderEntriesBySellerId(id);
-     *     // aggregate in Java
+     *   AtomicLong design        Repository scan design (this file)
+     *   ─────────────────        ──────────────────────────────────
+     *   constant-time query      O(N) scan over order_line
+     *   not snapshot-isolated    snapshot at lastTidFinished()
+     *   incremental updates      no per-write hot path
+     *   ad-hoc to one query      generalizable to any aggregate
      *
-     *   Replica (tpcc):
-     *     long lastTid = VMS.lastTidFinished();
-     *     txManager.beginTransaction(lastTid, 0, lastTid, true);
-     *     List<OrderLineReplica> rows = repo.getOrderLinesForChq6();
-     *     float revenue = sum(rows.ol_amount)  // aggregate in Java
+     * The scan goes through IRepository.getAll() — which calls
+     * TransactionManager.getAll(Table) — bypassing the @Query planner that
+     * crashes on composite-PK tables. Predicates (ol_w_id = 1, ol_quantity
+     * range) are tautologies for num_ware=1 and applied defensively in the
+     * Java aggregation loop.
      *
-     * beginTransaction(..., readOnly=true) opens an MVCC snapshot at the
-     * last committed TID. The scan sees a consistent point-in-time view
-     * of order_line with no interference from concurrent OLTP writes.
+     * Response envelopes match /olap/chq6 and /olap/chq1 exactly so
+     * gateway-level diff against the live paths is byte-comparable.
      */
     private static void startOlapHttpServer(ITransactionManager txManager,
                                             IOrderLineReplicaRepository repo) {
@@ -85,20 +87,113 @@ public final class Main {
             HttpServer httpServer = HttpServer.create(
                     new InetSocketAddress("0.0.0.0", REPLICA_HTTP_PORT), 0);
 
+            // ── /chq6 ────────────────────────────────────────────────────
+            //
+            // SUM(ol_amount) WHERE ol_quantity BETWEEN 1 AND 100000.
+            // Predicate is a tautology in standard TPC-C (max ol_quantity
+            // is 10) but applied defensively post-scan.
             httpServer.createContext("/chq6", exchange -> {
                 try {
+                    long startNano = System.nanoTime();
                     long lastTid = VMS == null ? 1L : VMS.lastTidFinished();
                     txManager.beginTransaction(lastTid, 0, lastTid, true);
-                    List<OrderLineReplica> rows = repo.getOrderLinesForChq6();
-                    float revenue = 0f;
-                    for (OrderLineReplica r : rows) revenue += r.ol_amount;
-                    sendHttp(exchange, 200, "{\"revenue\":" + revenue + "}");
+
+                    List<OrderLineReplica> rows = repo.getAll();
+                    double revenue = 0.0;
+                    long kept = 0;
+                    for (OrderLineReplica r : rows) {
+                        if (r.ol_quantity >= 1 && r.ol_quantity <= 100_000) {
+                            revenue += r.ol_amount;
+                            kept++;
+                        }
+                    }
+
+                    double latencyMs = (System.nanoTime() - startNano) / 1_000_000.0;
+                    LOGGER.log(System.Logger.Level.INFO,
+                            String.format(">>> [REPLICA CHQ6] Scanned: %d | Kept: %d | Revenue: %.4f | Latency: %.2f ms",
+                                    rows.size(), kept, revenue, latencyMs));
+
+                    String body = "{\"resultColumns\":[\"revenue\"]," +
+                            "\"resultRowCount\":1," +
+                            "\"result\":[{\"revenue\":" + revenue + "}]}";
+                    sendHttp(exchange, 200, body);
                 } catch (Exception e) {
                     LOGGER.log(System.Logger.Level.WARNING, "chq6 error: " + e.getMessage());
                     sendHttp(exchange, 500, "{\"error\":\"" + e.getMessage() + "\"}");
                 }
             });
 
+            // ── /chq1 ────────────────────────────────────────────────────
+            //
+            // GROUP BY ol_number WHERE ol_w_id = 1, aggregating
+            // qty / amount / count. Same MVCC pattern; same primitive-array
+            // accumulation as /direct/chq1 (ol_number ∈ [1..15], indexed
+            // directly into long[16] / double[16] — no HashMap).
+            //
+            // ol_w_id = 1 is a tautology for num_ware = 1 but applied
+            // defensively post-scan.
+            httpServer.createContext("/chq1", exchange -> {
+                try {
+                    long startNano = System.nanoTime();
+                    long lastTid = VMS == null ? 1L : VMS.lastTidFinished();
+                    txManager.beginTransaction(lastTid, 0, lastTid, true);
+
+                    List<OrderLineReplica> rows = repo.getAll();
+
+                    long[]   sumQty    = new long[16];
+                    double[] sumAmount = new double[16];
+                    long[]   count     = new long[16];
+                    long kept = 0;
+
+                    for (OrderLineReplica r : rows) {
+                        if (r.ol_w_id != 1) continue;
+                        int n = r.ol_number;
+                        if (n >= 1 && n <= 15) {
+                            sumQty[n]    += r.ol_quantity;
+                            sumAmount[n] += r.ol_amount;
+                            count[n]++;
+                            kept++;
+                        }
+                    }
+
+                    double latencyMs = (System.nanoTime() - startNano) / 1_000_000.0;
+                    LOGGER.log(System.Logger.Level.INFO,
+                            String.format(">>> [REPLICA CHQ1] Scanned: %d | Kept: %d | Latency: %.2f ms",
+                                    rows.size(), kept, latencyMs));
+
+                    int groupCount = 0;
+                    for (int i = 1; i <= 15; i++) if (count[i] > 0) groupCount++;
+
+                    StringBuilder sb = new StringBuilder();
+                    sb.append("{\"resultColumns\":[\"ol_number\",\"sum_qty\",\"sum_amount\",")
+                            .append("\"avg_qty\",\"avg_amount\",\"count_order\"],")
+                            .append("\"resultRowCount\":").append(groupCount)
+                            .append(",\"result\":[");
+                    boolean first = true;
+                    for (int i = 1; i <= 15; i++) {
+                        if (count[i] == 0) continue;
+                        if (!first) sb.append(",");
+                        double avgQty    = (double) sumQty[i] / count[i];
+                        double avgAmount = sumAmount[i] / count[i];
+                        sb.append("{")
+                                .append("\"ol_number\":").append(i).append(",")
+                                .append("\"sum_qty\":").append(sumQty[i]).append(",")
+                                .append("\"sum_amount\":").append(sumAmount[i]).append(",")
+                                .append("\"avg_qty\":").append(avgQty).append(",")
+                                .append("\"avg_amount\":").append(avgAmount).append(",")
+                                .append("\"count_order\":").append(count[i])
+                                .append("}");
+                        first = false;
+                    }
+                    sb.append("]}");
+                    sendHttp(exchange, 200, sb.toString());
+                } catch (Exception e) {
+                    LOGGER.log(System.Logger.Level.WARNING, "chq1 error: " + e.getMessage());
+                    sendHttp(exchange, 500, "{\"error\":\"" + e.getMessage() + "\"}");
+                }
+            });
+
+            // ── /status ──────────────────────────────────────────────────
             httpServer.createContext("/status", exchange -> {
                 long lastTid = VMS == null ? 0 : VMS.lastTidFinished();
                 sendHttp(exchange, 200,
@@ -110,7 +205,8 @@ public final class Main {
             httpServer.setExecutor(Executors.newFixedThreadPool(4));
             httpServer.start();
             LOGGER.log(System.Logger.Level.INFO,
-                    "Replica OLAP HTTP server started on port " + REPLICA_HTTP_PORT);
+                    "Replica OLAP HTTP server started on port " + REPLICA_HTTP_PORT
+                            + " (endpoints: /chq6, /chq1, /status)");
 
         } catch (IOException e) {
             throw new RuntimeException("Failed to start replica OLAP HTTP server", e);
