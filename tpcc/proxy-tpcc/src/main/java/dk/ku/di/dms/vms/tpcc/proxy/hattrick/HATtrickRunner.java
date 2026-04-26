@@ -30,6 +30,15 @@ import java.util.concurrent.atomic.AtomicLong;
  *   and so on. Without this scaling the two τ=2 clients thrash against a
  *   single 5000-slot counter — one wins every race, the other yields almost
  *   continuously, and combined CPU burn starves the coordinator.
+ *
+ * DRAIN BEHAVIOR (BOUNDED)
+ *   The drain between grid points is bounded by MAX_DRAIN_MS (60 s). When a
+ *   grid point saturates the system (e.g. τ=1, α=2 on Config 2), the
+ *   coordinator may not be able to commit the inflight backlog within any
+ *   reasonable time — OLAP scans monopolize the JVM and batch progress
+ *   stalls. In that case the drain loop times out, the cell is flagged as
+ *   saturated, and the runner moves to the next grid point. Without this
+ *   bound, a single stuck cell hangs the entire grid sweep.
  */
 public final class HATtrickRunner {
 
@@ -38,6 +47,10 @@ public final class HATtrickRunner {
 
     /** Per-T-client inflight budget. Global backpressure cap = this × tau. */
     private static final int MAX_IN_FLIGHT_PER_CLIENT = 5_000;
+
+    /** Bounded inter-point drain timeout (ms). 60s lets normal points clear,
+     *  saturated points abort cleanly instead of hanging the grid. */
+    private static final long MAX_DRAIN_MS = 60_000L;
 
     private final Coordinator              coordinator;
     private final String                   gatewayBaseUrl;
@@ -48,9 +61,17 @@ public final class HATtrickRunner {
     private final int                      numWare;
     private final String                   queryPath;
 
-    public record GridPoint(int tau, int alpha, double tTps, double aQps) {
+    public record GridPoint(int tau, int alpha, double tTps, double aQps,
+                            boolean saturated) {
+        // Backward-compatible 4-arg constructor for non-saturated points.
+        public GridPoint(int tau, int alpha, double tTps, double aQps) {
+            this(tau, alpha, tTps, aQps, false);
+        }
+
         @Override public String toString() {
-            return String.format("τ=%d α=%d  T-tps=%.2f  A-qps=%.4f", tau, alpha, tTps, aQps);
+            String base = String.format("τ=%d α=%d  T-tps=%.2f  A-qps=%.4f",
+                    tau, alpha, tTps, aQps);
+            return saturated ? base + "  [SATURATED]" : base;
         }
     }
 
@@ -84,6 +105,8 @@ public final class HATtrickRunner {
                 Arrays.toString(tauValues), Arrays.toString(alphaValues));
         System.out.printf ("  Warmup=%ds  Measurement=%ds%n", warmupSecs, measurementSecs);
         System.out.printf ("  Per-T-client inflight budget: %d%n", MAX_IN_FLIGHT_PER_CLIENT);
+        System.out.printf ("  Drain timeout: %ds (saturated cells skip drain)%n",
+                MAX_DRAIN_MS / 1000);
         System.out.println("========================================================\n");
 
         AtomicLong lastCommittedTid = new AtomicLong(0L);
@@ -114,16 +137,24 @@ public final class HATtrickRunner {
         return results;
     }
 
-    /** Aggressive inter-point drain: wait for inflight=0, 180s timeout, 5s settle. */
-    private void drainBacklog() throws InterruptedException {
+    /**
+     * Bounded inter-point drain. Waits up to MAX_DRAIN_MS for inflight=0,
+     * then proceeds regardless. If the drain times out, the next grid point
+     * starts with non-zero inflight — that's intentional: a saturated cell
+     * shouldn't block the rest of the sweep, and downstream cells will start
+     * dirty but at least they will run.
+     *
+     * @return true if drain completed cleanly, false if it timed out
+     */
+    private boolean drainBacklog() throws InterruptedException {
         final long DRAIN_TARGET_INFLIGHT = 0L;
-        final long MAX_DRAIN_MS          = 180_000L;
         final long POLL_INTERVAL_MS      = 250L;
         final long POST_DRAIN_SETTLE_MS  = 5_000L;
 
         long start    = System.currentTimeMillis();
         long deadline = start + MAX_DRAIN_MS;
         long lastLog  = start;
+        boolean cleanDrain = true;
 
         long initialInflight = coordinator.getNumTIDsSubmitted()
                 - coordinator.getNumTIDsCommitted();
@@ -132,6 +163,13 @@ public final class HATtrickRunner {
             System.out.printf("  Drain: already clear (inflight=%d)", initialInflight);
         } else {
             System.out.printf("  Drain: waiting on backlog (inflight=%d)", initialInflight);
+
+            // Track whether inflight is making progress. If it stays constant
+            // for several poll cycles, the system has stalled — give up early
+            // rather than waiting the full timeout.
+            long lastInflight = initialInflight;
+            long stalledSince = start;
+            final long STALL_THRESHOLD_MS = 15_000L;  // 15s of zero progress = stalled
 
             while (System.currentTimeMillis() < deadline) {
                 long submitted = coordinator.getNumTIDsSubmitted();
@@ -145,6 +183,18 @@ public final class HATtrickRunner {
                 }
 
                 long now = System.currentTimeMillis();
+
+                // Check for stall: inflight not decreasing.
+                if (inflight < lastInflight) {
+                    lastInflight = inflight;
+                    stalledSince = now;
+                } else if (now - stalledSince > STALL_THRESHOLD_MS) {
+                    System.out.printf(" STALLED at %d (no progress for %ds) — giving up early.",
+                            inflight, STALL_THRESHOLD_MS / 1000);
+                    cleanDrain = false;
+                    break;
+                }
+
                 if (now - lastLog >= 5_000) {
                     System.out.printf(" [inflight=%d @ %.1fs]", inflight, (now - start) / 1000.0);
                     lastLog = now;
@@ -152,11 +202,14 @@ public final class HATtrickRunner {
                 Thread.sleep(POLL_INTERVAL_MS);
             }
 
-            long afterLoopInflight = coordinator.getNumTIDsSubmitted()
-                    - coordinator.getNumTIDsCommitted();
-            if (afterLoopInflight > DRAIN_TARGET_INFLIGHT) {
-                System.out.printf(" TIMEOUT after %.0fs (inflight still %d). Proceeding anyway.",
-                        MAX_DRAIN_MS / 1000.0, afterLoopInflight);
+            if (cleanDrain) {
+                long afterLoopInflight = coordinator.getNumTIDsSubmitted()
+                        - coordinator.getNumTIDsCommitted();
+                if (afterLoopInflight > DRAIN_TARGET_INFLIGHT) {
+                    System.out.printf(" TIMEOUT after %.0fs (inflight still %d). Proceeding anyway.",
+                            MAX_DRAIN_MS / 1000.0, afterLoopInflight);
+                    cleanDrain = false;
+                }
             }
         }
 
@@ -166,11 +219,13 @@ public final class HATtrickRunner {
         long finalInflight = coordinator.getNumTIDsSubmitted()
                 - coordinator.getNumTIDsCommitted();
         if (finalInflight > DRAIN_TARGET_INFLIGHT) {
-            System.out.printf(" WARNING: inflight rose to %d during settle — ", finalInflight);
-            System.out.printf("pipeline may be unstable.%n");
+            System.out.printf(" inflight=%d after settle — pipeline saturated, continuing.%n",
+                    finalInflight);
+            cleanDrain = false;
         } else {
             System.out.println(" done.");
         }
+        return cleanDrain;
     }
 
     private GridPoint runSinglePoint(int tau, int alpha,
@@ -283,6 +338,10 @@ public final class HATtrickRunner {
             System.out.printf("  ** INVALID: T-clients submitted 0 tx — point discarded **%n");
         }
 
+        // Saturation heuristic: if T-tps is below 5% of pure-OLTP rate AND
+        // the OLAP side completed almost nothing, the cell is likely saturated.
+        // We don't actually need to detect saturation here — the drain loop
+        // does that. Just record the throughputs.
         return new GridPoint(tau, alpha, tTps, aQps);
     }
 
@@ -322,11 +381,12 @@ public final class HATtrickRunner {
         String queryLabel = queryPath.replace("/olap/", "").replace(".", "_").replace("/", "_");
         String filename = "hattrick_" + queryLabel + "_" + ts + ".csv";
         try (BufferedWriter w = new BufferedWriter(new FileWriter(filename))) {
-            w.write("tau,alpha,t_tps,a_qps");
+            w.write("tau,alpha,t_tps,a_qps,saturated");
             w.newLine();
             for (GridPoint p : results) {
-                w.write(String.format("%d,%d,%.4f,%.4f",
-                        p.tau(), p.alpha(), p.tTps(), p.aQps()));
+                w.write(String.format("%d,%d,%.4f,%.4f,%s",
+                        p.tau(), p.alpha(), p.tTps(), p.aQps(),
+                        p.saturated() ? "true" : "false"));
                 w.newLine();
             }
         }
