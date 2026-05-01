@@ -3,7 +3,6 @@ package dk.ku.di.dms.vms.calcite.client;
 import java.io.BufferedInputStream;
 import java.io.DataInputStream;
 import java.io.EOFException;
-import java.io.IOException;
 import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -11,11 +10,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
-import java.util.ArrayDeque;
-import java.util.Iterator;
-import java.util.List;
-import java.util.NoSuchElementException;
-import java.util.Queue;
+import java.util.*;
 
 import static java.lang.System.Logger.Level.ERROR;
 import static java.lang.System.Logger.Level.INFO;
@@ -28,40 +23,14 @@ public class VmsResultIterator implements Iterator<Object[]> {
     private static final byte QUERY_RESULT_TYPE  = 100;
     private static final byte END_OF_STREAM_TYPE = 101;
     private static final byte WORKER_ABORT_TYPE  = 102;
-
-    // B16 FIX: static final DateTimeFormatter — constructed once, thread-safe, reused forever.
-    // BEFORE: new SimpleDateFormat("yyyy-MM-dd HH:mm:ss") inside parseRowData() per row.
-    //   SimpleDateFormat is NOT thread-safe (JDK docs) and expensive to construct.
-    //   At 300K rows/scan with DATE columns: 300K unnecessary object allocations.
-    //   Under α=2: two concurrent threads risk thread-safety violation.
-    // AFTER: DateTimeFormatter is immutable and thread-safe by design.
-    //   Allocated once at class load, zero per-row allocation.
-    // Cite: Drepper 2007 "What Every Programmer Should Know About Memory".
     private static final DateTimeFormatter DATE_FORMATTER =
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
                     .withZone(ZoneOffset.UTC);
-
     private final Socket socket;
     private final DataInputStream dataInputStream;
     private final List<ColumnDescriptor> descriptors;
     private final String tableName;
-
-    // B14 FIX: ArrayDeque instead of LinkedList.
-    // BEFORE: LinkedList<Object[]> — each node is a separate heap object with
-    //   prev/next pointers scattered across different memory addresses.
-    //   poll() follows a pointer to a random memory location per row —
-    //   guaranteed cache miss on every call. 1000 rows = 1000 Node allocations
-    //   + 1000 cache misses per batch.
-    // AFTER:  ArrayDeque<Object[]> — backed by a circular contiguous array.
-    //   poll() reads the next array slot — CPU prefetcher loads ahead.
-    //   No Node wrappers, no pointer chasing, no scattered allocations.
-    //   Initial capacity 1024 matches StreamingScanOperator.BATCH_SIZE —
-    //   no array resize on first batch.
-    //   Queue<Object[]> interface identical — add/poll/isEmpty unchanged.
-    // Cite: Drepper 2007 "What Every Programmer Should Know About Memory"
-    //   — cache locality as primary determinant of data structure performance.
     private final Queue<Object[]> rowBuffer = new ArrayDeque<>(1024);
-
     private boolean isEos = false;
     private long recordsRead = 0;
 
@@ -151,9 +120,6 @@ public class VmsResultIterator implements Iterator<Object[]> {
                 case DOUBLE             -> buf.getDouble(offset);
                 case BOOLEAN, BOOL      -> buf.get(offset) != 0;
                 case DATE, TIMESTAMP    -> {
-                    // B16 FIX: static DATE_FORMATTER — zero per-row allocation.
-                    // BEFORE: new SimpleDateFormat(...).format(new Date(epoch))
-                    // AFTER:  DATE_FORMATTER.format(Instant.ofEpochMilli(epoch))
                     long epoch = buf.getLong(offset);
                     yield DATE_FORMATTER.format(Instant.ofEpochMilli(epoch));
                 }

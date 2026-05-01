@@ -35,7 +35,6 @@ public final class GatewayHttpHandler implements HttpHandler {
     private static final HttpClient REPLICA_HTTP_CLIENT = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
             .build();
-
     private final ConcurrentHashMap<String, CompletableFuture<String>> scanRegistry =
             new ConcurrentHashMap<>();
 
@@ -50,21 +49,17 @@ public final class GatewayHttpHandler implements HttpHandler {
         WHERE c.c_w_id = 1
         GROUP BY c.c_d_id
     """;
-
     static final String PATH_CHQ6        = "/olap/chq6";
     static final String PATH_CHQ6_DIRECT = "/direct/chq6";
     static final String PATH_CHQ3_DIRECT = "/direct/chq3";
-
     static final String SQL_CHQ6 = """
         SELECT SUM(ol.ol_amount) AS revenue
         FROM "order".order_line ol
         WHERE ol.ol_w_id = 1
           AND ol.ol_quantity BETWEEN 1 AND 100000
     """;
-
     static final String PATH_CHQ1        = "/olap/chq1";
     static final String PATH_CHQ1_DIRECT = "/direct/chq1";
-
     static final String SQL_CHQ1 = """
         SELECT ol.ol_number,
                SUM(ol.ol_quantity)  AS sum_qty,
@@ -76,10 +71,8 @@ public final class GatewayHttpHandler implements HttpHandler {
         WHERE ol.ol_w_id = 1
         GROUP BY ol.ol_number
     """;
-
     static final String PATH_CHQ4        = "/olap/chq4";
     static final String PATH_CHQ4_DIRECT = "/direct/chq4";
-
     static final String SQL_CHQ4 = """
         SELECT o.o_ol_cnt, COUNT(*) AS order_count
         FROM "order".orders o
@@ -92,7 +85,6 @@ public final class GatewayHttpHandler implements HttpHandler {
           AND o.o_entry_d <  '2030-01-01'
         GROUP BY o.o_ol_cnt
     """;
-
     static final String PATH_CHQ3 = "/olap/chq3";
     static final String SQL_CHQ3 = """
         SELECT ol.ol_o_id, ol.ol_w_id, ol.ol_d_id,
@@ -115,13 +107,10 @@ public final class GatewayHttpHandler implements HttpHandler {
           AND o.o_entry_d > '2007-01-02'
         GROUP BY ol.ol_o_id, ol.ol_w_id, ol.ol_d_id, o.o_entry_d
     """;
-
     static final String PATH_REPLICA_CHQ6 = "/olap/replica/chq6";
     static final String REPLICA_CHQ6_URL  = "http://localhost:8096/chq6";
-
     static final String PATH_REPLICA_CHQ1 = "/olap/replica/chq1";
     static final String REPLICA_CHQ1_URL  = "http://localhost:8096/chq1";
-
     private final OlapGatewayService service;
 
     public GatewayHttpHandler(OlapGatewayService service) {
@@ -224,43 +213,9 @@ public final class GatewayHttpHandler implements HttpHandler {
         }
     }
 
-    // ── QPO-6: CHQ1 direct scan ───────────────────────────────────────────────
-    //
-    // CHQ1 groups order_line rows by ol_number (TPC-C spec: always 1–15).
-    // Wire format from VmsQueryWorker for MODE_SCAN_TO_GATEWAY is per-row:
-    //   [rowSize:int 4 bytes][rowData:N bytes]
-    // For projection [3, 7, 8] → rowData is 12 bytes:
-    //   [ol_number:int 4][ol_quantity:int 4][ol_amount:float 4]
-    // Total wire size per row: 16 bytes.
-    //
-    // ── BUG FIX ──────────────────────────────────────────────────────────────
-    //
-    // The previous version skipped the rowSize prefix. With a 16-byte wire
-    // row but a 12-byte read, every iteration drifted by 4 bytes through the
-    // packed-column data, producing alternating valid and garbage ol_number
-    // values. The diagnostic counter showed:
-    //   bytesAfterQid: 4796928 = 299808 × 16 (rows VMS sent × wire size)
-    //   misaligned:    0       (every batch payload is multiple of 16)
-    //   badOlNumber:   199872  (about half the iterations reading garbage)
-    //
-    // FIX: read the 4-byte rowSize prefix per row before reading the row data.
-    // Step is now 16 bytes per iteration, matching the wire format. The
-    // rowSize value itself is discarded — for a fixed-projection scan it is
-    // always 12 — but we advance the buffer position to stay aligned.
-    //
-    // The rowSize prefix is written by VmsQueryWorker using ByteBuffer
-    // default order (BIG_ENDIAN), while the row data is written in
-    // nativeOrder. We use position-skip rather than getInt() to avoid having
-    // to switch byte orders mid-buffer — the value is unused either way.
-    //
-    // Cite: Neumann 2011 — query compilation. Fixed-size primitive arrays
-    //       replace generic HashMap aggregation.
-    //
-    // Result columns: ol_number, sum_qty, sum_amount, avg_qty, avg_amount, count_order
     private String executeChq1Direct() throws Exception {
         long startNano = System.nanoTime();
 
-        // ol_number is always 1–15 in TPC-C. Index directly — no HashMap needed.
         long[]   sumQty    = new long[16];
         double[] sumAmount = new double[16];
         long[]   count     = new long[16];
@@ -270,15 +225,14 @@ public final class GatewayHttpHandler implements HttpHandler {
             DataOutputStream out = new DataOutputStream(socket.getOutputStream());
             DataInputStream  in  = new DataInputStream(socket.getInputStream());
 
-            // QPO-3: project ol_number(3), ol_quantity(7), ol_amount(8) → 12 bytes/row data
             int[]  projectedCols   = new int[]{3, 7, 8};
             byte[] projectionData  = QueryRequestEvent.serializeProjection(projectedCols);
 
             ByteBuffer buf = ByteBuffer.allocate(512).order(ByteOrder.BIG_ENDIAN);
             int startPos = buf.position();
             buf.put(QueryRequestEvent.QUERY_REQUEST_TYPE);
-            buf.putInt(0); // length placeholder
-            buf.putLong(System.nanoTime()); // queryId
+            buf.putInt(0);
+            buf.putLong(System.nanoTime());
             buf.putLong(service.getCurrentSnapshotId());
             buf.put(QueryRequestEvent.MODE_SCAN_TO_GATEWAY);
 
@@ -286,9 +240,8 @@ public final class GatewayHttpHandler implements HttpHandler {
             buf.putInt(tableBytes.length);
             buf.put(tableBytes);
 
-            buf.putInt(0);                     // no predicates (ol_w_id=1 filter skipped —
-            // single warehouse, all rows qualify)
-            buf.putInt(0);                     // no routing data
+            buf.putInt(0);
+            buf.putInt(0);
             buf.putInt(projectionData.length);
             buf.put(projectionData);
 
@@ -300,7 +253,6 @@ public final class GatewayHttpHandler implements HttpHandler {
             out.write(buf.array(), 0, buf.limit());
             out.flush();
 
-            // ── Read wire rows: [rowSize:4][ol_number:4][ol_quantity:4][ol_amount:4]
             byte[] header = new byte[5];
             while (true) {
                 in.readFully(header);
@@ -314,12 +266,9 @@ public final class GatewayHttpHandler implements HttpHandler {
                 in.readFully(batchData);
 
                 ByteBuffer batch = ByteBuffer.wrap(batchData).order(ByteOrder.nativeOrder());
-                batch.getLong(); // skip queryId
+                batch.getLong();
 
                 while (batch.remaining() >= 16) {
-                    // Skip the 4-byte rowSize prefix written by VmsQueryWorker.
-                    // Value is always 12 for this projection — we don't need it,
-                    // we just need to advance position to stay aligned.
                     batch.position(batch.position() + 4);
 
                     int olNumber  = batch.getInt();
@@ -341,7 +290,6 @@ public final class GatewayHttpHandler implements HttpHandler {
         System.out.printf(">>> [CHQ1 DIRECT] Rows scanned: %d | Latency: %.2f ms%n",
                 totalRows, latencyMs);
 
-        // ── Build JSON — same columns as Calcite path ─────────────────────────
         StringBuilder sb = new StringBuilder();
         sb.append("{\"resultColumns\":[\"ol_number\",\"sum_qty\",\"sum_amount\",")
                 .append("\"avg_qty\",\"avg_amount\",\"count_order\"],");
@@ -370,20 +318,6 @@ public final class GatewayHttpHandler implements HttpHandler {
         return sb.toString();
     }
 
-    // ── QPO-5: CHQ4 direct — intra-VMS local hash join ───────────────────────
-    //
-    // Build hash on orders (with predicates: o_w_id=1, date range), probe with
-    // order_line on (o_id, o_d_id, o_w_id), group by o_ol_cnt, COUNT(*).
-    // The VMS executes the join + aggregation locally and returns aggregated
-    // result rows in MODE_LOCAL_JOIN format: [rowSize:4][o_ol_cnt:4][count:8]
-    // = 16 bytes per result row. Aggregated row reads here are unchanged —
-    // they already account for the rowSize prefix.
-    //
-    // NB: the build-side predicate evaluation depends on the VMS-side
-    // compareValues() handling Date <-> Number comparison correctly.
-    // See TransactionManager.compareValues for that fix.
-    //
-    // Cite: DeWitt & Gray 1992 — computation moves to data, not data to computation.
     private String executeChq4Direct() throws Exception {
         long snapshotId = service.getCurrentSnapshotId();
         long startNano  = System.nanoTime();
@@ -478,25 +412,6 @@ public final class GatewayHttpHandler implements HttpHandler {
         return sb.toString();
     }
 
-    // ── QPO-2: CHQ6 direct scan ───────────────────────────────────────────────
-    //
-    // CHQ6 has 3 predicates so it triggers the parallel-aggregation path on
-    // the VMS — TransactionManager.computeParallelChq6Sum returns a single
-    // pre-aggregated row containing the float sum. VmsQueryWorker still wraps
-    // it as [rowSize:4][float:4]. So the wire stream after queryId is exactly
-    // 8 bytes.
-    //
-    // ── BUG FIX (silent correctness improvement) ─────────────────────────────
-    //
-    // The previous loop read 4 bytes at a time as float without skipping the
-    // rowSize prefix. It happened to produce a near-correct sum because
-    // rowSize=4 read as a float bit pattern is ~5.6e-45 (a denormal,
-    // negligible compared to the real ~1.5e3 ol_amount values). But the
-    // reported `Rows:` count was 2× the actual count, and the same code on
-    // a non-parallel path would have produced wrong sums.
-    //
-    // FIX: skip the 4-byte rowSize prefix per row. Now reads exactly 8 bytes
-    // per wire row and reports the correct row count.
     private String executeChq6Direct() throws Exception {
         long startNano = System.nanoTime();
         double totalRevenue = 0.0;
@@ -522,13 +437,6 @@ public final class GatewayHttpHandler implements HttpHandler {
             buffer.putInt(tableName.length);
             buffer.put(tableName);
 
-            // CHQ6 SQL has 2 predicates (ol_w_id=1, ol_quantity BETWEEN 1 AND 100000).
-            // The original direct path sent 0 predicates because num_ware=1 makes
-            // the first a tautology and ol_quantity max in TPC-C is 10. But the
-            // VMS uses (predicates.size() == 3) as the trigger for the parallel
-            // CHQ6 path in computeParallelChq6Sum. To keep the parallel path
-            // active we'd need to send 3 predicates here. Currently we still
-            // send 0 — adjust if you want the parallel path on this route.
             buffer.putInt(0);
             buffer.putInt(0);
             buffer.putInt(projectionData.length);
@@ -557,7 +465,6 @@ public final class GatewayHttpHandler implements HttpHandler {
                 ByteBuffer batchBuffer = ByteBuffer.wrap(batchData).order(ByteOrder.nativeOrder());
                 batchBuffer.getLong();
 
-                // Wire row: [rowSize:4][ol_amount:4] = 8 bytes per row.
                 while (batchBuffer.remaining() >= 8) {
                     batchBuffer.position(batchBuffer.position() + 4); // skip rowSize prefix
                     float ol_amount = batchBuffer.getFloat();
@@ -574,34 +481,6 @@ public final class GatewayHttpHandler implements HttpHandler {
                 + "\"result\":[{\"revenue\":" + totalRevenue + "}]}";
     }
 
-    // ── QPO-7: CHQ3 direct — cross-VMS join with semi-join reduction ─────────
-    //
-    // CHQ3 joins customer (warehouse VMS) with orders, new_orders, and
-    // order_line (all order VMS). Three of the four tables are co-located
-    // and share the join key (o_id, d_id, w_id) — perfect candidates for a
-    // local 2-table join in the order VMS, with the customer dependency
-    // collapsed to a semi-join key set fetched from the warehouse VMS.
-    //
-    // Two-phase execution:
-    //   Phase A: Fetch (c_id, c_d_id, c_w_id) from warehouse VMS with
-    //            predicate c_w_id = 1. At num_ware=1 every customer matches;
-    //            at num_ware>1 this filters to a single warehouse, and the
-    //            resulting key set propagates to filter orders during build.
-    //   Phase B: Send LocalJoinSpec to order VMS with semi-join keys
-    //            attached. VMS does build (orders) → predicate filter →
-    //            semi-join filter → probe (order_line) → SUM(ol_amount)
-    //            GROUP BY (o_id, w_id, d_id, entry_d) locally. Returns
-    //            28-byte result rows.
-    //
-    // SIMPLIFICATION: at num_ware=1 with this codebase's eviction model,
-    // the new_orders join is also a tautology (every active order has a
-    // matching new_orders entry once eviction floor passes 3000). For
-    // multi-warehouse this would need additional work, but the semi-join
-    // pattern generalises naturally.
-    //
-    // Cite: Bernstein & Chiu 1981 "Using Semi-Joins to Solve Relational Queries"
-    //       Mackert & Lohman 1986 "R* Optimizer Validation"
-    //       DeWitt & Gray 1992 "Parallel Database Systems"
     private String executeChq3Direct() throws Exception {
         long snapshotId = service.getCurrentSnapshotId();
         long startNano  = System.nanoTime();
@@ -619,24 +498,15 @@ public final class GatewayHttpHandler implements HttpHandler {
         System.out.printf(">>> [CHQ3 DIRECT] Phase A: fetched %d customer keys in %.2f ms%n",
                 customerCount, phaseAMs);
 
-        // ── Phase B: build LocalJoinSpec and send to order VMS ───────────
         long epoch2007 = java.time.LocalDate.of(2007, 1, 2)
                 .atStartOfDay(java.time.ZoneOffset.UTC).toInstant().toEpochMilli();
 
-        // Build-side predicates on orders:
-        //   o_w_id (col 2) = 1
-        //   o_entry_d (col 4) > 2007-01-02
+
         String buildPredicatesJson = "[" +
                 "{\"columnReference\":{\"columnPosition\":2},\"expression\":\"EQUALS\",\"value\":1}," +
                 "{\"columnReference\":{\"columnPosition\":4},\"expression\":\"GREATER_THAN\",\"value\":" + epoch2007 + "}" +
                 "]";
 
-        // LocalJoinSpec for CHQ3:
-        //   buildJoinCols     = [0,1,2] = (o_id, o_d_id, o_w_id)
-        //   probeJoinCols     = [0,1,2] = (ol_o_id, ol_d_id, ol_w_id)
-        //   groupByCol        = 4 (o_entry_d) — informational; CHQ3 path
-        //                       groups by the join key itself, not this col
-        //   semiJoinBuildCols = [3,1,2] = (o_c_id, o_d_id, o_w_id)
         LocalJoinSpec spec = new LocalJoinSpec(
                 "orders",
                 new int[]{0, 1, 2},
@@ -657,7 +527,6 @@ public final class GatewayHttpHandler implements HttpHandler {
             byte[] tableBytes   = "order_line".getBytes(StandardCharsets.UTF_8);
             byte[] routingBytes = spec.toBytes();
 
-            // Customer keys at num_ware=1: ~30K * 12 = 360KB. Allocate with headroom.
             int reqBufSize = 1024 + tableBytes.length + routingBytes.length;
             ByteBuffer buf = ByteBuffer.allocate(reqBufSize).order(ByteOrder.BIG_ENDIAN);
             int startPos = buf.position();
@@ -668,10 +537,10 @@ public final class GatewayHttpHandler implements HttpHandler {
             buf.put(QueryRequestEvent.MODE_LOCAL_JOIN_CHQ3);
             buf.putInt(tableBytes.length);
             buf.put(tableBytes);
-            buf.putInt(0);                                  // no top-level predicates
+            buf.putInt(0);
             buf.putInt(routingBytes.length);
             buf.put(routingBytes);
-            buf.putInt(0);                                  // no projection
+            buf.putInt(0);
             int endPos = buf.position();
             buf.putInt(startPos + 1, endPos - startPos - 1 - Integer.BYTES);
             buf.position(endPos);
@@ -680,7 +549,6 @@ public final class GatewayHttpHandler implements HttpHandler {
             out.write(buf.array(), 0, buf.limit());
             out.flush();
 
-            // Per row on wire: [rowSize:4][o_id:4][w_id:4][d_id:4][entry_d:8][revenue:8] = 32 bytes
             byte[] header = new byte[5];
             while (true) {
                 in.readFully(header);
@@ -694,10 +562,10 @@ public final class GatewayHttpHandler implements HttpHandler {
                 in.readFully(batchData);
 
                 ByteBuffer batchBuf = ByteBuffer.wrap(batchData).order(ByteOrder.nativeOrder());
-                batchBuf.getLong(); // queryId
+                batchBuf.getLong();
 
                 while (batchBuf.remaining() >= 32) {
-                    batchBuf.getInt();                       // rowSize prefix (skip)
+                    batchBuf.getInt();
                     int    o_id     = batchBuf.getInt();
                     int    w_id     = batchBuf.getInt();
                     int    d_id     = batchBuf.getInt();
@@ -713,7 +581,6 @@ public final class GatewayHttpHandler implements HttpHandler {
         System.out.printf(">>> [CHQ3 DIRECT] Phase B: %d groups in %.2f ms | total: %.2f ms%n",
                 resultRows.size(), phaseBMs, totalMs);
 
-        // ── Build JSON ────────────────────────────────────────────────────
         StringBuilder sb = new StringBuilder();
         sb.append("{\"resultColumns\":[\"ol_o_id\",\"ol_w_id\",\"ol_d_id\",\"revenue\",\"o_entry_d\"],");
         sb.append("\"resultRowCount\":").append(resultRows.size()).append(",\"result\":[");
@@ -733,18 +600,6 @@ public final class GatewayHttpHandler implements HttpHandler {
         return sb.toString();
     }
 
-    // Helper for CHQ3: fetch (c_id, c_d_id, c_w_id) tuples from the warehouse
-    // VMS where c_w_id = 1.
-    //
-    // Sends a MODE_SCAN_TO_GATEWAY request to the warehouse VMS (port 8001)
-    // with projection [0,1,2] and predicate c_w_id=1. Reads 16-byte rows
-    // (4 rowSize + 12 data) into an int[3] list, then serialises the list as:
-    //   [nKeys:4][nCols:4][col0:4][col1:4][col2:4]...
-    //
-    // At num_ware=1 the predicate is a tautology — every customer matches —
-    // and the returned key set has ~30K entries.
-    // At num_ware>1 the predicate filters customers to a single warehouse
-    // and the key set has ~30K entries per warehouse.
     private byte[] fetchCustomerKeysFromWarehouse(long snapshotId) throws Exception {
         List<int[]> keys = new ArrayList<>();
 
@@ -773,7 +628,7 @@ public final class GatewayHttpHandler implements HttpHandler {
             buf.put(tableBytes);
             buf.putInt(predicatesBytes.length);
             buf.put(predicatesBytes);
-            buf.putInt(0);                                  // no routing data
+            buf.putInt(0);
             buf.putInt(projectionData.length);
             buf.put(projectionData);
             int endPos = buf.position();
@@ -797,11 +652,10 @@ public final class GatewayHttpHandler implements HttpHandler {
                 in.readFully(batchData);
 
                 ByteBuffer batchBuf = ByteBuffer.wrap(batchData).order(ByteOrder.nativeOrder());
-                batchBuf.getLong(); // queryId
+                batchBuf.getLong();
 
-                // Per row: [rowSize:4][c_id:4][c_d_id:4][c_w_id:4] = 16 bytes
                 while (batchBuf.remaining() >= 16) {
-                    batchBuf.getInt();                       // rowSize (skip)
+                    batchBuf.getInt();
                     int c_id   = batchBuf.getInt();
                     int c_d_id = batchBuf.getInt();
                     int c_w_id = batchBuf.getInt();
@@ -810,7 +664,6 @@ public final class GatewayHttpHandler implements HttpHandler {
             }
         }
 
-        // Serialise: [nKeys:4][nCols:4][col0:4][col1:4][col2:4]...
         int nKeys = keys.size();
         int nCols = 3;
         ByteBuffer out = ByteBuffer.allocate(8 + nKeys * nCols * 4)
@@ -823,7 +676,6 @@ public final class GatewayHttpHandler implements HttpHandler {
         return out.array();
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
 
     private static void proxyToReplica(HttpExchange exchange, String url) throws IOException {
         try {

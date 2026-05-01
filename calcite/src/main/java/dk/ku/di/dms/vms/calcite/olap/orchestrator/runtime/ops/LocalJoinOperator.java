@@ -9,12 +9,10 @@ public class LocalJoinOperator implements CoordinatorOperator {
     private final CoordinatorOperator right;
     private final int[] leftKeyIndices;
     private final int[] rightKeyIndices;
-
     private Map<JoinKey, List<Object[]>> buildTable;
     private List<Object[]> probeBatch;
     private int probeIndex = 0;
     private final List<Object[]> outputBuffer = new ArrayList<>();
-
     private long buildTimeMs = 0;
     private long probeStartTime = 0;
     private long totalLeftRows = 0;

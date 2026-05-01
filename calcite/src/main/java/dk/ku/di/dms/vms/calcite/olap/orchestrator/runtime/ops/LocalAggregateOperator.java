@@ -7,17 +7,7 @@ import java.util.*;
 
 import static java.lang.System.Logger.Level.INFO;
 
-/**
- * Coordinator-local aggregate operator.
- *
- * Reads all rows from its input (a join or scan pipeline), groups them
- * by the specified column indices, and applies the aggregate functions.
- *
- * Output row layout: [groupKey_0, ..., groupKey_n, agg_0, ..., agg_m]
- *
- * Aggregation is always blocking — all input rows must be consumed
- * before the first output row is produced.
- */
+
 public final class LocalAggregateOperator implements CoordinatorOperator {
 
     private static final System.Logger LOGGER = System.getLogger(LocalAggregateOperator.class.getName());
@@ -26,7 +16,6 @@ public final class LocalAggregateOperator implements CoordinatorOperator {
     private final int[] groupByIndices;
     private final List<AggregateDefinition.AggCallDef> aggCalls;
 
-    /** Populated once in open(), then drained batch-by-batch in nextBatch(). */
     private List<Object[]> results;
     private int resultIndex = 0;
 
@@ -44,22 +33,9 @@ public final class LocalAggregateOperator implements CoordinatorOperator {
     public void open() {
         input.open();
 
-        // ---------------------------------------------------------------
-        // Accumulator map: groupKey → double[] accumulators
-        //
-        // For each group we maintain per-aggregate-call accumulators:
-        //   COUNT  → acc[i] = running count
-        //   SUM    → acc[i] = running sum
-        //   AVG    → acc[i] = running sum, acc[i + offset] = running count
-        //            (AVG is split into two slots: sum and count)
-        //   MIN    → acc[i] = current min
-        //   MAX    → acc[i] = current max
-        //
-        // We use a parallel countAcc[] only for AVG.
-        // ---------------------------------------------------------------
+
         int nAggs = aggCalls.size();
-        // For AVG we need an extra count slot; track positions
-        int[] avgCountSlot = new int[nAggs]; // slot index for AVG's count
+        int[] avgCountSlot = new int[nAggs];
         int totalSlots = nAggs;
         for (int i = 0; i < nAggs; i++) {
             if ("AVG".equals(aggCalls.get(i).kind())) {
@@ -111,9 +87,6 @@ public final class LocalAggregateOperator implements CoordinatorOperator {
         LOGGER.log(INFO, "[LocalAggregate] Input rows: " + totalInput
                 + " | Groups: " + accMap.size());
 
-        // ---------------------------------------------------------------
-        // Materialise results: [groupKey..., aggResult...]
-        // ---------------------------------------------------------------
         results = new ArrayList<>(accMap.size());
         for (Map.Entry<GroupKey, double[]> entry : accMap.entrySet()) {
             Object[] groupKeys = entry.getKey().keys;
@@ -152,10 +125,6 @@ public final class LocalAggregateOperator implements CoordinatorOperator {
         if (results != null) results.clear();
     }
 
-    // ---------------------------------------------------------------
-    // Helpers
-    // ---------------------------------------------------------------
-
     private static GroupKey extractGroupKey(Object[] row, int[] indices) {
         if (indices.length == 0) return GroupKey.GLOBAL;
         Object[] keys = new Object[indices.length];
@@ -172,7 +141,6 @@ public final class LocalAggregateOperator implements CoordinatorOperator {
             switch (calls.get(i).kind()) {
                 case "MIN" -> acc[i] = Double.MAX_VALUE;
                 case "MAX" -> acc[i] = -Double.MAX_VALUE;
-                // COUNT, SUM, AVG start at 0
             }
         }
         return acc;
@@ -185,11 +153,6 @@ public final class LocalAggregateOperator implements CoordinatorOperator {
         if (v instanceof Number n) return n.doubleValue();
         try { return Double.parseDouble(v.toString()); } catch (Exception e) { return Double.NaN; }
     }
-
-    // ---------------------------------------------------------------
-    // GroupKey — supports global aggregation (empty key) and
-    // single or multi-column group-by keys with correct equals/hashCode.
-    // ---------------------------------------------------------------
 
     private static final class GroupKey {
         static final GroupKey GLOBAL = new GroupKey(new Object[0]);

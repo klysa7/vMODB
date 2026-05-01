@@ -10,11 +10,7 @@ import org.apache.calcite.util.ImmutableBitSet;
 
 import java.util.List;
 
-/**
- * VModb physical aggregate node.
- * Aggregation is always executed at the Coordinator after receiving
- * raw rows from the VMS scan/join pipeline.
- */
+
 public final class VModbAggregate extends Aggregate implements VModbRel {
 
     private VModbAggregate(RelOptCluster cluster, RelTraitSet traitSet,

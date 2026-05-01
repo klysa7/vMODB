@@ -8,23 +8,7 @@ import java.nio.file.Paths;
 import java.util.Objects;
 import java.util.Properties;
 
-/**
- * Gateway configuration.
- *
- * Load order (later overrides earlier):
- *   1. Hardcoded defaults
- *   2. application.properties (working directory, then classpath)
- *   3. Environment variables (for CI/Docker overrides)
- *
- * application.properties:
- * ─────────────────────────────────────────────
- * gateway.bind_host=0.0.0.0
- * gateway.port=8095
- * gateway.threads=4
- * coordinator.http_url=http://localhost:8079
- * coordinator.sse_url=http://localhost:8091
- * ─────────────────────────────────────────────
- */
+
 public final class GatewayConfig {
 
     private final String bindHost;
@@ -43,17 +27,13 @@ public final class GatewayConfig {
         this.gatewayThreads     = gatewayThreads;
     }
 
-    // ── Load ─────────────────────────────────────────────────────────────────
-
     public static GatewayConfig load() {
-        // Step 1: hardcoded defaults
         String bindHost = "0.0.0.0";
         int    port     = 8095;
         String httpUrl  = "http://localhost:8079";
         String sseUrl   = "http://localhost:8091";
         int    threads  = 4;
 
-        // Step 2: application.properties overrides defaults
         Properties props = loadProperties();
         bindHost = props.getProperty("gateway.bind_host", bindHost);
         port     = parseInt(props.getProperty("gateway.port"),     port);
@@ -61,7 +41,6 @@ public final class GatewayConfig {
         httpUrl  = props.getProperty("coordinator.http_url", httpUrl);
         sseUrl   = props.getProperty("coordinator.sse_url",  sseUrl);
 
-        // Step 3: env vars override properties (CI/Docker use case)
         bindHost = getEnv("BIND_HOST",            bindHost);
         port     = parseInt(System.getenv("GATEWAY_PORT"),    port);
         threads  = parseInt(System.getenv("GATEWAY_THREADS"), threads);
@@ -77,24 +56,14 @@ public final class GatewayConfig {
         return new GatewayConfig(bindHost, port, httpUrl, sseUrl, threads);
     }
 
-    /** Backward-compatible alias. */
     public static GatewayConfig fromEnv() {
         return load();
     }
-
-    // ── Getters ───────────────────────────────────────────────────────────────
-
     public String getBindHost()           { return bindHost; }
     public int    getPort()               { return port; }
     public String getCoordinatorHttpUrl() { return coordinatorHttpUrl; }
     public String getCoordinatorSseUrl()  { return coordinatorSseUrl; }
     public int    getGatewayThreads()     { return gatewayThreads; }
-
-    // ── Properties loader ─────────────────────────────────────────────────────
-    //
-    // Search order:
-    //   1. ./application.properties (working directory) — edit without rebuild
-    //   2. classpath:/application.properties (packaged in jar)
 
     private static Properties loadProperties() {
         Properties props = new Properties();
@@ -115,12 +84,10 @@ public final class GatewayConfig {
     }
 
     private static InputStream openProperties() {
-        // 1. Working directory — edit without repackaging
         Path workDir = Paths.get("application.properties");
         if (Files.exists(workDir)) {
             try { return Files.newInputStream(workDir); } catch (IOException ignored) {}
         }
-        // 2. Classpath — packaged inside the jar
         return GatewayConfig.class.getClassLoader()
                 .getResourceAsStream("application.properties");
     }

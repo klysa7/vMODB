@@ -20,8 +20,7 @@ public class PlanVisualizer {
         StringBuilder sb = new StringBuilder();
         sb.append("\n================ DISTRIBUTED PLAN (Snapshot: ").append(plan.snapshot).append(") ================\n");
 
-        // A7 FIX: subPlans is now List<Object> holding ScanSubplan | JoinSubplan | BroadcastSubplan.
-        // Pattern-match on each concrete type instead of casting to the old VmsSubplan.
+
         sb.append("--- [PHASE 1] REMOTE VMS INSTRUCTIONS ---\n");
         for (Object sub : plan.subPlans) {
             if (sub instanceof ScanSubPlan s) {

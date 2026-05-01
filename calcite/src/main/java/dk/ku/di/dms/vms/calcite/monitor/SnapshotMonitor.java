@@ -9,22 +9,16 @@ import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.concurrent.atomic.AtomicLong;
 
-/**
- * LISTENER for vMODB Coordinator.
- * Connects to the SSE stream and updates the Global Snapshot ID.
- */
+
 public class SnapshotMonitor implements Runnable {
 
     private final String coordinatorUrl;
-    private final AtomicLong globalSnapshotId; // Shared State
-
-    // Use a single client to reuse resources
+    private final AtomicLong globalSnapshotId;
     private static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
             .build();
 
     public SnapshotMonitor(String coordinatorHost, int coordinatorPort, AtomicLong globalSnapshotId) {
-        // Use the C# convention: /status/committed
         this.coordinatorUrl = "http://" + coordinatorHost + ":" + coordinatorPort + "/status/committed";
         this.globalSnapshotId = globalSnapshotId;
     }
@@ -33,7 +27,6 @@ public class SnapshotMonitor implements Runnable {
     public void run() {
         System.out.println("[SnapshotMonitor] Connecting to Coordinator at: " + coordinatorUrl);
 
-        // Infinite Loop: If the Coordinator crashes/restarts, we reconnect automatically.
         while (!Thread.currentThread().isInterrupted()) {
             try {
                 connectAndListen();
@@ -52,12 +45,11 @@ public class SnapshotMonitor implements Runnable {
     private void connectAndListen() throws Exception {
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(coordinatorUrl))
-                .header("Accept", "text/event-stream") // <--- TRIGGERS THE BROADCAST
-                .timeout(Duration.ofMinutes(60))       // Keep connection alive
+                .header("Accept", "text/event-stream")
+                .timeout(Duration.ofMinutes(60))
                 .GET()
                 .build();
 
-        // Send request, but don't read the whole body (it's infinite). Get an InputStream.
         HttpResponse<java.io.InputStream> response = HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofInputStream());
 
         if (response.statusCode() != 200) {
@@ -66,24 +58,20 @@ public class SnapshotMonitor implements Runnable {
 
         System.out.println("[SnapshotMonitor] Connected! Waiting for broadcasts...");
 
-        // Read line-by-line
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(response.body()))) {
             String line;
             while ((line = reader.readLine()) != null) {
-                // Protocol: "data: 10050"
                 if (!line.isEmpty() && line.startsWith("data:")) {
-                    String data = line.substring(5).trim(); // Remove "data:"
+                    String data = line.substring(5).trim();
                     try {
                         long newTid = Long.parseLong(data);
 
-                        // ATOMIC UPDATE
                         long oldTid = globalSnapshotId.getAndSet(newTid);
 
                         if (newTid > oldTid) {
                             System.out.println("[SnapshotMonitor] New Global Snapshot: " + newTid);
                         }
                     } catch (NumberFormatException e) {
-                        // Ignore malformed lines
                     }
                 }
             }

@@ -12,18 +12,7 @@ import org.apache.calcite.rex.RexNode;
 
 import java.util.List;
 
-/**
- * Converts LogicalProject → VModbProject.
- *
- * QPO-3 extension: when the project's input is already a VModbTableAccess
- * (with projects=null), fold the projection into the table access instead of
- * creating a separate VModbProject. This ensures projection pushdown happens
- * even when VModbTableAccessRule.PROJECT_INSTANCE fires after convention
- * conversion rather than before.
- *
- * If the input is not a VModbTableAccess, or contains computed expressions,
- * falls back to the original VModbProject wrapping behaviour.
- */
+
 public final class VModbProjectRule extends RelOptRule {
 
     public static final VModbProjectRule INSTANCE = new VModbProjectRule();
@@ -43,21 +32,16 @@ public final class VModbProjectRule extends RelOptRule {
         );
         if (convertedInput == null) return;
 
-        // QPO-3: if the converted input is a VModbTableAccess with no existing
-        // projection, try to fold this project into it directly.
-        // This eliminates a separate VModbProject operator and ensures
-        // VModbTableAccess.projects is populated so DistributedPlanner can
-        // extract projectedIndices for DistributedExecutor.
+
         if (convertedInput instanceof VModbTableAccess tableAccess
                 && tableAccess.projects == null) {
             int[] projectedIndices = tryExtractInputRefs(project.getProjects());
             if (projectedIndices != null) {
-                // QPO-3: fold — create a new VModbTableAccess with projects set
                 RelNode folded = VModbTableAccess.create(
                         tableAccess.getCluster(),
                         tableAccess.getTable(),
                         tableAccess.getSchemaName(),
-                        projectedIndices,   // QPO-3: projected columns
+                        projectedIndices,
                         tableAccess.getFilter(),
                         tableAccess.getKey(),
                         tableAccess.getKeys()
@@ -71,19 +55,13 @@ public final class VModbProjectRule extends RelOptRule {
                 call.transformTo(folded);
                 return;
             }
-            // else: computed expressions — fall through to VModbProject below
         }
 
-        // Original behaviour: wrap in VModbProject
         int[] projects = requireInputRefs(project.getProjects());
         RelNode out = VModbProject.create(convertedInput, project.getRowType(), projects);
         call.transformTo(out);
     }
 
-    /**
-     * Extracts column indices. Returns null if any expression is not a
-     * simple column reference (computed expression — cannot fold into scan).
-     */
     private static int[] tryExtractInputRefs(List<RexNode> exprs) {
         int[] out = new int[exprs.size()];
         for (int i = 0; i < exprs.size(); i++) {
@@ -94,10 +72,6 @@ public final class VModbProjectRule extends RelOptRule {
         return out;
     }
 
-    /**
-     * Strict version — throws on computed expressions.
-     * Used when we know we're creating a VModbProject (not folding into scan).
-     */
     private static int[] requireInputRefs(List<RexNode> exprs) {
         int[] out = new int[exprs.size()];
         for (int i = 0; i < exprs.size(); i++) {

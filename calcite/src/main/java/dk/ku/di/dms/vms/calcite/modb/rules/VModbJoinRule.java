@@ -26,7 +26,7 @@ public final class VModbJoinRule extends RelOptRule {
     @Override
     public boolean matches(RelOptRuleCall call) {
         LogicalJoin join = call.rel(0);
-        return join.getJoinType() == JoinRelType.INNER; // Accept any inner join, we'll validate keys in onMatch
+        return join.getJoinType() == JoinRelType.INNER;
     }
 
     @Override
@@ -45,7 +45,6 @@ public final class VModbJoinRule extends RelOptRule {
 
         RexNode condition = join.getCondition();
 
-        // Extract multiple keys if it's an AND, or a single key if it's an EQUALS
         if (condition.getKind() == SqlKind.AND) {
             for (RexNode op : ((RexCall) condition).getOperands()) {
                 if (!parseEquality(op, leftKeys, rightKeys, leftFieldCount)) return;
@@ -53,7 +52,7 @@ public final class VModbJoinRule extends RelOptRule {
         } else if (condition.getKind() == SqlKind.EQUALS) {
             if (!parseEquality(condition, leftKeys, rightKeys, leftFieldCount)) return;
         } else {
-            return; // Reject non-equi joins
+            return;
         }
 
         int[] leftJoinCols = leftKeys.stream().mapToInt(i -> i).toArray();

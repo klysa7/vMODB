@@ -36,29 +36,6 @@ public final class DistributedExecutor {
 
     private static final System.Logger LOGGER =
             System.getLogger(DistributedExecutor.class.getName());
-
-    // ══ B13 FIX: Shared Broadcast Trigger Infrastructure ═════════════════════
-    //
-    // BEFORE: Executors.newSingleThreadScheduledExecutor() created per query
-    //   with 100ms delay.
-    //     - New thread pool per query = thread leak risk + allocation overhead.
-    //     - 100ms = pure wait time added to every broadcast join query.
-    //
-    // AFTER: Shared TRIGGER_EXECUTOR (2 daemon threads) reused across queries.
-    //     - Delay reduced 100ms → 50ms (right-VMS setup on localhost ≈ 10-20ms).
-    //     - CompletableFuture.runAsync() fires trigger on shared pool.
-    //     - ~50ms saved per broadcast join query, thread leak closed.
-    //
-    // Scope: CHQ4 broadcast path (Calcite baseline), CHQ3, Q1 — all broadcast
-    //   join queries via the general Calcite path. Direct paths (/direct/*)
-    //   bypass this code and see no impact.
-    //
-    // Cite: Graefe 1990 "Encapsulation of Parallelism in Volcano" (SIGMOD).
-    //       DeWitt & Gray 1992 — parallel dispatch in distributed DBs (CACM).
-    //       Goetz 2006 "Java Concurrency in Practice", ch. 6 — pool reuse.
-    // ─────────────────────────────────────────────────────────────────────────
-
-    // Size 2: enough for α=2 concurrent queries each firing one trigger.
     private static final ScheduledExecutorService TRIGGER_EXECUTOR =
             Executors.newScheduledThreadPool(2, r -> {
                 Thread t = new Thread(r, "broadcast-trigger");
@@ -66,12 +43,7 @@ public final class DistributedExecutor {
                 return t;
             });
 
-    // 100ms → 50ms. Right-VMS TCP accept + receiver setup ≈ 10-20ms on
-    // localhost. 50ms gives a safe 2-3× margin. Reducing below 20ms risks a
-    // race where the left VMS starts sending before the receiver is ready.
     private static final long BROADCAST_TRIGGER_DELAY_MS = 50L;
-
-    // Clean shutdown of the shared trigger pool on JVM exit.
     static {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             TRIGGER_EXECUTOR.shutdown();
@@ -82,37 +54,11 @@ public final class DistributedExecutor {
 
     private final VmsGatewayClient gatewayClient;
     private final DistributedPlanner.ColumnsResolver columnsResolver;
-
-    // ── QPO-7: Descriptor cache ───────────────────────────────────────────────
-    // columnsResolver.columnMetas() iterates the full catalog on every call.
-    // Cache the resulting ColumnDescriptor list per schema.table — built once
-    // on the first query, reused on all subsequent queries.
-    // ConcurrentHashMap: safe under concurrent OLAP workers (α≥2).
-    // Key: "scan:schema.table[projection]" or "join:..." for join descriptors.
     private final ConcurrentHashMap<String, List<ColumnDescriptor>> descriptorCache =
             new ConcurrentHashMap<>();
-
-    // ── QPO-7: Cache-hit instrumentation ──────────────────────────────────────
-    // Mirrors QPO-1 PlanStats — per-key counters of misses (first-call latency),
-    // hits (cached-call latency), and cumulative time savings. Dumped via
-    // JVM shutdown hook so measurement runs emit the table to stderr.
-    //
-    // Expected shape at 60s / α=2: hits=hundreds, misses=few (≤10).
-    // Headline metric: cached_avg_ns / first_call_ns — ratio is the per-query
-    // setup-cost reduction QPO-7 delivers.
     private static final ConcurrentHashMap<String, CacheStats> CACHE_STATS =
             new ConcurrentHashMap<>();
-
-    // ── B13: Trigger-dispatch instrumentation ────────────────────────────────
-    // Measures the actual latency from "scheduled trigger" to "trigger fired"
-    // and the subsequent triggerBroadcast() execution time. Dumped at shutdown
-    // alongside the QPO-7 table.
-    //
-    // Expected shape: configured_delay_ms ≈ 50, dispatch_latency_avg ≈ 51-55 ms
-    // (the configured delay plus scheduler overhead of a few ms). Pre-B13
-    // would show ≈ 101-105 ms in the same field.
     private static final TriggerStats TRIGGER_STATS = new TriggerStats();
-
     private static final class TriggerStats {
         final AtomicLong triggersScheduled     = new AtomicLong();
         final AtomicLong dispatchLatencyTotalNs = new AtomicLong();
@@ -121,7 +67,6 @@ public final class DistributedExecutor {
     }
 
     static {
-        // Single shutdown hook for both QPO-7 cache stats and B13 trigger stats.
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             dumpCacheStats();
             dumpTriggerStats();
@@ -129,35 +74,23 @@ public final class DistributedExecutor {
     }
 
     private static final class CacheStats {
-        final AtomicLong missCount   = new AtomicLong(); // first-call (lambda ran)
-        final AtomicLong missTotalNs = new AtomicLong(); // cumulative first-call time
-        final AtomicLong hitCount    = new AtomicLong(); // subsequent cached calls
-        final AtomicLong hitTotalNs  = new AtomicLong(); // cumulative cached-call time
+        final AtomicLong missCount   = new AtomicLong();
+        final AtomicLong missTotalNs = new AtomicLong();
+        final AtomicLong hitCount    = new AtomicLong();
+        final AtomicLong hitTotalNs  = new AtomicLong();
     }
 
     private static CacheStats statsFor(String key) {
         return CACHE_STATS.computeIfAbsent(key, k -> new CacheStats());
     }
 
-    /**
-     * Wraps ConcurrentHashMap.computeIfAbsent to separately time the first
-     * (cache miss) call from subsequent (cache hit) calls. The miss path runs
-     * the supplier and records supplier latency; the hit path records only
-     * the map-lookup latency. The difference is the per-query benefit.
-     *
-     * Instrumentation overhead: two System.nanoTime() calls per invocation
-     * plus one AtomicLong.addAndGet — ~50ns total. Immaterial vs the work
-     * being measured.
-     */
     private static <V> V timedCacheLookup(String key,
                                           ConcurrentHashMap<String, V> cache,
                                           java.util.function.Function<String, V> supplier) {
         CacheStats stats = statsFor(key);
         long t0 = System.nanoTime();
 
-        // Fast-path: present → hit. Race-free sampling: if another thread is
-        // mid-miss, we'll block inside computeIfAbsent below and be counted
-        // as a hit (we didn't run the lambda). Good enough for measurement.
+
         V existing = cache.get(key);
         if (existing != null) {
             stats.hitCount.incrementAndGet();
@@ -165,7 +98,6 @@ public final class DistributedExecutor {
             return existing;
         }
 
-        // Slow-path: compute (or wait for another thread to compute).
         boolean[] ranLambda = { false };
         V value = cache.computeIfAbsent(key, k -> {
             ranLambda[0] = true;
@@ -177,7 +109,6 @@ public final class DistributedExecutor {
             stats.missCount.incrementAndGet();
             stats.missTotalNs.addAndGet(elapsed);
         } else {
-            // Another thread filled the entry while we raced — count as hit.
             stats.hitCount.incrementAndGet();
             stats.hitTotalNs.addAndGet(elapsed);
         }
@@ -202,7 +133,6 @@ public final class DistributedExecutor {
             long hits   = s.hitCount.get();
             long missAvg = misses > 0 ? s.missTotalNs.get() / misses : 0;
             long hitAvg  = hits   > 0 ? s.hitTotalNs.get()  / hits   : 0;
-            // Savings = hits * (first_call_cost - cached_call_cost)
             long savedNs = hits * Math.max(0, missAvg - hitAvg);
 
             totalHits    += hits;
@@ -296,7 +226,6 @@ public final class DistributedExecutor {
     private CoordinatorOperator buildOperatorTree(CoordinatorOperatorDefinition def,
                                                   DistributedPlan plan) {
 
-        // ── Scan ─────────────────────────────────────────────────────────────
         if (def instanceof ScanDefinition scanDef) {
             ScanSubPlan subplan = plan.subPlans.stream()
                     .filter(s -> s instanceof ScanSubPlan ss
@@ -331,10 +260,6 @@ public final class DistributedExecutor {
                 projectionData = null;
             }
 
-            // ── QPO-7: use cached descriptors for the projected column set ────
-            // For the scan path, descriptors depend on the projected subset so
-            // we cache by "schema.table[col0,col1,...]" to handle both full and
-            // projected scans correctly.
             final List<CatalogColumn> projectedColsFinal = projectedCols;
             String descKey = "scan:" + schemaName + "." + tableName
                     + (projectedColIndices != null ? Arrays.toString(projectedColIndices) : "[]");
@@ -360,7 +285,6 @@ public final class DistributedExecutor {
                     plan.snapshot);
         }
 
-        // ── Broadcast Join ───────────────────────────────────────────────────
         if (def instanceof JoinDefinition joinDef) {
             if (joinDef.left() instanceof ScanDefinition leftScan
                     && joinDef.right() instanceof ScanDefinition rightScan) {
@@ -410,20 +334,6 @@ public final class DistributedExecutor {
                 final DistributedPlan planFinal = plan;
                 final ScanSubPlan leftPlanFinal = leftPlan;
 
-                // ── B13 FIX ───────────────────────────────────────────────────
-                // BEFORE: Executors.newSingleThreadScheduledExecutor()  ← new per query
-                //             .schedule(..., 100, MILLISECONDS)          ← 100ms wait
-                //
-                // AFTER:  TRIGGER_EXECUTOR (shared pool) + 50ms delay
-                //
-                // Timeline comparison:
-                //   BEFORE: t=0 open right VMS | t=100ms trigger fires
-                //   AFTER:  t=0 open right VMS | t=50ms  trigger fires
-                //   Saved:  50ms per broadcast join query
-                //
-                // TriggerStats captures actual scheduling-to-fire latency and
-                // triggerBroadcast execution time for shutdown-hook reporting.
-                // ─────────────────────────────────────────────────────────────
                 LOGGER.log(INFO, ">>> [GATEWAY] B13: Scheduling trigger "
                         + "(delay=" + BROADCAST_TRIGGER_DELAY_MS + "ms) "
                         + "joinQueryId=" + joinQueryId);
@@ -453,15 +363,12 @@ public final class DistributedExecutor {
                                 LOGGER.log(ERROR, ">>> [TRIGGER] Failed!", e);
                             }
                         },
-                        // B13 FIX: shared TRIGGER_EXECUTOR, not a fresh per-query pool
                         command -> TRIGGER_EXECUTOR.schedule(
                                 command, BROADCAST_TRIGGER_DELAY_MS, TimeUnit.MILLISECONDS)
                 );
 
                 int[] allRightOffsets = computeDataOffsets(rightCols);
 
-                // ── QPO-7: cache combined join descriptors ────────────────────
-                // Both sides are fixed schema — built once per unique join pair.
                 final List<CatalogColumn> leftColsFinal  = leftCols;
                 final List<CatalogColumn> rightColsFinal = rightCols;
                 final int[] allLeftOffsetsFinal  = allLeftOffsets;
@@ -509,14 +416,12 @@ public final class DistributedExecutor {
                     joinDef.leftKeys(), joinDef.rightKeys());
         }
 
-        // ── Aggregate ─────────────────────────────────────────────────────────
         if (def instanceof AggregateDefinition aggDef) {
             return new LocalAggregateOperator(
                     buildOperatorTree(aggDef.input(), plan),
                     aggDef.groupByIndices(), aggDef.aggCalls());
         }
 
-        // ── Project ───────────────────────────────────────────────────────────
         if (def instanceof ProjectDefinition projDef) {
             return new LocalProjectOperator(
                     buildOperatorTree(projDef.input(), plan),
@@ -526,7 +431,6 @@ public final class DistributedExecutor {
         throw new IllegalArgumentException("Unknown Op: " + def);
     }
 
-    // ── Utilities ─────────────────────────────────────────────────────────────
 
     private static int[] computeDataOffsets(List<CatalogColumn> cols) {
         int[] offsets = new int[cols.size()];

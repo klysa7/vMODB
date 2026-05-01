@@ -17,59 +17,13 @@ import java.util.List;
 
 import static java.lang.System.Logger.Level.INFO;
 
-/**
- * B38 FIX: Thread-safe DistributedPlanner.
- *
- * BEFORE: subplansAccumulator and exchangeCounter were instance fields:
- *
- *   private List<Object> subplansAccumulator;
- *   private int exchangeCounter;
- *
- *   public DistributedPlan create(RelNode physicalPlan, Long snapshot) {
- *       this.subplansAccumulator = new ArrayList<>();  // shared write
- *       this.exchangeCounter = 0;                      // shared write
- *       ...
- *   }
- *
- *   DistributedPlanner is a single shared instance across all HTTP threads
- *   (built once in OlapGatewayService.buildOrchestrator() and cached).
- *   With α=2, two threads call planner.create() simultaneously:
- *     Thread 1: this.subplansAccumulator = new ArrayList<>()
- *     Thread 2: this.subplansAccumulator = new ArrayList<>()  ← wipes Thread 1's reference
- *     Thread 1: subplansAccumulator.add(scanSubplan)          ← adds to wrong list
- *     Result: corrupted or incomplete distributed plan.
- *
- *   In practice, QPO-1 mitigates this — planner.create() is only called on the
- *   first query per SQL string, before α=2 concurrent calls are likely to race.
- *   But the race is theoretically possible during warmup with α=2.
- *
- * AFTER: subplansAccumulator and exchangeCounter are LOCAL variables inside create().
- *   Each thread gets its own list and counter on its own stack frame.
- *   No shared mutable state — create() is now fully thread-safe.
- *   No synchronization needed, no performance cost.
- *
- * Cite: Bernstein & Goodman 1981 "Concurrency Control in Distributed Database
- *   Systems" — eliminating shared mutable state is preferable to synchronizing it.
- *   Java Memory Model (JLS §17.4) — method-local variables are always thread-safe.
- *
- * Thread safety summary after B38:
- *   DistributedPlanner.create()    — thread-safe (local state only)
- *   DistributedExecutor.execute()  — thread-safe (ConcurrentHashMap QPO-7, local ops)
- *   Orchestrator.execute()         — thread-safe (delegates to above, no instance writes)
- *   Verified by α=2 logs: queryId 9 and 10 execute concurrently without serialization.
- */
+
 public final class DistributedPlanner {
 
     private static final System.Logger LOGGER =
             System.getLogger(Orchestrator.class.getName());
-
     private final CoordinatorCatalog catalog;
     private final ColumnsResolver columnsResolver;
-
-    // B38 FIX: subplansAccumulator and exchangeCounter removed as instance fields.
-    // They are now local variables in create() — each call gets its own stack frame.
-    // BEFORE: private List<Object> subplansAccumulator;
-    // BEFORE: private int exchangeCounter;
 
     public DistributedPlanner(CoordinatorCatalog catalog, ColumnsResolver columnsResolver) {
         this.catalog = catalog;
@@ -77,11 +31,9 @@ public final class DistributedPlanner {
     }
 
     public DistributedPlan create(RelNode physicalPlan, Long snapshot) {
-        // B38 FIX: local variables — thread-safe, each call has its own copy.
-        // BEFORE: this.subplansAccumulator = new ArrayList<>();
-        // BEFORE: this.exchangeCounter = 0;
+
         List<Object> subplansAccumulator = new ArrayList<>();
-        int[] exchangeCounter = {0}; // array wrapper to allow mutation inside lambda
+        int[] exchangeCounter = {0};
 
         CoordinatorOperatorDefinition rootOperation =
                 relNodeToOperatorTree(physicalPlan, subplansAccumulator, exchangeCounter);
@@ -156,7 +108,6 @@ public final class DistributedPlanner {
                                              int[] exchangeCounter) {
         String schema     = scan.getSchemaName();
         String table      = scan.getTableName();
-        // B38 FIX: use local exchangeCounter[0] instead of this.exchangeCounter
         String exchangeId = "exchange_" + (exchangeCounter[0]++);
 
         List<String> columns     = columnsResolver.columnsInOrder(schema, table);
@@ -168,9 +119,8 @@ public final class DistributedPlanner {
                 schema, endpointUrl, exchangeId,
                 new ScanAllOperation(schema, table),
                 columns, predicates,
-                null   // columnDescriptors resolved later in DistributedExecutor
+                null
         );
-        // B38 FIX: use local subplansAccumulator instead of this.subplansAccumulator
         subplansAccumulator.add(subplan);
 
         return new ScanDefinition(exchangeId, columns, predicates);

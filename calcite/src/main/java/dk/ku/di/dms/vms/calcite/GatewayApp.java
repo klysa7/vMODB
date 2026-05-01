@@ -37,10 +37,6 @@ public final class GatewayApp {
 
         server.createContext("/", new GatewayHttpHandler(service));
 
-        // B1 FIX: thread pool size read from application.properties (gateway.threads).
-        // BEFORE: Executors.newFixedThreadPool(4) hardcoded — cannot tune.
-        // AFTER:  configurable via application.properties, default 4 (backward compatible).
-        // Platform threads only — virtual threads deferred as future work.
         server.setExecutor(Executors.newFixedThreadPool(
                 config.getGatewayThreads(),
                 r -> {
@@ -59,7 +55,6 @@ public final class GatewayApp {
         return server;
     }
 
-    /** Backward-compatible overload. */
     public HttpServer start(String bindHost, int port,
                             String httpUrl, String sseUrl) throws IOException {
         return start(bindHost, port, httpUrl, sseUrl, GatewayConfig.load());

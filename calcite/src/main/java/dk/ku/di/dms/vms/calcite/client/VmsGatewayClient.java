@@ -16,15 +16,13 @@ public class VmsGatewayClient {
     private static final byte GATEWAY_TYPE       = 12;
     private static final byte QUERY_REQUEST_TYPE = 99;
 
-    // ── Scan with schema + projection (QPO-3 main entry point) ───────────────
-
     public Iterator<Object[]> scanWithSchema(String host, int port,
                                              long queryId, long snapshotId,
                                              byte mode, String tableName,
                                              List<ColumnDescriptor> descriptors,
                                              byte[] predicates,
                                              byte[] routingData,
-                                             byte[] projectionData) {  // QPO-3: new param
+                                             byte[] projectionData) {
         try {
             Socket socket = new Socket(host, port);
             socket.setTcpNoDelay(true);
@@ -32,7 +30,6 @@ public class VmsGatewayClient {
             DataOutputStream out = new DataOutputStream(socket.getOutputStream());
             DataInputStream  in  = new DataInputStream(socket.getInputStream());
 
-            // Increase buffer for safety — projection adds up to 40 bytes (10 cols × 4)
             ByteBuffer buffer = ByteBuffer.allocate(8192);
             buildPayload(buffer, queryId, snapshotId, mode, tableName,
                     predicates, routingData, projectionData);
@@ -48,7 +45,6 @@ public class VmsGatewayClient {
         }
     }
 
-    /** Backward-compatible overload — no projection (broadcast path, join path) */
     public Iterator<Object[]> scanWithSchema(String host, int port,
                                              long queryId, long snapshotId,
                                              byte mode, String tableName,
@@ -59,7 +55,6 @@ public class VmsGatewayClient {
                 descriptors, predicates, routingData, null);
     }
 
-    /** Legacy scan() overload — no descriptors, no projection */
     public Iterator<Object[]> scan(String host, int port, long queryId, long snapshotId,
                                    byte mode, String tableName,
                                    List<Class<?>> columnTypes,
@@ -68,13 +63,6 @@ public class VmsGatewayClient {
                 null, predicates, routingData, null);
     }
 
-    // ── Broadcast trigger (no projection needed — sends full rows to probe VMS) ─
-
-    /**
-     * B4 FIX: close socket immediately after flush.
-     * The VMS received the full command and will independently connect to the
-     * probe VMS. No sleep needed.
-     */
     public void triggerBroadcast(String host, int port, long queryId, long snapshotId,
                                  String tableName, byte[] predicates, String targetHostPort) {
         try {
@@ -99,15 +87,13 @@ public class VmsGatewayClient {
         }
     }
 
-    // ── Wire payload builder ──────────────────────────────────────────────────
-
     private void buildPayload(ByteBuffer buffer, long queryId, long snapshotId,
                               byte mode, String tableName,
                               byte[] predicates, byte[] routingData,
-                              byte[] projectionData) {          // QPO-3: new param
+                              byte[] projectionData) {
         int startPos = buffer.position();
         buffer.put(QUERY_REQUEST_TYPE);
-        buffer.putInt(0); // length placeholder
+        buffer.putInt(0);
 
         buffer.putLong(queryId);
         buffer.putLong(snapshotId);
@@ -131,7 +117,6 @@ public class VmsGatewayClient {
             buffer.putInt(0);
         }
 
-        // QPO-3: projection field
         if (projectionData != null && projectionData.length > 0) {
             buffer.putInt(projectionData.length);
             buffer.put(projectionData);

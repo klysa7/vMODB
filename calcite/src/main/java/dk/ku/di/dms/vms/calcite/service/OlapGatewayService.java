@@ -36,42 +36,8 @@ public final class OlapGatewayService {
 
     private final AtomicReference<CoordinatorCatalog> catalogRef = new AtomicReference<>(null);
     private volatile Orchestrator orchestrator = null;
-
-    // ── QPO-1: physical plan cache ────────────────────────────────────────────
-    // Key: SQL string. Value: compiled RelNode physical plan (template).
-    // Cached after the first call — planning cost paid once.
-    // Each execution gets a DEEP COPY of the cached plan via deepCopy()
-    // to prevent concurrent threads from mutating each other's plan tree.
     private final ConcurrentHashMap<String, RelNode> planCache = new ConcurrentHashMap<>();
 
-    // ── QPO-1 instrumentation ─────────────────────────────────────────────────
-    // Per-query counters and timers. Written on every call, read either by
-    // dumpPlanCacheStats() or via a periodic log flush. All counters are
-    // AtomicLong to avoid contention between concurrent A-clients.
-    //
-    //   planOnceNs      — wall-clock ns for the FIRST plan of this SQL
-    //                     (written once inside computeIfAbsent). Represents
-    //                     the cost QPO-1 amortizes away on all future hits.
-    //
-    //   hitCount        — number of times the cache returned an existing entry
-    //                     (incremented per hit).
-    //
-    //   lookupTotalNs   — cumulative ns spent inside computeIfAbsent on hits
-    //                     (the replacement cost for planning under QPO-1).
-    //
-    //   copyTotalNs     — cumulative ns spent in deepCopy() per call (the
-    //                     overhead QPO-1 adds for thread safety).
-    //
-    // Ratios to report in the thesis:
-    //   saving_per_hit    = planOnceNs − (lookupTotalNs/hitCount)
-    //                                  − (copyTotalNs/callCount)
-    //   hit_ratio         = hitCount / (hitCount + missCount)
-    //   aggregate_saving  = hitCount × saving_per_hit
-    //
-    // Caveat on deep-copy cost accounting: deepCopy() also runs on the first
-    // call (immediately after the miss writes planOnceNs). copyTotalNs
-    // therefore includes one copy for the cold-start call. At hitCount ≫ 1
-    // this bias is negligible; under a few calls it would need adjustment.
     private static final class PlanStats {
         final AtomicLong planOnceNs    = new AtomicLong(0);
         final AtomicLong hitCount      = new AtomicLong(0);
@@ -89,9 +55,6 @@ public final class OlapGatewayService {
         this.gatewayClient     = gatewayClient;
         LOGGER.log(INFO, "OlapGatewayService created. Catalog will be fetched on first query.");
 
-        // Dump plan-cache stats on JVM shutdown so every grid run ends with a
-        // thesis-ready summary printed to stderr, without requiring an admin
-        // endpoint or manual call.
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             String dump = dumpPlanCacheStats();
             if (!dump.isEmpty()) {
@@ -136,8 +99,6 @@ public final class OlapGatewayService {
         LOGGER.log(INFO, "Orchestrator built and cached.");
     }
 
-    // ── Getters for direct scan paths (QPO-2) ─────────────────────────────────
-
     public long getCurrentSnapshotId() {
         return currentSnapshotId.get();
     }
@@ -150,8 +111,6 @@ public final class OlapGatewayService {
         return resolveColumnMetas(schema, table, getCatalog());
     }
 
-    // ── Query execution ───────────────────────────────────────────────────────
-
     public String execute(String sql) {
         long snapshot = currentSnapshotId.get();
         LOGGER.log(INFO, "OLAP GATEWAY SERVICE STARTING EXECUTION Snapshot: " + snapshot);
@@ -159,10 +118,6 @@ public final class OlapGatewayService {
         CoordinatorCatalog catalog = getCatalog();
         PlanStats stats = planStats.computeIfAbsent(sql, k -> new PlanStats());
 
-        // QPO-1: plan once, reuse the cached template on all subsequent calls.
-        // Measure (a) the one-time planning cost when the cache misses, and
-        // (b) the per-call lookup cost on every hit. The two numbers together
-        // are what justifies QPO-1 in the thesis evaluation.
         long lookupStart = System.nanoTime();
         final boolean[] wasMiss = {false};
         RelNode physical = planCache.computeIfAbsent(sql, s -> {
@@ -188,13 +143,6 @@ public final class OlapGatewayService {
             stats.lookupTotalNs.addAndGet(lookupNs);
         }
 
-        // QPO-1 thread safety: deep-copy the cached plan before execution.
-        // RelNode.copy() is shallow — inputs are shared across copies.
-        // DistributedPlanner traverses and mutates the full tree, so two
-        // concurrent threads on the same tree corrupt each other's state.
-        // deepCopy() recurses through all inputs, giving each thread a fully
-        // independent tree. We measure this as the overhead QPO-1 adds in
-        // exchange for removing planning cost.
         long copyStart = System.nanoTime();
         RelNode planCopy = deepCopy(physical);
         stats.copyTotalNs.addAndGet(System.nanoTime() - copyStart);
@@ -212,23 +160,6 @@ public final class OlapGatewayService {
                 + "}";
     }
 
-    // ── QPO-1: stats dump ─────────────────────────────────────────────────────
-    //
-    // Returns a human-readable summary of per-SQL plan-cache behaviour. Called
-    // automatically from a JVM shutdown hook (see constructor) so every run
-    // ends with the numbers printed to stderr. Also callable programmatically
-    // by an admin HTTP endpoint if one is wired up later.
-    //
-    // Format (one line per distinct SQL):
-    //   [sql-prefix...] hits=N miss=1 plan_once=XXms lookup_avg=Yus
-    //                   copy_avg=Zus saving_per_hit=XXms agg_saved=Wms
-    //
-    // - plan_once      = one-time cost of planning this SQL (wall-clock ms)
-    // - lookup_avg     = average ns spent in ConcurrentHashMap lookup on hits
-    // - copy_avg       = average ns spent in deepCopy() across all calls
-    // - saving_per_hit = plan_once − (lookup + copy) — what QPO-1 saves per hit
-    // - agg_saved      = hits × saving_per_hit — total wall-clock ms removed
-    //                    from the critical path over the lifetime of this run
     public String dumpPlanCacheStats() {
         if (planStats.isEmpty()) return "";
         long totalHits   = 0;
@@ -245,7 +176,7 @@ public final class OlapGatewayService {
             PlanStats s = entry.getValue();
             long hits   = s.hitCount.get();
             totalHits  += hits;
-            long calls  = hits + 1;                        // +1 for the miss
+            long calls  = hits + 1;
             long planNs = s.planOnceNs.get();
             long lookupAvgNs = hits > 0 ? s.lookupTotalNs.get() / hits : 0;
             long copyAvgNs   = s.copyTotalNs.get() / Math.max(1, calls);
@@ -267,20 +198,11 @@ public final class OlapGatewayService {
                     aggSavedMs));
         }
 
-        // Patch the correct hits_total now that we've accumulated.
         String header = String.format("hits_total=%d misses_total=%d distinct_queries=%d%n",
                 totalHits, totalMisses, planStats.size());
         sb.replace(0, hdrInsertAt, header);
         return sb.toString();
     }
-
-    // ── QPO-1: deep copy helper ───────────────────────────────────────────────
-    //
-    // Recursively copies a RelNode tree so each execution thread gets a fully
-    // independent copy. RelNode.copy(traitSet, inputs) is the standard Calcite
-    // API for structural copying — every RelNode subclass is required to
-    // implement it. We recurse through inputs first (bottom-up) so that each
-    // copied parent receives already-copied children — no shared references.
 
     private static RelNode deepCopy(RelNode node) {
         List<RelNode> copiedInputs = node.getInputs().stream()
@@ -288,8 +210,6 @@ public final class OlapGatewayService {
                 .collect(Collectors.toList());
         return node.copy(node.getTraitSet(), copiedInputs);
     }
-
-    // ── Catalog helpers ───────────────────────────────────────────────────────
 
     private List<String> resolveColumnNames(String schema, String table, CoordinatorCatalog catalog) {
         var schemaObj = catalog.tablesInSchema(schema);
