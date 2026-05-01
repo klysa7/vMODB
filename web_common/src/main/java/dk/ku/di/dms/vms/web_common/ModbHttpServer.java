@@ -329,6 +329,8 @@ public abstract class ModbHttpServer extends StoppableRunnable {
             this.writeBuffer.clear();
             this.readBuffer.clear();
             this.connectionMetadata.channel.read(this.readBuffer, null, this);
+
+            SSE_CLIENTS.add(this);
         }
 
         public void sendToSseClient(long numTIDsCommitted){

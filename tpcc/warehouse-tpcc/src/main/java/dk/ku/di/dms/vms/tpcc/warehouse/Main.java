@@ -29,9 +29,10 @@ public final class Main {
         prop.setProperty("max_records.district", String.valueOf(numDistrict));
         int numCustomers = num_ware * 30_000;
         prop.setProperty("max_records.customer", String.valueOf(numCustomers));
-        prop.setProperty("table.customer.chaining", "true");
+        prop.setProperty("table.customer.chaining", "false");
 
         VmsApplicationOptions options = VmsApplicationOptions.build(
+                prop,
                 "0.0.0.0",
                 8001, new String[]{
                         "dk.ku.di.dms.vms.tpcc.warehouse",

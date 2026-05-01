@@ -19,7 +19,8 @@ public class ConnectionMetadata {
     public enum NodeType {
         SERVER,
         VMS,
-        HTTP_CLIENT
+        HTTP_CLIENT,
+        GATEWAY
     }
 
     public ConnectionMetadata(int key, NodeType nodeType, AsynchronousSocketChannel channel) {

@@ -5,6 +5,7 @@ import dk.ku.di.dms.vms.modb.common.data_structure.Tuple;
 import dk.ku.di.dms.vms.modb.common.utils.ConfigUtils;
 import dk.ku.di.dms.vms.tpcc.proxy.dataload.DataLoadUtils;
 import dk.ku.di.dms.vms.tpcc.proxy.experiment.ExperimentUtils;
+import dk.ku.di.dms.vms.tpcc.proxy.hattrick.HATtrickMain;
 import dk.ku.di.dms.vms.tpcc.proxy.infra.MinimalHttpClient;
 import dk.ku.di.dms.vms.tpcc.proxy.workload.WorkloadUtils;
 
@@ -34,7 +35,6 @@ public final class Main {
     }
 
     private static void loadLocalDeploymentMenu() throws Exception {
-        dk.ku.di.dms.vms.tpcc.warehouse.Main.main(null);
         dk.ku.di.dms.vms.tpcc.inventory.Main.main(null);
         dk.ku.di.dms.vms.tpcc.order.Main.main(null);
         loadMenu("Local Deployment Menu");
@@ -54,9 +54,9 @@ public final class Main {
         Map<String, Integer> txRatioMap = buildTransactionRatioMap();
         Tuple<Integer, String>[] txRatio = buildTransactionRatio(txRatioMap);
 
-        // data population
         ForkJoinPool pool = ForkJoinPool.commonPool();
-        Future<?>[] futures = new Future[3];
+        // 4 futures: order, warehouse, inventory, replica
+        Future<?>[] futures = new Future[4];
 
         Scanner scanner = new Scanner(System.in);
         boolean running = true;
@@ -66,12 +66,22 @@ public final class Main {
             String choice = scanner.nextLine();
             switch (choice) {
                 case "1": {
+                    // Populate all 4 VMSes in parallel:
+                    //   order (8003), warehouse (8001), inventory (8002), replica (8004)
+                    // The replica populate pre-loads ~300K order_line rows so that
+                    // A-qps measurements in Experiment II start from the same baseline
+                    // as the live order VMS.
+                    boolean useReplica = Boolean.parseBoolean(PROPERTIES.getProperty("use_replica", "false"));
                     futures[0] = pool.submit(() -> submitDataPopulationRequest("order", truncate));
                     futures[1] = pool.submit(() -> submitDataPopulationRequest("warehouse", truncate));
                     futures[2] = pool.submit(() -> submitDataPopulationRequest("inventory", truncate));
+                    if (useReplica) {
+                        futures[3] = pool.submit(() -> submitDataPopulationRequest("replica", truncate));
+                    }
                     try {
-                        for (int i = 2; i >= 0; i--) {
-                            futures[i].get();
+                        int maxFuture = useReplica ? 3 : 2;
+                        for (int i = maxFuture; i >= 0; i--) {
+                            if (futures[i] != null) futures[i].get();
                         }
                     } catch(InterruptedException | ExecutionException e){
                         System.out.println("Error on PUT endpoint of one or more of the endpoints!");
@@ -90,7 +100,6 @@ public final class Main {
                 case "4":
                     System.out.println("Option 4: \"Submit workload\" selected.");
 
-                    // check if workload files exist
                     int numFiles = WorkloadUtils.getNumWorkloadInputFiles(numTxInputPerType);
 
                     if(numWare != numFiles){
@@ -127,20 +136,16 @@ public final class Main {
                         break;
                     }
 
-                    // reload iterators
                     input = WorkloadUtils.mapWorkloadInputFiles(numWare, txRatioMap);
 
-                    // load coordinator
                     if(coordinator == null){
                         coordinator = ExperimentUtils.loadCoordinator(PROPERTIES);
-                        // wait for all starter VMSes to connect
                         int numConnected;
                         do {
                             numConnected = coordinator.getConnectedVMSs().size();
                         } while (numConnected < 3);
                     }
 
-                    // prevent log pollution, i.e., interleaving of handshaking and experiment messages
                     try { Thread.sleep(100); } catch (InterruptedException _) { }
 
                     ExperimentUtils.ExperimentStats expStats = ExperimentUtils.runExperiment(coordinator, txRatio, input, runTime, warmUp);
@@ -149,18 +154,18 @@ public final class Main {
                     break;
                 case "5":
                     System.out.println("Option 5: \"Cleanup VMS states\" selected.");
-                    // has to wait for all submitted transactions to commit in order to send the reset
                     if (checkCompleteness(coordinator, scanner)) break;
-                    // cleanup VMS states
                     DataLoadUtils.cleanup(false);
                     System.out.println("VMS states cleaned.");
                     break;
                 case "6":
                     System.out.println("Option 5: \"Reset VMS states\" selected.");
-                    // has to wait for all submitted transactions to commit in order to send the reset
                     if (checkCompleteness(coordinator, scanner)) break;
                     DataLoadUtils.cleanup(true);
                     System.out.println("VMS states reset.");
+                    break;
+                case "7":
+                    HATtrickMain.run(coordinator);
                     break;
                 case "q":
                     System.out.println("Exiting the application...");
@@ -203,31 +208,76 @@ public final class Main {
         return false;
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // Transaction ratio validation — REVERTED from the single-100 check.
+    //
+    // The previous version required exactly one transaction type to equal 100,
+    // which made balanced mixes (e.g. 50/50 new_order + payment) impossible.
+    // This is the original behavior: ratios may be distributed across multiple
+    // transaction types, and must sum to 100.
+    //
+    // Examples that now validate:
+    //   new_order=100, payment=0,   order_status=0    → pure new_order
+    //   new_order=50,  payment=50,  order_status=0    → HATtrick 50/50 (default)
+    //   new_order=45,  payment=43,  order_status=12   → full TPC-C mix
+    //
+    // Note: HATtrickTClientWorker hardcodes its own 50/50 new_order/payment
+    // split and does not read these properties. Ratios here only affect
+    // Menu Options 3 (Create workload) and 4 (Submit workload).
+    // ─────────────────────────────────────────────────────────────────────────
     public static Map<String, Integer> buildTransactionRatioMap(){
         Map<String, Integer> txRatioMap = new TreeMap<>();
-        boolean seen_100 = false;
+        int total = 0;
         if(!PROPERTIES.get("new_order").toString().equals("0")) {
-            txRatioMap.put("new_order", Integer.valueOf(PROPERTIES.get("new_order").toString()));
-            if(txRatioMap.get("new_order") == 100) seen_100 = true;
+            int v = Integer.parseInt(PROPERTIES.get("new_order").toString());
+            txRatioMap.put("new_order", v);
+            total += v;
         }
         if(!PROPERTIES.get("payment").toString().equals("0")) {
-            txRatioMap.put("payment", Integer.valueOf(PROPERTIES.get("payment").toString()));
-            if(txRatioMap.get("payment") == 100) seen_100 = true;
+            int v = Integer.parseInt(PROPERTIES.get("payment").toString());
+            txRatioMap.put("payment", v);
+            total += v;
         }
         if(!PROPERTIES.get("order_status").toString().equals("0")) {
-            txRatioMap.put("order_status", Integer.valueOf(PROPERTIES.get("order_status").toString()));
-            if(txRatioMap.get("order_status") == 100) seen_100 = true;
+            int v = Integer.parseInt(PROPERTIES.get("order_status").toString());
+            txRatioMap.put("order_status", v);
+            total += v;
         }
-        if(!seen_100) throw new RuntimeException("No transaction defined as 100 in app.properties!");
+        if(total != 100) {
+            throw new RuntimeException(
+                    "Transaction ratios must sum to 100 in app.properties! Current sum: " + total);
+        }
         return txRatioMap;
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // BUG FIX: convert raw percentages to CUMULATIVE thresholds.
+    //
+    // BEFORE (broken):
+    //   For ratios { new_order=50, payment=50 }, this method produced
+    //   [(50, "new_order"), (50, "payment")]. WorkloadUtils.Worker.run rolls
+    //   ratio in [1..100] and picks the first entry where ratio <= t1. With
+    //   raw percentages, a roll of 75 fails both checks (75 ≤ 50 is false
+    //   twice), the loop exits with tx=null, and input.get(null) returns null
+    //   → NullPointerException at Worker.run line 162.
+    //
+    // AFTER (correct):
+    //   The same input now produces [(50, "new_order"), (100, "payment")].
+    //   Roll of 1..50 picks new_order, 51..100 picks payment. Every roll in
+    //   [1..100] now finds a match.
+    //
+    // The bug was hidden when ratios were 100/0/0 (single entry) — every roll
+    // matched the only entry. It only manifests with multi-type ratios, which
+    // is exactly what the recent revert (multi-type ratios sum to 100) enabled.
+    // ─────────────────────────────────────────────────────────────────────────
     @SuppressWarnings("unchecked")
     private static Tuple<Integer, String>[] buildTransactionRatio(Map<String, Integer> txRatioMap) {
         Tuple<Integer, String>[] txRatio = new Tuple[txRatioMap.size()];
         int i = 0;
-        for(var entry : txRatioMap.entrySet()) {
-            txRatio[i] = Tuple.of(entry.getValue(), entry.getKey());
+        int cumulative = 0;
+        for (var entry : txRatioMap.entrySet()) {
+            cumulative += entry.getValue();
+            txRatio[i] = Tuple.of(cumulative, entry.getKey());
             i++;
         }
         return txRatio;
@@ -241,6 +291,7 @@ public final class Main {
         System.out.println("4. Submit workload");
         System.out.println("5. Cleanup VMS states");
         System.out.println("6. Reset VMS states");
+        System.out.println("7. HATtrick throughput frontier experiment");
         System.out.println("q. Quit program");
     }
 

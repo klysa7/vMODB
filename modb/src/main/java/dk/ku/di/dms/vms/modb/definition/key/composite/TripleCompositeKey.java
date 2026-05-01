@@ -47,4 +47,14 @@ public final class TripleCompositeKey extends BaseComposite implements IKey {
         return 3;
     }
 
+    @Override
+    public Object getValue(int index) {
+        return switch (index) {
+            case 0 -> value0;
+            case 1 -> value1;
+            case 2 -> value2;
+            default -> throw new IndexOutOfBoundsException("TripleCompositeKey index: " + index);
+        };
+    }
+
 }

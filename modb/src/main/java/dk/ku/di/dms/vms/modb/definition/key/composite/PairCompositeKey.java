@@ -42,4 +42,12 @@ public final class PairCompositeKey extends BaseComposite implements IKey {
         return 2;
     }
 
+    @Override
+    public Object getValue(int index) {
+        return switch (index) {
+            case 0 -> value0;
+            case 1 -> value1;
+            default -> throw new IndexOutOfBoundsException("PairCompositeKey index: " + index);
+        };
+    }
 }

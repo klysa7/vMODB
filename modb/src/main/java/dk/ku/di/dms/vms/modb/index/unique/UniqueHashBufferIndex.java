@@ -14,6 +14,7 @@ import dk.ku.di.dms.vms.modb.storage.iterator.unique.KeyRecordIterator;
 import dk.ku.di.dms.vms.modb.storage.iterator.unique.RecordIterator;
 import dk.ku.di.dms.vms.modb.storage.record.RecordBufferContext;
 
+import java.nio.ByteBuffer;
 import java.util.concurrent.locks.ReentrantLock;
 
 import static dk.ku.di.dms.vms.modb.common.memory.MemoryUtils.UNSAFE;
@@ -57,6 +58,16 @@ public class UniqueHashBufferIndex extends ReadWriteIndex<IKey> implements ReadW
         this.capacity = capacity;
         this.limit = recordBufferContext.address + (this.recordSize * (this.capacity == 1 ? 1 : this.capacity - 1));
         this.p = Integer.numberOfTrailingZeros(this.capacity);
+    }
+
+    public void copyRecordToBuffer(long srcAddress, ByteBuffer destinationBuffer) {
+        long dataAddress = srcAddress + Schema.RECORD_HEADER;
+        int dataSize = this.schema.getRecordSizeWithoutHeader();
+
+        byte[] temp = new byte[dataSize];
+        UNSAFE.copyMemory(null, dataAddress, temp, UNSAFE.arrayBaseOffset(byte[].class), dataSize);
+
+        destinationBuffer.put(temp);
     }
 
     @Override
@@ -145,7 +156,7 @@ public class UniqueHashBufferIndex extends ReadWriteIndex<IKey> implements ReadW
             UNSAFE.copyMemory(null, srcAddress, null, pos, this.recordSize);
             return;
         }
-        LOGGER.log(WARNING, ERROR_FINDING);
+//        LOGGER.log(WARNING, ERROR_FINDING);
     }
 
     @Override
@@ -205,7 +216,7 @@ public class UniqueHashBufferIndex extends ReadWriteIndex<IKey> implements ReadW
             this.updateSize(-1);
             return;
         }
-        LOGGER.log(WARNING, ERROR_FINDING);
+//        LOGGER.log(WARNING, ERROR_FINDING);
     }
 
     @Override
@@ -250,6 +261,27 @@ public class UniqueHashBufferIndex extends ReadWriteIndex<IKey> implements ReadW
             aux++;
         } while(attemptsToFind > 0 && pos <= this.limit);
         return -1;
+    }
+
+    public IKey readPkFromAddress(long dataAddress) {
+        int[]    pkCols  = this.schema.getPrimaryKeyColumns();
+        int[]    offsets = this.schema.columnOffset();
+        Object[] pkVals  = new Object[pkCols.length];
+        for (int i = 0; i < pkCols.length; i++) {
+            int  col     = pkCols[i];
+            // offsets[col] is from slot start (includes RECORD_HEADER).
+            // dataAddress already skips RECORD_HEADER, so subtract it.
+            long colAddr = dataAddress + (offsets[col] - Schema.RECORD_HEADER);
+            pkVals[i] = switch (this.schema.columnDataType(col)) {
+                case INT    -> UNSAFE.getInt(null, colAddr);
+                case LONG   -> UNSAFE.getLong(null, colAddr);
+                case FLOAT  -> UNSAFE.getFloat(null, colAddr);
+                case DOUBLE -> UNSAFE.getDouble(null, colAddr);
+                // Strings not expected as PK columns in TPC-C but handled safely
+                default     -> UNSAFE.getInt(null, colAddr);
+            };
+        }
+        return KeyUtils.buildRecordKey(pkVals);
     }
 
     /**
@@ -319,4 +351,73 @@ public class UniqueHashBufferIndex extends ReadWriteIndex<IKey> implements ReadW
         this.recordBufferContext.force();
     }
 
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // PARALLEL SCAN SUPPORT — add these three methods to UniqueHashBufferIndex
+    //
+    // These expose the minimum off-heap geometry needed by PrimaryIndex to
+    // split the slot range into N contiguous partitions for parallel scanning.
+    //
+    // Why here and not in TransactionManager:
+    //   recordBufferContext, recordSize, capacity are all `protected` —
+    //   accessible from UniqueHashBufferIndex but not from TransactionManager
+    //   (different package). Adding public getters is the minimal safe exposure.
+    //
+    // Cite: QuestDB Discipline 3 Slides 49-51 — Sharded GROUP BY requires
+    //   splitting data into N disjoint partitions. These methods provide
+    //   the partition geometry (base address + slot size + capacity).
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Returns the off-heap base address of the slot buffer.
+     * Used by PrimaryIndex to compute per-partition start addresses:
+     *   partition i starts at: baseAddress() + i * (slotCapacity()/N) * slotByteSize()
+     */
+    public long baseAddress() {
+        return this.recordBufferContext.address;
+    }
+
+    /**
+     * Returns the byte size of one slot (RECORD_HEADER + all column data).
+     * Used to step from one slot address to the next:
+     *   nextSlotAddress = currentSlotAddress + slotByteSize()
+     */
+    public long slotByteSize() {
+        return this.recordSize;
+    }
+
+    /**
+     * Returns the total number of slots allocated in the buffer.
+     * This includes BOTH active (populated) AND inactive (empty/deleted) slots.
+     * The parallel scan must iterate ALL slots and skip inactive ones via
+     * isSlotActive() — the same pattern as RecordIterator.hasNext().
+     */
+    public int slotCapacity() {
+        return this.capacity;
+    }
+
+    /**
+     * Returns true if the slot at the given address contains an active (live) record.
+     * Reads the ACTIVE_BYTE header flag directly from off-heap.
+     * Equivalent to RecordIterator's internal check — exposed here so parallel
+     * scan workers can check slot activity without going through the iterator.
+     *
+     * @param slotAddress the absolute off-heap address of the slot start
+     */
+    public boolean isSlotActive(long slotAddress) {
+        return UNSAFE.getByte(null, slotAddress) == Header.ACTIVE_BYTE;
+    }
+
+    /**
+     * Reads a FLOAT column value directly from off-heap for a given slot.
+     * Used by the parallel scan hot path to avoid Object[] materialization
+     * for stable rows (those not in updatesPerKeyMap / Case 3).
+     *
+     * @param slotAddress           absolute off-heap address of the slot start
+     * @param colByteOffsetFromHeader byte offset of the column from RECORD_HEADER
+     *                              = schema.columnOffset()[colIndex] - Schema.RECORD_HEADER
+     */
+    public float readColumnFloat(long slotAddress, int colByteOffsetFromHeader) {
+        return UNSAFE.getFloat(null, slotAddress + Schema.RECORD_HEADER + colByteOffsetFromHeader);
+    }
 }

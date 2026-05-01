@@ -104,6 +104,42 @@ public final class OrderHttpHandler extends DefaultHttpHandler {
                 this.transactionManager.beginTransaction(0, 0, 0, true);
                 return this.historyRepository.lookupByKey(id);
             }
+            // ─────────────────────────────────────────────────────────────
+            // /size — cheap order_line row count for benchmark verification.
+            //
+            // Mirrors the replica's /size endpoint (port 8096). Opens a
+            // read-only transaction with default snapshot semantics and
+            // calls IRepository.getAll() — same scan path used by /chq6
+            // and /chq1, just without the aggregation.
+            //
+            // Use this between benchmark phases to verify live-side
+            // eviction (the per-(w_id, d_id) AtomicInteger in OrderService
+            // EVICTION_SAFE_THRESHOLD = 6,000) is keeping pace with inserts:
+            //
+            //   $ curl localhost:8003/size                  # before run
+            //   $ ./run_hattrick_phase.sh
+            //   $ curl localhost:8003/size                  # after run
+            //
+            // Cost: scans the entire order_line index. For 300K rows
+            // ~80–200 ms on this hardware. Don't call this in tight loops
+            // during measurement — it competes for the same MVCC version
+            // chain that OLAP scans walk.
+            //
+            // Returns: {"size":N,"latency_ms":M} — same shape as the
+            // replica's /size for symmetric scripting.
+            // ─────────────────────────────────────────────────────────────
+            case "size" -> {
+                long startNano = System.nanoTime();
+                this.transactionManager.beginTransaction(0, 0, 0, true);
+                List<OrderLine> rows = this.orderLineRepository.getAll();
+                long size = rows.size();
+                double latencyMs = (System.nanoTime() - startNano) / 1_000_000.0;
+                LOGGER.log(INFO, String.format(
+                        ">>> [ORDER SIZE] Rows: %d | Latency: %.2f ms", size, latencyMs));
+                return "{\"size\":" + size
+                        + ",\"latency_ms\":" + String.format("%.2f", latencyMs)
+                        + ",\"table\":\"order_line\"}";
+            }
             case null, default -> {
                 LOGGER.log(System.Logger.Level.WARNING, "URI not recognized: "+uri);
                 return "";

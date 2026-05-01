@@ -25,9 +25,11 @@ public final class Main {
         // variable
         int numStockItems = num_ware * 100_000;
         prop.setProperty("max_records.stock", String.valueOf(numStockItems));
-        prop.setProperty("table.stock.chaining", "true");
+        prop.setProperty("table.stock.chaining", "false");
+        prop.setProperty("checkpointing", "true");
 
         VmsApplicationOptions options = VmsApplicationOptions.build(
+                prop,
                 "0.0.0.0",
                 8002, new String[]{
                         "dk.ku.di.dms.vms.tpcc.inventory",
