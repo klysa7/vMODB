@@ -1,6 +1,6 @@
-package dk.ku.di.dms.vms.calcite.modb.rel;
+package dk.ku.di.dms.vms.calcite.olap.queryPlanner.modb.rel;
 
-import dk.ku.di.dms.vms.calcite.modb.convention.VModbConvention;
+import dk.ku.di.dms.vms.calcite.olap.queryPlanner.modb.convention.VModbConvention;
 import dk.ku.di.dms.vms.modb.definition.key.IKey;
 import org.apache.calcite.plan.*;
 import org.apache.calcite.rel.core.TableScan;

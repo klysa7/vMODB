@@ -1,12 +1,12 @@
 package dk.ku.di.dms.vms.calcite.olap.queryPlanner.planner;
 
-import dk.ku.di.dms.vms.calcite.modb.convention.VModbConvention;
-import dk.ku.di.dms.vms.calcite.modb.rules.VModbAggregateRule;
-import dk.ku.di.dms.vms.calcite.modb.rules.VModbFilterRule;
-import dk.ku.di.dms.vms.calcite.modb.rules.VModbJoinRule;
-import dk.ku.di.dms.vms.calcite.modb.rules.VModbProjectRule;
-import dk.ku.di.dms.vms.calcite.modb.rules.VModbTableAccessRule;
-import dk.ku.di.dms.vms.calcite.schema.Optimizer;
+import dk.ku.di.dms.vms.calcite.olap.queryPlanner.modb.convention.VModbConvention;
+import dk.ku.di.dms.vms.calcite.olap.queryPlanner.modb.rules.VModbAggregateRule;
+import dk.ku.di.dms.vms.calcite.olap.queryPlanner.modb.rules.VModbFilterRule;
+import dk.ku.di.dms.vms.calcite.olap.queryPlanner.modb.rules.VModbJoinRule;
+import dk.ku.di.dms.vms.calcite.olap.queryPlanner.modb.rules.VModbProjectRule;
+import dk.ku.di.dms.vms.calcite.olap.queryPlanner.modb.rules.VModbTableAccessRule;
+import dk.ku.di.dms.vms.calcite.olap.queryPlanner.schema.Optimizer;
 import org.apache.calcite.plan.hep.HepPlanner;
 import org.apache.calcite.plan.hep.HepProgramBuilder;
 import org.apache.calcite.rel.RelNode;
@@ -40,7 +40,7 @@ public final class CalcitePlannerImpl implements CalcitePlanner {
     );
 
     @Override
-    public PlanOutput planJoinOnly(String sql, SchemaPlus rootSchema, List<Object> params) {
+    public PlanOutput planOnly(String sql, SchemaPlus rootSchema, List<Object> params) {
         Objects.requireNonNull(sql, "sql");
         Objects.requireNonNull(rootSchema, "rootSchema");
 
@@ -57,14 +57,6 @@ public final class CalcitePlannerImpl implements CalcitePlanner {
             hepPlanner.setRoot(logical);
             RelNode pushedDownLogical = hepPlanner.findBestExp();
 
-            // B33 FIX: gate plan serialization behind DEBUG.
-            // BEFORE: LOGGER.log(INFO, explainRel(...)) — called on EVERY query.
-            //   explainRel() allocates a StringWriter + RelWriterImpl + full tree
-            //   traversal on every execution, even after QPO-1 caches the plan.
-            //   Under α=2: two concurrent threads doing this simultaneously.
-            // AFTER: isLoggable(DEBUG) check — short-circuits at the level check.
-            //   explainRel() is never called, no string allocated, no I/O.
-            //   To see plans during development: set log level to DEBUG.
             if (LOGGER.isLoggable(DEBUG)) {
                 LOGGER.log(DEBUG, explainRel("LOGICAL (PUSHED DOWN)", pushedDownLogical));
             }
@@ -75,12 +67,10 @@ public final class CalcitePlannerImpl implements CalcitePlanner {
                     RULES
             );
 
-            // B33 FIX: same — physical plan serialization gated behind DEBUG.
             if (LOGGER.isLoggable(DEBUG)) {
                 LOGGER.log(DEBUG, explainRel("PHYSICAL", physical));
             }
 
-            // Keep one INFO log so benchmarking logs show planning activity
             LOGGER.log(INFO, "Planning complete for SQL: "
                     + sql.trim().substring(0, Math.min(60, sql.trim().length())) + "...");
 

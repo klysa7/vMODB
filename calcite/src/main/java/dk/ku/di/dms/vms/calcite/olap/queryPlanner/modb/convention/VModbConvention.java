@@ -1,6 +1,6 @@
-package dk.ku.di.dms.vms.calcite.modb.convention;
+package dk.ku.di.dms.vms.calcite.olap.queryPlanner.modb.convention;
 
-import dk.ku.di.dms.vms.calcite.modb.rel.VModbRel;
+import dk.ku.di.dms.vms.calcite.olap.queryPlanner.modb.rel.VModbRel;
 import org.apache.calcite.plan.Convention;
 import org.apache.calcite.plan.ConventionTraitDef;
 import org.apache.calcite.plan.RelTraitSet;

@@ -13,20 +13,10 @@ public final class QueryRequestEvent {
     public static final byte MODE_BROADCAST_TO_VMS = 1;
     public static final byte MODE_RECEIVE_AND_JOIN = 2;
     public static final byte MODE_LOCAL_JOIN = 3;
-    // QPO-7: CHQ3 local join with optional semi-join filter,
-    // multi-column group-by, SUM aggregate. Distinct from MODE_LOCAL_JOIN
-    // (CHQ4) because the result row format and aggregation shape differ.
     public static final byte MODE_LOCAL_JOIN_CHQ3 = 4;
 
 
-    // Wire format:
-    // [99][length:4][queryId:8][snapshotId:8][mode:1]
-    // [tableNameLen:4][tableName]
-    // [predicatesLen:4][predicates]
-    // [routingLen:4][routing]
-    // [projectionLen:4][projection]   ← QPO-3: int[] of column indices, 4 bytes each, native order
-
-    public static void write(ByteBuffer buffer, QueryPayloadRaw payload) {
+        public static void write(ByteBuffer buffer, QueryPayloadRaw payload) {
         int startPos = buffer.position();
         buffer.put(QUERY_REQUEST_TYPE);
         buffer.putInt(0);
@@ -52,7 +42,6 @@ public final class QueryRequestEvent {
             buffer.putInt(0);
         }
 
-        // QPO-3: projection field
         if (payload.projectionData != null && payload.projectionData.length > 0) {
             buffer.putInt(payload.projectionData.length);
             buffer.put(payload.projectionData);
@@ -81,8 +70,7 @@ public final class QueryRequestEvent {
         byte[] routingData = new byte[routingSize];
         if (routingSize > 0) buffer.get(routingData);
 
-        // QPO-3: read projection field
-        // Guard: older clients may not send this field — check remaining bytes
+
         byte[] projectionData = new byte[0];
         if (buffer.hasRemaining() && buffer.remaining() >= Integer.BYTES) {
             int projectionSize = buffer.getInt();
@@ -96,12 +84,7 @@ public final class QueryRequestEvent {
                 predicates, routingData, projectionData);
     }
 
-    // ── QPO-3 helpers ─────────────────────────────────────────────────────────
 
-    /**
-     * Serialize int[] column indices to byte[].
-     * Uses native byte order to match serializeRow() on the VMS side.
-     */
     public static byte[] serializeProjection(int[] colIndices) {
         if (colIndices == null || colIndices.length == 0) return new byte[0];
         ByteBuffer buf = ByteBuffer.allocate(colIndices.length * Integer.BYTES)
@@ -110,10 +93,7 @@ public final class QueryRequestEvent {
         return buf.array();
     }
 
-    /**
-     * Deserialize byte[] back to int[] column indices.
-     * Returns null if data is null or empty (means full scan — no projection).
-     */
+
     public static int[] deserializeProjection(byte[] data) {
         if (data == null || data.length == 0) return null;
         ByteBuffer buf = ByteBuffer.wrap(data).order(ByteOrder.nativeOrder());
@@ -122,7 +102,6 @@ public final class QueryRequestEvent {
         return result;
     }
 
-    // ── Records ───────────────────────────────────────────────────────────────
 
     public record QueryPayloadRaw(
             long   queryId,
@@ -131,7 +110,7 @@ public final class QueryRequestEvent {
             byte[] tableName,
             byte[] predicates,
             byte[] routingData,
-            byte[] projectionData) {   // QPO-3: new field
+            byte[] projectionData) {
 
         public static QueryPayloadRaw of(long qId, long sId, byte mode,
                                          String table, byte[] preds,
@@ -141,7 +120,6 @@ public final class QueryRequestEvent {
                     preds, routing, projection);
         }
 
-        /** Backward-compatible factory — no projection */
         public static QueryPayloadRaw of(long qId, long sId, byte mode,
                                          String table, byte[] preds, byte[] routing) {
             return of(qId, sId, mode, table, preds, routing, null);
@@ -155,5 +133,5 @@ public final class QueryRequestEvent {
             String tableName,
             byte[] predicates,
             byte[] routingData,
-            byte[] projectionData) {}  // QPO-3: new field
+            byte[] projectionData) {}
 }

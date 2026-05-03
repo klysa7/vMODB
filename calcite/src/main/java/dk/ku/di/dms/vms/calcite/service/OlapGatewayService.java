@@ -29,11 +29,9 @@ public final class OlapGatewayService {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final System.Logger LOGGER = System.getLogger(OlapGatewayService.class.getName());
-
     private final CoordinatorClient coordinatorClient;
     private final AtomicLong currentSnapshotId;
     private final VmsGatewayClient gatewayClient;
-
     private final AtomicReference<CoordinatorCatalog> catalogRef = new AtomicReference<>(null);
     private volatile Orchestrator orchestrator = null;
     private final ConcurrentHashMap<String, RelNode> planCache = new ConcurrentHashMap<>();

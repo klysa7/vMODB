@@ -10,14 +10,6 @@ public final class CoordinatorCatalog {
     private final Map<String, Map<String, CatalogTable>> schemas = new HashMap<>();
     private final Map<TableId, String> placement = new HashMap<>();
     private volatile long snapshotId = -1L;
-
-    // A1 FIX: fallback port map for when the coordinator sends just a schema
-    // name ("warehouse", "order") instead of a proper "localhost:8001" address.
-    // The coordinator currently sends ownerVms = schema identifier, not host:port.
-    // This map bridges that gap without reverting to three separate hardcoded
-    // if-chains across the codebase. When the coordinator is upgraded to send
-    // proper addresses, this map becomes unused automatically — getVmsAddress()
-    // only consults it when the stored value has no colon (no port).
     private static final Map<String, String> SCHEMA_TO_ADDRESS = new HashMap<>();
     static {
         SCHEMA_TO_ADDRESS.put("warehouse", "localhost:8001");
@@ -43,18 +35,6 @@ public final class CoordinatorCatalog {
         return Collections.unmodifiableSet(schemas.keySet());
     }
 
-    /**
-     * A1 FIX: returns "localhost:PORT" for a given table.
-     *
-     * The coordinator currently sends ownerVms as a schema-name identifier
-     * (e.g. "warehouse") rather than a host:port string. This method checks
-     * whether the stored value already contains a colon — if it does, it is
-     * already a valid address and we return it directly. If not, we look up
-     * the schema name in SCHEMA_TO_ADDRESS.
-     *
-     * When the coordinator is upgraded to send proper "host:port" values,
-     * the fallback map is bypassed automatically and this method still works.
-     */
     public String getVmsAddress(String schema, String table) {
         String stored = placement.get(new TableId(schema, table));
         if (stored == null) {

@@ -7,7 +7,7 @@ import java.util.List;
 
 public interface CalcitePlanner {
 
-    PlanOutput planJoinOnly(String sql, SchemaPlus schema, List<Object> params);
+    PlanOutput planOnly(String sql, SchemaPlus schema, List<Object> params);
 
     record PlanOutput(RelNode logicalPlan, RelNode vmodbPhysicalPlan) {}
 }

@@ -1,4 +1,4 @@
-package dk.ku.di.dms.vms.calcite.schema;
+package dk.ku.di.dms.vms.calcite.olap.queryPlanner.schema;
 
 import org.apache.calcite.schema.Schema;
 import org.apache.calcite.schema.SchemaVersion;

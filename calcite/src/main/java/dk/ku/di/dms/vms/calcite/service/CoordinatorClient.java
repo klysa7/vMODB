@@ -3,7 +3,6 @@ package dk.ku.di.dms.vms.calcite.service;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dk.ku.di.dms.vms.calcite.exception.CoordinatorClientException;
 import dk.ku.di.dms.vms.modb.common.coordinator.api.CatalogResponse;
-import dk.ku.di.dms.vms.modb.common.coordinator.api.SnapshotResponse;
 
 import java.net.URI;
 import java.net.http.HttpClient;

@@ -1,7 +1,7 @@
-package dk.ku.di.dms.vms.calcite.modb.rules;
+package dk.ku.di.dms.vms.calcite.olap.queryPlanner.modb.rules;
 
-import dk.ku.di.dms.vms.calcite.modb.convention.VModbConvention;
-import dk.ku.di.dms.vms.calcite.modb.rel.VModbJoin;
+import dk.ku.di.dms.vms.calcite.olap.queryPlanner.modb.convention.VModbConvention;
+import dk.ku.di.dms.vms.calcite.olap.queryPlanner.modb.rel.VModbJoin;
 import org.apache.calcite.plan.RelOptRuleCall;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.JoinRelType;

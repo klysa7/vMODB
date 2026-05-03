@@ -1,7 +1,7 @@
 package dk.ku.di.dms.vms.coordinator.olap.queryPlanner.calcite;
 
-import dk.ku.di.dms.vms.calcite.schema.vModbSchema;
-import dk.ku.di.dms.vms.calcite.schema.vModbTable;
+import dk.ku.di.dms.vms.calcite.olap.queryPlanner.schema.vModbSchema;
+import dk.ku.di.dms.vms.calcite.olap.queryPlanner.schema.vModbTable;
 import dk.ku.di.dms.vms.coordinator.olap.queryPlanner.catalog.CatalogType;
 import dk.ku.di.dms.vms.coordinator.olap.queryPlanner.catalog.CoordinatorCatalog;
 import org.apache.calcite.schema.SchemaPlus;

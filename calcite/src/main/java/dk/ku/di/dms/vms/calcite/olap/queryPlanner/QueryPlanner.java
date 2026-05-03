@@ -22,9 +22,8 @@ public final class QueryPlanner {
 
     public CalcitePlanner.PlanOutput plan(String sql, List<Object> params) {
         List<Object> safeParams = (params == null) ? List.of() : params;
-
         SchemaPlus root = buildRootSchema();
-        return calcitePlanner.planJoinOnly(sql, root, safeParams);
+        return calcitePlanner.planOnly(sql, root, safeParams);
     }
 
     private SchemaPlus buildRootSchema() {

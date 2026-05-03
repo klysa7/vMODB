@@ -1,4 +1,4 @@
-package dk.ku.di.dms.vms.calcite.modb.rel;
+package dk.ku.di.dms.vms.calcite.olap.queryPlanner.modb.rel;
 
 import org.apache.calcite.plan.RelTraitSet;
 import org.apache.calcite.rel.PhysicalNode;
