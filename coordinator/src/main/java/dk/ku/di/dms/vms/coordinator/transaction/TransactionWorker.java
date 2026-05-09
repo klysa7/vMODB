@@ -6,11 +6,37 @@ import dk.ku.di.dms.vms.modb.common.runnable.StoppableRunnable;
 import dk.ku.di.dms.vms.modb.common.schema.network.node.VmsNode;
 import dk.ku.di.dms.vms.modb.common.schema.network.transaction.TransactionEvent;
 import dk.ku.di.dms.vms.modb.common.serdes.IVmsSerdesProxy;
+import dk.ku.di.dms.vms.modb.common.utils.ConfigUtils;
 
 import java.util.*;
+import java.util.concurrent.locks.LockSupport;
 
 import static java.lang.System.Logger.Level.*;
 
+/**
+ * TransactionWorker — drains transaction inputs into batches and dispatches
+ * them to the VMSes via the coordinator queue.
+ *
+ * BATCH-LEVEL THROTTLE
+ *   Implements the professor's "for every batch, sleep a little bit, allow
+ *   the batch to complete" idea. After each batch is sealed and handed off
+ *   to the coordinator queue (i.e. after advanceCurrentBatch() returns true),
+ *   the worker parks for `batchSleepNanos`. This gives VMSes — particularly
+ *   the order VMS — a clear quiet period before the next batch starts to
+ *   fill, during which concurrent OLAP scans can make progress without
+ *   competing with new OLTP commits.
+ *
+ *   The value is read from the `batch_sleep_ms` property in app.properties
+ *   automatically — callers do not need to pass it explicitly. If the
+ *   property is missing or 0, no sleep is applied (no-op via `if`).
+ *
+ *   Sweep values to find the throughput frontier:
+ *     0     — no throttle (baseline)
+ *     50    — gentle: ~16K tx/sec ceiling assuming 200ms batch fill
+ *     200   — moderate: ~12K tx/sec ceiling
+ *     500   — strong: ~7K tx/sec ceiling
+ *     1000  — extreme: ~4K tx/sec ceiling
+ */
 public final class TransactionWorker extends StoppableRunnable {
 
     private static final System.Logger LOGGER = System.getLogger(TransactionWorker.class.getName());
@@ -39,6 +65,9 @@ public final class TransactionWorker extends StoppableRunnable {
     private final Map<Long, Map<String, PrecedenceInfo>> precedenceMapCache;
     private final Queue<Object> coordinatorQueue;
 
+    /** Sleep applied after every batch is sealed. 0 = disabled. */
+    private final long batchSleepNanos;
+
     private static class VmsTracking {
         public final String identifier;
         public long batch;
@@ -58,7 +87,41 @@ public final class TransactionWorker extends StoppableRunnable {
     private record PendingTransactionInput (long tid, long batch, TransactionInput input, Set<String> pendingVMSs, Map<String, Long> previousTidPerVms){}
 
     /**
-     * Build private VmsTracking objects
+     * Default builder — reads batch_sleep_ms from app.properties automatically.
+     * This is the existing call signature, so all current callers (e.g.
+     * Coordinator.java) keep working without changes. The throttle is
+     * controlled entirely via the property file.
+     */
+    public static TransactionWorker build(int id, Deque<TransactionInput> inputQueue,
+                                          long startingTid, int maxNumberOfTIDsBatch,
+                                          int batchWindow, int numWorkers,
+                                          Queue<Map<String, PrecedenceInfo>> precedenceMapInputQueue,
+                                          Queue<Map<String, PrecedenceInfo>> precedenceMapOutputQueue,
+                                          Map<String, TransactionDAG> transactionMap,
+                                          Map<String, VmsNode[]> vmsIdentifiersPerDAG,
+                                          Map<String, IVmsWorker> vmsWorkerContainerMap,
+                                          Queue<Object> coordinatorQueue,
+                                          IVmsSerdesProxy serdesProxy){
+        // Read the per-batch throttle from app.properties. Done here, in the
+        // builder, so callers don't need to know about the property.
+        double batchSleepMs;
+        try {
+            batchSleepMs = Double.parseDouble(
+                    ConfigUtils.loadProperties().getProperty("batch_sleep_ms", "0"));
+        } catch (Exception e) {
+            LOGGER.log(WARNING, "Failed to read batch_sleep_ms from properties, " +
+                    "defaulting to 0. Reason: " + e.getMessage());
+            batchSleepMs = 0.0;
+        }
+        return build(id, inputQueue, startingTid, maxNumberOfTIDsBatch, batchWindow, numWorkers,
+                precedenceMapInputQueue, precedenceMapOutputQueue, transactionMap,
+                vmsIdentifiersPerDAG, vmsWorkerContainerMap, coordinatorQueue, serdesProxy,
+                batchSleepMs);
+    }
+
+    /**
+     * Explicit builder — used when the caller wants to override the property
+     * (e.g. tests, programmatic configuration). Bypasses ConfigUtils entirely.
      */
     @SuppressWarnings("ToArrayCallWithZeroLengthArrayArgument")
     public static TransactionWorker build(int id, Deque<TransactionInput> inputQueue,
@@ -70,7 +133,8 @@ public final class TransactionWorker extends StoppableRunnable {
                                           Map<String, VmsNode[]> vmsIdentifiersPerDAG,
                                           Map<String, IVmsWorker> vmsWorkerContainerMap,
                                           Queue<Object> coordinatorQueue,
-                                          IVmsSerdesProxy serdesProxy){
+                                          IVmsSerdesProxy serdesProxy,
+                                          double batchSleepMs){
         Map<String, VmsTracking> vmsTrackingMap = new HashMap<>();
         Map<String, VmsTracking[]> vmsPerTransactionMap = new HashMap<>(vmsIdentifiersPerDAG.size());
         for(var txEntry : vmsIdentifiersPerDAG.entrySet()){
@@ -85,7 +149,8 @@ public final class TransactionWorker extends StoppableRunnable {
         }
         return new TransactionWorker(id, inputQueue, startingTid, maxNumberOfTIDsBatch, batchWindow, numWorkers,
                 precedenceMapInputQueue, precedenceMapOutputQueue, transactionMap,
-                vmsPerTransactionMap, vmsTrackingMap, vmsWorkerContainerMap, coordinatorQueue, serdesProxy);
+                vmsPerTransactionMap, vmsTrackingMap, vmsWorkerContainerMap, coordinatorQueue, serdesProxy,
+                batchSleepMs);
     }
 
     private TransactionWorker(int id, Deque<TransactionInput> inputQueue,
@@ -94,7 +159,8 @@ public final class TransactionWorker extends StoppableRunnable {
                               Queue<Map<String, PrecedenceInfo>> precedenceMapOutputQueue,
                               Map<String, TransactionDAG> transactionMap, Map<String, VmsTracking[]> vmsPerTransactionMap,
                               Map<String, VmsTracking> vmsTrackingMap, Map<String, IVmsWorker> vmsWorkerContainerMap,
-                              Queue<Object> coordinatorQueue, IVmsSerdesProxy serdesProxy){
+                              Queue<Object> coordinatorQueue, IVmsSerdesProxy serdesProxy,
+                              double batchSleepMs){
         this.id = id;
         this.inputQueue = inputQueue;
         this.startingTidBatch = startingTidBatch;
@@ -118,11 +184,15 @@ public final class TransactionWorker extends StoppableRunnable {
         this.batchContext = new BatchContext(startingBatchOffset);
 
         this.coordinatorQueue = coordinatorQueue;
+
+        this.batchSleepNanos = (long) (batchSleepMs * 1_000_000.0);
     }
 
     @Override
     public void run() {
-        LOGGER.log(INFO, "Starting transaction worker # " + this.id);
+        LOGGER.log(INFO, "Starting transaction worker # " + this.id +
+                " (batch_sleep_ms=" + (this.batchSleepNanos / 1_000_000.0) +
+                ", batchSleepNanos=" + this.batchSleepNanos + ")");
         TransactionInput data;
         long lastTidBatch;
         long end;
@@ -148,6 +218,16 @@ public final class TransactionWorker extends StoppableRunnable {
 
             this.tid = this.getTidNextBatch();
             this.startingTidBatch = this.tid;
+
+            // ── PROFESSOR'S THROTTLE (per-batch, coordinator side) ──────────
+            // Batch is sealed and dispatched. Sleep before the next batch
+            // begins to fill. Gives VMSes a clear quiet period during which
+            // OLAP scans can advance without OLTP commit pressure.
+            // At batchSleepNanos = 0 this is a no-op.
+            if (this.batchSleepNanos > 0) {
+                LockSupport.parkNanos(this.batchSleepNanos);
+            }
+            // ────────────────────────────────────────────────────────────────
         }
         LOGGER.log(INFO, "Finishing transaction worker # " + this.id);
     }

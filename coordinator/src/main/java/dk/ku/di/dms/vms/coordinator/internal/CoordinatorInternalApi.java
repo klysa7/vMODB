@@ -30,7 +30,7 @@ public final class CoordinatorInternalApi {
         HttpServer server = HttpServer.create(new InetSocketAddress(host, port), 0);
         CoordinatorInternalApi api = new CoordinatorInternalApi(catalog, server);
 
-        server.createContext("/internal/snapshot", api::handleSnapshot);
+        server.createContext("/internal/snapshot", api::handleSnapshot); //not working, we use sse
         server.createContext("/internal/catalog", api::handleCatalog);
 
         server.setExecutor(null);

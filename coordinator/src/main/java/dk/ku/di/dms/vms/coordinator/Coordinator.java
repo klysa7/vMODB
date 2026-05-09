@@ -907,6 +907,14 @@ public final class Coordinator extends ModbHttpServer {
 //        System.out.println("the snapshfgfgotId is from catalog : " + catalog.getSnapshotId());
 //        System.out.println("the snapshfgfgotId is from teh variable: " + snapshotId2);
     }
+    public long getTotalInflightLoad() {
+        long queued = 0;
+        for (var deque : this.transactionInputDeques) {
+            queued += deque.size();
+        }
+        long processing = getNumTIDsSubmitted() - getNumTIDsCommitted();
+        return queued + processing;
+    }
 
     public long getNumTIDsCommitted() {
         long nextBatchToCheck = this.batchOffsetPendingCommit;

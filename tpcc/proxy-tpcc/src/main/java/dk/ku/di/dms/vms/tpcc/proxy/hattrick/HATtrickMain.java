@@ -17,8 +17,7 @@ public final class HATtrickMain {
 
     /**
      * Per-T-client inflight budget for Phase 1.
-     * Mirrors HATtrickRunner's MAX_IN_FLIGHT_PER_CLIENT — effective budget
-     * passed to each worker is this × τ so per-client share is constant.
+     * Mirrors HATtrickRunner's MAX_IN_FLIGHT_PER_CLIENT.
      */
     private static final int MAX_IN_FLIGHT_PER_CLIENT = 5_000;
 
@@ -54,20 +53,6 @@ public final class HATtrickMain {
         }
     }
 
-    // ── Query path resolution ─────────────────────────────────────────────────
-    //
-    // Menu accepts three forms for the "Query to run" prompt:
-    //   (a) empty             → default /olap/chq6
-    //   (b) short name        → "chq6"           → /olap/chq6
-    //                           "replica/chq1"   → /olap/replica/chq1
-    //   (c) full path         → "/direct/chq6"   → /direct/chq6   (used verbatim)
-    //                           "/direct/chq4"   → /direct/chq4   (used verbatim)
-    //                           "/direct/chq1"   → /direct/chq1   (used verbatim)
-    //                           "/olap/chq6"     → /olap/chq6
-    //
-    // Form (c) lets the user reach any handler namespace — specifically the
-    // QPO-2 / QPO-5 / QPO-6 hot paths at /direct/* — without the menu forcing
-    // the /olap/ prefix. Anything starting with '/' is treated as an absolute path.
     private static String resolveQueryPath(String userInput) {
         String trimmed = userInput.trim();
         if (trimmed.isEmpty()) return "/olap/chq6";
@@ -75,11 +60,6 @@ public final class HATtrickMain {
         return "/olap/" + trimmed;
     }
 
-    /**
-     * Prints the query menu shared by Phase 2 and Phase 3.
-     * Keeping this in one place makes it easy to add new direct paths
-     * without drifting between phases.
-     */
     private static void printQueryMenu(boolean useReplica) {
         System.out.println("  Available queries (live order VMS, use_replica=false):");
         System.out.println("    chq6           — SUM(ol_amount) full scan (general Calcite path)");
@@ -126,7 +106,6 @@ public final class HATtrickMain {
             if (tau == 0) { System.out.println("\n  Skipping τ=0"); continue; }
             System.out.printf("%n=== Running Pure OLTP with τ=%d T-workers ===%n", tau);
 
-            // Tau-scaled inflight budget — same formula as HATtrickRunner.
             final int effectiveMaxInFlight = MAX_IN_FLIGHT_PER_CLIENT * tau;
             System.out.printf("  Backpressure budget: %d (=%d × %d T-clients)%n",
                     effectiveMaxInFlight, MAX_IN_FLIGHT_PER_CLIENT, tau);
@@ -256,6 +235,7 @@ public final class HATtrickMain {
         boolean useReplica = Boolean.parseBoolean(props.getProperty("use_replica", "false"));
 
         System.out.println("  use_replica=" + useReplica);
+        System.out.println("  Throttle: applied at coordinator (batch_sleep_ms in app.properties)");
         printQueryMenu(useReplica);
         System.out.print("  Query to run [default: chq6]: ");
         String queryPath = resolveQueryPath(scanner.nextLine());
@@ -299,11 +279,6 @@ public final class HATtrickMain {
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    /**
-     * Waits for the right number of VMSes depending on use_replica.
-     * use_replica=false → 3 VMSes (warehouse, inventory, order)
-     * use_replica=true  → 4 VMSes (+ replica)
-     */
     private static Coordinator loadCoordinator(Coordinator existing, Properties props) {
         if (existing != null) return existing;
         System.out.println("Loading coordinator...");

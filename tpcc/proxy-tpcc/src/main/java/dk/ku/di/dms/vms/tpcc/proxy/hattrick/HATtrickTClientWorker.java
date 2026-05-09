@@ -10,24 +10,19 @@ import dk.ku.di.dms.vms.tpcc.common.events.PaymentIn;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * HATtrick T-client — no fixed sleep, coordinator-aware backpressure.
+ * HATtrick T-client — coordinator-aware backpressure, no submission throttle.
  *
- * The original TPC-C experiment (ExperimentUtils, SLEEP_MODE=false) works
- * without sleep because it pre-generates a finite number of inputs and the
- * client naturally runs out before flooding the queue. HATtrick generates
- * inputs indefinitely, so we need equivalent flow control.
- *
- * Flow control uses coordinator.getNumTIDsSubmitted() -
- * coordinator.getNumTIDsCommitted(). When in-flight > maxInFlight,
- * Thread.yield() gives the coordinator thread CPU time to drain a batch.
- * No sleep on the hot path.
+ * Throttling is now performed at the coordinator level (in
+ * TransactionWorker.run() via the batch_sleep_ms property), not on the
+ * T-client side. This implements the professor's "for every batch sleep
+ * a little bit, allow batch to complete" idea more literally — the
+ * coordinator pauses between batches so VMSes get clear quiet periods
+ * for OLAP scans. The T-client just submits as fast as backpressure allows.
  *
  * BACKPRESSURE BUDGET (maxInFlight)
- *   The runner passes a tau-scaled budget — MAX_IN_FLIGHT_PER_CLIENT × τ —
- *   so each worker has the same effective per-client share regardless of how
- *   many T-clients are running. Without this scaling, two τ=2 clients would
- *   thrash against a single 5000-slot counter (one wins every race, the
- *   other yields almost continuously).
+ *   The runner passes a tau-scaled budget — MAX_IN_FLIGHT_PER_CLIENT × τ.
+ *   When in-flight > maxInFlight, Thread.yield() gives the coordinator
+ *   thread CPU time to drain a batch.
  */
 public final class HATtrickTClientWorker implements Runnable {
 
@@ -46,11 +41,6 @@ public final class HATtrickTClientWorker implements Runnable {
     private long submitted = 0L;
     private long lastPrintAt = 0;
 
-    /**
-     * Primary constructor used by HATtrickRunner and HATtrickMain.
-     *
-     * @param maxInFlight tau-scaled global backpressure budget
-     */
     public HATtrickTClientWorker(int clientId,
                                  Coordinator coordinator,
                                  AtomicBoolean running,
@@ -63,10 +53,7 @@ public final class HATtrickTClientWorker implements Runnable {
         this.maxInFlight   = maxInFlight;
     }
 
-    /**
-     * Backwards-compatible 4-arg constructor.
-     * Falls back to DEFAULT_MAX_IN_FLIGHT if no budget is specified.
-     */
+    /** Backwards-compatible 4-arg constructor. */
     public HATtrickTClientWorker(int clientId,
                                  Coordinator coordinator,
                                  AtomicBoolean running,
@@ -82,9 +69,7 @@ public final class HATtrickTClientWorker implements Runnable {
 
         while (running.get() && !Thread.currentThread().isInterrupted()) {
             try {
-                // Backpressure: yield (no sleep) when coordinator queue is full.
-                long inFlight = coordinator.getNumTIDsSubmitted()
-                        - coordinator.getNumTIDsCommitted();
+                long inFlight = coordinator.getTotalInflightLoad();
                 if (inFlight > maxInFlight) {
                     Thread.yield();
                     continue;
