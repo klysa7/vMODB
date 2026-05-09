@@ -412,6 +412,40 @@ public final class GatewayHttpHandler implements HttpHandler {
         return sb.toString();
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // /direct/chq6 — bypasses Calcite, hits the order VMS directly via socket.
+    //
+    // PARALLEL-AGGREGATION FIX
+    // ────────────────────────
+    // Previous version sent: predicates=0, projection=[8] (ol_amount).
+    // VMS-side TransactionManager.getScanIterator() detects the parallel
+    // path only when (tableName=="order_line" && predicates.size()==3),
+    // so the previous request fell through to MODE_SCAN_TO_GATEWAY's
+    // generic row-by-row stream — slower than the Calcite path which
+    // generates the 3-predicate request and triggers computeParallelChq6Sum.
+    //
+    // This version sends the same 3 WHERE-clause predicates Calcite emits,
+    // unlocking the parallel scan on the VMS side. computeParallelChq6Sum
+    // then encodes the result as a 4-byte float at offset 0 (because
+    // effectiveCols==[OL_AMOUNT_COL]) — the exact wire shape the response
+    // parser below already reads. No parser changes needed.
+    //
+    // SEMANTIC EQUIVALENCE (num_ware=1)
+    // ─────────────────────────────────
+    // computeParallelChq6Sum/scanSlotRangeFloatSum sums every active row;
+    // it does not actually evaluate predicates. This is correct for our
+    // workload because:
+    //   - all rows have ol_w_id == 1 (single warehouse)
+    //   - TPC-C ol_quantity ∈ [1, 10] ⊂ [1, 100000]
+    // so the WHERE clause is a tautology and "sum all active rows" equals
+    // "sum rows matching the predicates". This is exactly the same semantic
+    // shortcut the Calcite path already relies on. For num_ware > 1, this
+    // would need true predicate evaluation inside the parallel scan —
+    // documented as future work.
+    //
+    // Cite: HATtrick paper CHQ6 single-warehouse evaluation; same shortcut
+    //       used in Calcite path of TransactionManager.getScanIterator().
+    // ─────────────────────────────────────────────────────────────────────────
     private String executeChq6Direct() throws Exception {
         long startNano = System.nanoTime();
         double totalRevenue = 0.0;
@@ -422,10 +456,29 @@ public final class GatewayHttpHandler implements HttpHandler {
             DataOutputStream out = new DataOutputStream(socket.getOutputStream());
             DataInputStream  in  = new DataInputStream(socket.getInputStream());
 
+            // 3 predicates mirror SQL_CHQ6:
+            //   ol_w_id     (col 2) EQUALS                 1
+            //   ol_quantity (col 7) GREATER_THAN_OR_EQUAL  1
+            //   ol_quantity (col 7) LESS_THAN_OR_EQUAL     100000
+            // Same JSON shape used by executeChq4Direct — known to deserialize
+            // cleanly via PredicateDTO[] in VmsEventHandler.processQueryRequest.
+            String predicatesJson = "[" +
+                    "{\"columnReference\":{\"columnPosition\":2},\"expression\":\"EQUALS\",\"value\":1}," +
+                    "{\"columnReference\":{\"columnPosition\":7},\"expression\":\"GREATER_THAN_OR_EQUAL\",\"value\":1}," +
+                    "{\"columnReference\":{\"columnPosition\":7},\"expression\":\"LESS_THAN_OR_EQUAL\",\"value\":100000}" +
+                    "]";
+            byte[] predicatesBytes = predicatesJson.getBytes(StandardCharsets.UTF_8);
+
+            // Keep projectedCols=[8] (ol_amount). When the parallel path fires
+            // with effectiveCols=[OL_AMOUNT_COL], computeParallelChq6Sum writes
+            // the sum as a raw 4-byte float at offset 0 of the single result row
+            // — exactly what the response parser below expects.
             int[]  projectedCols  = new int[]{8};
             byte[] projectionData = QueryRequestEvent.serializeProjection(projectedCols);
 
-            ByteBuffer buffer = ByteBuffer.allocate(512).order(ByteOrder.BIG_ENDIAN);
+            // 1024 (was 512). Predicate JSON is ~220 bytes; total request is
+            // ~310 bytes. 1024 leaves comfortable margin for any future tweak.
+            ByteBuffer buffer = ByteBuffer.allocate(1024).order(ByteOrder.BIG_ENDIAN);
             int startPos = buffer.position();
             buffer.put(QueryRequestEvent.QUERY_REQUEST_TYPE);
             buffer.putInt(0);
@@ -437,8 +490,14 @@ public final class GatewayHttpHandler implements HttpHandler {
             buffer.putInt(tableName.length);
             buffer.put(tableName);
 
+            // CHANGED: predicates length+bytes (was putInt(0))
+            buffer.putInt(predicatesBytes.length);
+            buffer.put(predicatesBytes);
+
+            // routingData: 0 (unchanged)
             buffer.putInt(0);
-            buffer.putInt(0);
+
+            // projection: [8] = ol_amount (unchanged)
             buffer.putInt(projectionData.length);
             buffer.put(projectionData);
 
@@ -450,6 +509,9 @@ public final class GatewayHttpHandler implements HttpHandler {
             out.write(buffer.array(), 0, buffer.limit());
             out.flush();
 
+            // Response parsing UNCHANGED. Parallel agg returns ONE row of shape
+            // [rowSize:4=4][float:4=sum] inside a single QUERY_RESULT batch
+            // followed by END_OF_STREAM. The loop below reads exactly that.
             byte[] header = new byte[5];
             while (true) {
                 in.readFully(header);

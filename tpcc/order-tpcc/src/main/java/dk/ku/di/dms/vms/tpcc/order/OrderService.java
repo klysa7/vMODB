@@ -91,6 +91,45 @@ public final class OrderService {
     private static volatile long lastLogMs = 0;
     private static final long LOG_INTERVAL_MS = 10_000;
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // HISTORY EVICTION — Sliding-window FIFO for the HISTORY table
+    //
+    // HISTORY is keyed by an @Id @GeneratedValue Integer that grows
+    // monotonically from 1 (with occasional gaps from aborted or
+    // interleaved transactions — observed in the SEVERE log: ...704576,
+    // 704577, 704580, 704581...). Unlike orders/order_line, HISTORY is
+    // NOT seeded by populate, so there is no Phase 1 — every entry comes
+    // from a Payment transaction.
+    //
+    // PROBLEM observed at batch_sleep_ms=250: the table is pre-allocated
+    // for 500K rows (max_records.history in Main.java), but at ~9K
+    // payments/sec (48% of 19,500 tps × 30s × multiple cells), one grid
+    // run accumulates 700K+ rows and the underlying UniqueHashBufferIndex
+    // logs SEVERE "Cannot find an empty entry for history", followed by
+    // JVM OOM as aborted transactions accumulate in flight buffers.
+    //
+    // STRATEGY — sliding window of the last HISTORY_WINDOW inserts. Once
+    // we've inserted more than HISTORY_WINDOW rows, every new insert
+    // triggers a delete of the oldest ID (1, 2, 3, ...). Missing IDs from
+    // gaps are silent no-ops — same property the orders eviction relies
+    // on. Steady-state table size ≈ HISTORY_WINDOW rows.
+    //
+    // SIZING — HISTORY_WINDOW = 100K rows. At ~9K payments/sec this is
+    // ~11 seconds of recent history, which exceeds chq6's snapshot age
+    // by an order of magnitude. The window is small enough to leave 4×
+    // headroom in the 500K-row hash buffer for in-flight inserts.
+    //
+    // THREAD SAFETY — single AtomicLong floor since IDs are globally
+    // unique (not per-district like orders). HISTORY_INSERT_COUNT and
+    // HISTORY_EVICT_FLOOR are independent AtomicLongs; minor drift
+    // between them under concurrency is harmless.
+    // ─────────────────────────────────────────────────────────────────────────
+    private static final long HISTORY_WINDOW = 100_000L;
+    private static final AtomicLong HISTORY_INSERT_COUNT = new AtomicLong(0);
+    private static final AtomicLong HISTORY_EVICT_FLOOR  = new AtomicLong(0);
+    private static final AtomicLong HISTORY_EVICTIONS    = new AtomicLong(0);
+    private static volatile long lastHistoryLogMs = 0;
+
     private final IOrderRepository orderRepository;
     private final INewOrderRepository newOrderRepository;
     private final IOrderLineRepository orderLineRepository;
@@ -115,6 +154,33 @@ public final class OrderService {
                 out.d_id, out.w_id,
                 new Date(), out.amount, out.data);
         this.historyRepository.insert(history);
+        long inserted = HISTORY_INSERT_COUNT.incrementAndGet();
+
+        // ── EVICT: sliding-window FIFO ───────────────────────────────────────
+        // Once we've buffered HISTORY_WINDOW rows, every new insert evicts
+        // the oldest. Missing IDs from gaps in @GeneratedValue (visible in
+        // the SEVERE log as non-consecutive inserts) are silent no-ops, so
+        // the floor advances safely without bookkeeping.
+        if (inserted > HISTORY_WINDOW) {
+            long evictId = HISTORY_EVICT_FLOOR.incrementAndGet();
+            History toEvict = new History();
+            toEvict.id = (int) evictId;
+            this.historyRepository.delete(toEvict);
+            HISTORY_EVICTIONS.incrementAndGet();
+        }
+
+        // ── Periodic size log (every 10s) ────────────────────────────────────
+        long nowMs = System.currentTimeMillis();
+        if (nowMs - lastHistoryLogMs >= LOG_INTERVAL_MS) {
+            lastHistoryLogMs = nowMs;
+            long ins = HISTORY_INSERT_COUNT.get();
+            long ev  = HISTORY_EVICTIONS.get();
+            long net = ins - ev;
+            LOGGER.log(INFO,
+                    "[history size] inserted={0}, evicted={1}, net={2}. " +
+                            "Target: ~{3} rows steady-state (sliding-window FIFO).",
+                    ins, ev, net, HISTORY_WINDOW);
+        }
     }
 
     @Inbound(values = "order-status-out")
