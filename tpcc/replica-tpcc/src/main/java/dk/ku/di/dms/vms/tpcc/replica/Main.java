@@ -25,6 +25,13 @@ public final class Main {
     static final int REPLICA_VMS_PORT  = 8004;
     static final int REPLICA_HTTP_PORT = 8096;
 
+    /**
+     * Multiplier applied to expected row count when sizing the hash buffer.
+     * Matches the order VMS — replica order_line churns through the same
+     * insert/eviction pattern (FIFO eviction in ReplicaService.processNewOrder).
+     */
+    private static final int BUFFER_HEADROOM = 4;
+
     static VmsApplication VMS;
 
     public static void main(String[] args) throws Exception {
@@ -39,7 +46,8 @@ public final class Main {
         int numOrders    = numWare * 30_000 + (20_000 * 10);
         int numOrderLine = numOrders * 10;
 
-        prop.setProperty("max_records.order_line",    String.valueOf(numOrderLine));
+        prop.setProperty("max_records.order_line",
+                String.valueOf(numOrderLine * BUFFER_HEADROOM));
         prop.setProperty("table.order_line.chaining", "false");
         prop.setProperty("checkpointing",             "true");
 
