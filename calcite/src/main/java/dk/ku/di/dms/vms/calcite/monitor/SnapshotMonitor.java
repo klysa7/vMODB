@@ -9,7 +9,14 @@ import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.concurrent.atomic.AtomicLong;
 
-
+/**
+ * Background thread that subscribes to the coordinator's SSE endpoint
+ * ({@code /status/committed}) and advances the gateway's global snapshot ID
+ * whenever a new batch commits. The updated ID is consumed by
+ * {@link dk.ku.di.dms.vms.calcite.service.OlapGatewayService} to ensure
+ * analytical queries always execute against the freshest committed snapshot.
+ * Reconnects automatically on connection loss with a 2-second backoff.
+ */
 public class SnapshotMonitor implements Runnable {
 
     private final String coordinatorUrl;

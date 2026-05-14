@@ -9,7 +9,14 @@ import org.apache.calcite.rel.RelNode;
 
 import static java.lang.System.Logger.Level.DEBUG;
 import static java.lang.System.Logger.Level.INFO;
-
+/**
+ * Coordinates the two-phase execution of a distributed analytical query:
+ * delegates physical plan translation to {@link DistributedPlanner} to
+ * produce a {@link DistributedPlan}, then hands it to
+ * {@link DistributedExecutor} for pushdown execution against the VMS cluster.
+ * Called once per query by {@link dk.ku.di.dms.vms.calcite.service.OlapGatewayService}
+ * with a deep-copied Calcite plan and the current snapshot ID.
+ */
 public final class Orchestrator {
 
     private static final System.Logger LOGGER =

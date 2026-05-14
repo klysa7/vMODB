@@ -16,7 +16,16 @@ import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.TimeUnit;
 
 import static java.lang.System.Logger.Level.ERROR;
-
+/**
+ * Background worker that streams scan or join results back to the Calcite
+ * gateway over an {@link AsynchronousSocketChannel} using a two-buffer pool
+ * and a CAS write-synchroniser to serialise async writes. Supports two
+ * iteration modes: raw record addresses from a {@link UniqueHashBufferIndex}
+ * (scan path) and pre-joined byte arrays (join path). On write failure or
+ * spin-lock timeout the worker sends a type-102 abort frame so the gateway's
+ * VmsResultIterator can throw
+ * immediately rather than blocking indefinitely.
+ */
 public final class VmsQueryWorker extends StoppableRunnable {
 
     private static final System.Logger LOGGER = System.getLogger(VmsQueryWorker.class.getName());

@@ -30,6 +30,16 @@ import java.util.concurrent.TimeUnit;
 import static dk.ku.di.dms.vms.modb.common.schema.network.query.QueryResultEvent.END_OF_STREAM_TYPE;
 import static dk.ku.di.dms.vms.modb.common.schema.network.query.QueryResultEvent.QUERY_RESULT_TYPE;
 
+/**
+ * HTTP handler for all analytical query endpoints exposed by the gateway.
+ * Routes GET requests to one of three execution paths: the Calcite path
+ * (via {@link OlapGatewayService}), the direct path (raw socket to the
+ * order VMS on port 8003, or warehouse VMS on port 8001 for CHQ3's
+ * customer-key fetch), or the replica path (proxied to port 8096).
+ * Implements scan sharing: concurrent requests for the same query and
+ * snapshot ID join a single in-flight execution rather than issuing
+ * duplicate scans.
+ */
 public final class GatewayHttpHandler implements HttpHandler {
 
     private static final HttpClient REPLICA_HTTP_CLIENT = HttpClient.newBuilder()

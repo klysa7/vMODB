@@ -9,6 +9,14 @@ import java.nio.charset.StandardCharsets;
 import java.util.Iterator;
 import java.util.List;
 
+/**
+ * TCP client that sends a scan request to a VMS gateway and
+ * returns a {@link VmsResultIterator} over the streamed result rows.
+ * Serialises the query parameters (queryId, snapshotId, mode, table name,
+ * predicates, routing data, projection data) into the wire format expected
+ * by the VMS network handler. Used by the Calcite query planner layer to
+ * issue scans against remote VMS tables.
+ */
 public class VmsGatewayClient {
 
     private static final byte QUERY_REQUEST_TYPE = 99;

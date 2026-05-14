@@ -31,7 +31,17 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import static java.lang.System.Logger.Level.ERROR;
 import static java.lang.System.Logger.Level.INFO;
-
+/**
+ * Translates a {@link DistributedPlan} into a Volcano-style operator tree
+ * and drives its execution to completion. Scan leaves become
+ * {@link StreamingScanOperator} instances that pull rows from remote VMSes
+ * via {@link VmsGatewayClient}; join nodes are either converted to a
+ * distributed broadcast join (B13 optimisation — one VMS streams its scan
+ * directly to another) or fall back to a local hash join at the gateway.
+ * Projection and aggregation nodes are always executed locally.
+ * Column-descriptor and join-descriptor lists are cached across calls
+ * (QPO-7) and cache hit/miss statistics are dumped to stderr on shutdown.
+ */
 public final class DistributedExecutor {
 
     private static final System.Logger LOGGER =

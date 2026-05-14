@@ -24,7 +24,16 @@ import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 import static java.lang.System.Logger.Level.INFO;
-
+/**
+ * Core service that executes SQL analytical queries against the vMODB
+ * microservice cluster. On the first call it fetches the schema catalog
+ * from the coordinator, builds the {@link Orchestrator} (planner +
+ * executor), and caches the Calcite physical plan per SQL string so
+ * subsequent calls skip re-planning. Each execution deep-copies the
+ * cached plan before dispatch to keep the cached node immutable across
+ * concurrent requests. Plan-cache hit/miss statistics are dumped to
+ * stderr on JVM shutdown.
+ */
 public final class OlapGatewayService {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();

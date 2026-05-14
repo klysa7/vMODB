@@ -6,7 +6,13 @@ import dk.ku.di.dms.vms.calcite.olap.queryPlanner.planner.CalcitePlanner;
 import org.apache.calcite.schema.SchemaPlus;
 
 import java.util.List;
-
+/**
+ * Thin facade over {@link CalcitePlanner} that builds the Calcite root schema
+ * from the coordinator catalog before each planning call. Accepts a SQL string
+ * and optional parameters, delegates to {@link CalcitePlanner#planOnly} and
+ * returns the physical plan output consumed by
+ * {@link dk.ku.di.dms.vms.calcite.service.OlapGatewayService}.
+ */
 public final class QueryPlanner {
 
     private final CoordinatorCatalog catalog;

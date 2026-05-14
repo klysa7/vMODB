@@ -15,6 +15,15 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 
+/**
+ * Entry point and wiring class for the Calcite analytical gateway.
+ * Instantiates and connects {@link OlapGatewayService}, {@link GatewayHttpHandler},
+ * and {@link SnapshotMonitor}, then starts the embedded {@link HttpServer}
+ * on the configured bind address with a fixed thread pool.
+ * The shared {@code globalSnapshotId} is written by the monitor thread
+ * and read by the service on every query to pin scans to the latest
+ * committed snapshot.
+ */
 public final class GatewayApp {
 
     private final Function<String, CoordinatorClient> coordinatorClientFactory;
