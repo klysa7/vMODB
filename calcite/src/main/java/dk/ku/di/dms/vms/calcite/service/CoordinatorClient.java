@@ -8,7 +8,13 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-
+/**
+ * Thin HTTP client for the vMODB coordinator's internal REST API.
+ * Currently exposes one endpoint: {@code /internal/catalog}, which
+ * returns the full schema catalog consumed by {@link OlapGatewayService}
+ * to build the Calcite schema and query planner on first use.
+ * Wraps all HTTP and JSON errors in {@link CoordinatorClientException}.
+ */
 public final class CoordinatorClient {
 
     private final ObjectMapper mapper;

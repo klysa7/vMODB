@@ -15,6 +15,14 @@ import java.util.*;
 import static java.lang.System.Logger.Level.ERROR;
 import static java.lang.System.Logger.Level.INFO;
 
+/**
+ * Streaming {@link java.util.Iterator} over rows returned by a VMS gateway
+ * scan. Reads length-prefixed batches from the TCP socket opened by
+ * {@link VmsGatewayClient}, deserialising each raw byte row into a typed
+ * {@code Object[]} using the column descriptors provided at construction.
+ * Handles the three VMS response codes: result batch (100), end-of-stream
+ * (101), and worker abort (102).
+ */
 public class VmsResultIterator implements Iterator<Object[]> {
 
     private static final System.Logger LOGGER =

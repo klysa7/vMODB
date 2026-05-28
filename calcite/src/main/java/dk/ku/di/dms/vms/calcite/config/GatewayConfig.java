@@ -8,7 +8,14 @@ import java.nio.file.Paths;
 import java.util.Objects;
 import java.util.Properties;
 
-
+/**
+ * Immutable configuration for the Calcite gateway server, loaded once at
+ * startup via {@link #load()}. Resolves values in priority order: defaults,
+ * then {@code application.properties} (filesystem or classpath), then
+ * environment variables. Exposes the bind host, port, thread count, and
+ * the coordinator HTTP and SSE URLs consumed by the gateway's network and
+ * commit-notification components.
+ */
 public final class GatewayConfig {
 
     private final String bindHost;
@@ -56,50 +63,47 @@ public final class GatewayConfig {
         return new GatewayConfig(bindHost, port, httpUrl, sseUrl, threads);
     }
 
-    public static GatewayConfig fromEnv() {
-        return load();
-    }
     public String getBindHost()           { return bindHost; }
-    public int    getPort()               { return port; }
+    public Integer    getPort()               { return port; }
     public String getCoordinatorHttpUrl() { return coordinatorHttpUrl; }
     public String getCoordinatorSseUrl()  { return coordinatorSseUrl; }
-    public int    getGatewayThreads()     { return gatewayThreads; }
+    public Integer    getGatewayThreads()     { return gatewayThreads; }
 
     private static Properties loadProperties() {
-        Properties props = new Properties();
-        InputStream stream = openProperties();
-        if (stream == null) {
+        Properties properties = new Properties();
+        InputStream inputStream = openProperties();
+        if (inputStream == null) {
             System.out.println("[GatewayConfig] No application.properties found — using defaults.");
-            return props;
+            return properties;
         }
-        try (stream) {
-            props.load(stream);
+        try (inputStream) {
+            properties.load(inputStream);
             System.out.println("[GatewayConfig] Loaded application.properties ("
-                    + props.size() + " keys).");
+                    + properties.size() + " keys).");
         } catch (IOException e) {
             System.err.println("[GatewayConfig] Failed to read application.properties: "
                     + e.getMessage());
         }
-        return props;
+        return properties;
     }
 
     private static InputStream openProperties() {
-        Path workDir = Paths.get("application.properties");
-        if (Files.exists(workDir)) {
-            try { return Files.newInputStream(workDir); } catch (IOException ignored) {}
+        Path path = Paths.get("application.properties");
+        if (Files.exists(path)) {
+            try { return Files.newInputStream(path); } catch (IOException ignored) {}
         }
         return GatewayConfig.class.getClassLoader()
                 .getResourceAsStream("application.properties");
     }
 
-    private static String getEnv(String key, String def) {
-        String v = System.getenv(key);
-        return (v == null || v.isBlank()) ? def : v;
+    private static String getEnv(String key, String definition) {
+        String environment = System.getenv(key);
+        return (environment == null || environment.isBlank()) ? definition : environment;
     }
 
-    private static int parseInt(String v, int def) {
-        if (v == null || v.isBlank()) return def;
-        try { return Integer.parseInt(v.trim()); } catch (Exception e) { return def; }
+    private static int parseInt(String environment, int definition) {
+        if (environment == null || environment.isBlank()) return definition;
+        try { return Integer.parseInt(environment.trim()); } catch (Exception e) { return definition; }
     }
 
     @Override

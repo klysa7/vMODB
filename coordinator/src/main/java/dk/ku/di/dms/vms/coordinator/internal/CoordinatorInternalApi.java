@@ -13,7 +13,15 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-
+/**
+ * Embedded HTTP server that exposes the coordinator's internal REST API
+ * to the Calcite gateway. Serves two endpoints: {@code /internal/snapshot}
+ * returns the current committed snapshot ID, and {@code /internal/catalog}
+ * returns the full schema catalog (tables, columns, owners, placement) as
+ * JSON consumed by {@link dk.ku.di.dms.vms.calcite.service.CoordinatorClient}.
+ * Column metadata is extracted reflectively to avoid hard coupling to a
+ * specific catalog table implementation.
+ */
 public final class CoordinatorInternalApi {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
