@@ -564,37 +564,40 @@ public final class PrimaryIndex implements IMultiVersionIndex {
     private final class PrimaryIndexIteratorDisk implements Iterator<Object[]> {
         private final TransactionContext txCtx;
         private final IRecordIterator<IKey> iterator;
-        private final Set<IKey> updatesPerKeyMapCopy;
         private Object[] currRecord;
 
         public PrimaryIndexIteratorDisk(TransactionContext txCtx) {
             this.txCtx = txCtx;
             this.iterator = rawIndex.iterator();
-            this.updatesPerKeyMapCopy = new HashSet<>(updatesPerKeyMap.keySet());
         }
 
         @SuppressWarnings("unchecked")
         @Override
         public boolean hasNext() {
-            while(this.iterator.hasNext()){
-                long address = this.iterator.address();
-                this.currRecord = ((ReadOnlyBufferIndex<IKey>)rawIndex).readFromIndex(address + Schema.RECORD_HEADER);
-                IKey nextKey = KeyUtils.buildRecordKey(rawIndex.schema().getPrimaryKeyColumns(), this.currRecord);
-                if(this.updatesPerKeyMapCopy.remove(nextKey)){
-                    OperationSetOfKey opSet = updatesPerKeyMap.get(nextKey);
-                    if(opSet == null) {
+            while (this.iterator.hasNext()) {
+                long address     = this.iterator.address();
+                long dataAddress = address + Schema.RECORD_HEADER;
+
+                UniqueHashBufferIndex uhbi = (UniqueHashBufferIndex) rawIndex;
+                IKey nextKey = uhbi.readPkFromAddress(dataAddress);
+
+                long snapshotToUse = this.txCtx.readOnly
+                        ? this.txCtx.lastTid
+                        : this.txCtx.tid;
+
+                OperationSetOfKey opSet = updatesPerKeyMap.get(nextKey);
+                if (opSet != null) {
+                    Entry<Long, TransactionWrite> entry = opSet.floorEntry(snapshotToUse);
+                    if (entry != null) {
+                        if (entry.val().type == WriteType.DELETE) {
+                            continue;
+                        }
+                        this.currRecord = entry.val().record;
                         return true;
                     }
-                    Entry<Long, TransactionWrite> entry = opSet.floorEntry(this.txCtx.readOnly ? this.txCtx.lastTid : this.txCtx.tid);
-                    if(entry == null || entry.val().type == WriteType.DELETE) {
-                        if(this.iterator.hasNext()) {
-                            continue;
-                        } else {
-                            return false;
-                        }
-                    }
-                    this.currRecord = entry.val().record;
                 }
+
+                this.currRecord = uhbi.readFromIndex(dataAddress);
                 return true;
             }
             return false;
@@ -660,4 +663,49 @@ public final class PrimaryIndex implements IMultiVersionIndex {
 
     }
 
+
+    public float scanSlotRangeFloatSum(long startAddress,
+                                       int numSlots,
+                                       int columnIndex,
+                                       int colByteOffsetFromHeader,
+                                       long snapshotTid) {
+        if (!(this.rawIndex instanceof UniqueHashBufferIndex uhbi)) {
+            throw new IllegalStateException(
+                    "scanSlotRangeFloatSum requires UniqueHashBufferIndex");
+        }
+
+        float sum = 0f;
+        long recSize = uhbi.slotByteSize();
+        long addr    = startAddress;
+
+        for (int i = 0; i < numSlots; i++, addr += recSize) {
+
+            if (!uhbi.isSlotActive(addr)) continue;
+            IKey key = uhbi.readPkFromAddress(addr + dk.ku.di.dms.vms.modb.definition.Schema.RECORD_HEADER);
+
+            OperationSetOfKey opSet = updatesPerKeyMap.get(key);
+
+            if (opSet != null) {
+                Entry<Long, TransactionWrite> entry = opSet.floorEntry(snapshotTid);
+
+                if (entry == null) {
+                    sum += uhbi.readColumnFloat(addr, colByteOffsetFromHeader);
+
+                } else if (entry.val().type == WriteType.DELETE) {
+                    continue;
+
+                } else {
+                    Object val = entry.val().record[columnIndex];
+                    if (val != null) {
+                        sum += ((Number) val).floatValue();
+                    }
+                }
+
+            } else {
+                sum += uhbi.readColumnFloat(addr, colByteOffsetFromHeader);
+            }
+        }
+
+        return sum;
+    }
 }

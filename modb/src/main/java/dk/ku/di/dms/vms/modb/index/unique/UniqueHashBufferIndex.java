@@ -14,6 +14,7 @@ import dk.ku.di.dms.vms.modb.storage.iterator.unique.KeyRecordIterator;
 import dk.ku.di.dms.vms.modb.storage.iterator.unique.RecordIterator;
 import dk.ku.di.dms.vms.modb.storage.record.RecordBufferContext;
 
+import java.nio.ByteBuffer;
 import java.util.concurrent.locks.ReentrantLock;
 
 import static dk.ku.di.dms.vms.modb.common.memory.MemoryUtils.UNSAFE;
@@ -57,6 +58,16 @@ public class UniqueHashBufferIndex extends ReadWriteIndex<IKey> implements ReadW
         this.capacity = capacity;
         this.limit = recordBufferContext.address + (this.recordSize * (this.capacity == 1 ? 1 : this.capacity - 1));
         this.p = Integer.numberOfTrailingZeros(this.capacity);
+    }
+
+    public void copyRecordToBuffer(long srcAddress, ByteBuffer destinationBuffer) {
+        long dataAddress = srcAddress + Schema.RECORD_HEADER;
+        int dataSize = this.schema.getRecordSizeWithoutHeader();
+
+        byte[] temp = new byte[dataSize];
+        UNSAFE.copyMemory(null, dataAddress, temp, UNSAFE.arrayBaseOffset(byte[].class), dataSize);
+
+        destinationBuffer.put(temp);
     }
 
     @Override
@@ -252,6 +263,26 @@ public class UniqueHashBufferIndex extends ReadWriteIndex<IKey> implements ReadW
         return -1;
     }
 
+    public IKey readPkFromAddress(long dataAddress) {
+        int[]    pkCols  = this.schema.getPrimaryKeyColumns();
+        int[]    offsets = this.schema.columnOffset();
+        Object[] pkVals  = new Object[pkCols.length];
+        for (int i = 0; i < pkCols.length; i++) {
+            int  col     = pkCols[i];
+
+            long colAddr = dataAddress + (offsets[col] - Schema.RECORD_HEADER);
+            pkVals[i] = switch (this.schema.columnDataType(col)) {
+                case INT    -> UNSAFE.getInt(null, colAddr);
+                case LONG   -> UNSAFE.getLong(null, colAddr);
+                case FLOAT  -> UNSAFE.getFloat(null, colAddr);
+                case DOUBLE -> UNSAFE.getDouble(null, colAddr);
+                // Strings not expected as PK columns in TPC-C but handled safely
+                default     -> UNSAFE.getInt(null, colAddr);
+            };
+        }
+        return KeyUtils.buildRecordKey(pkVals);
+    }
+
     /**
      * Check whether the record is active (if exists)
      */
@@ -319,4 +350,25 @@ public class UniqueHashBufferIndex extends ReadWriteIndex<IKey> implements ReadW
         this.recordBufferContext.force();
     }
 
+
+
+    public long baseAddress() {
+        return this.recordBufferContext.address;
+    }
+
+    public long slotByteSize() {
+        return this.recordSize;
+    }
+
+    public int slotCapacity() {
+        return this.capacity;
+    }
+
+    public boolean isSlotActive(long slotAddress) {
+        return UNSAFE.getByte(null, slotAddress) == Header.ACTIVE_BYTE;
+    }
+
+    public float readColumnFloat(long slotAddress, int colByteOffsetFromHeader) {
+        return UNSAFE.getFloat(null, slotAddress + Schema.RECORD_HEADER + colByteOffsetFromHeader);
+    }
 }

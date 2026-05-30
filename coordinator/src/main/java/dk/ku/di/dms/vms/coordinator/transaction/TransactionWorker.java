@@ -6,8 +6,10 @@ import dk.ku.di.dms.vms.modb.common.runnable.StoppableRunnable;
 import dk.ku.di.dms.vms.modb.common.schema.network.node.VmsNode;
 import dk.ku.di.dms.vms.modb.common.schema.network.transaction.TransactionEvent;
 import dk.ku.di.dms.vms.modb.common.serdes.IVmsSerdesProxy;
+import dk.ku.di.dms.vms.modb.common.utils.ConfigUtils;
 
 import java.util.*;
+import java.util.concurrent.locks.LockSupport;
 
 import static java.lang.System.Logger.Level.*;
 
@@ -39,6 +41,9 @@ public final class TransactionWorker extends StoppableRunnable {
     private final Map<Long, Map<String, PrecedenceInfo>> precedenceMapCache;
     private final Queue<Object> coordinatorQueue;
 
+    /** Sleep applied after every batch is sealed. 0 = disabled. */
+    private final long batchSleepNanos;
+
     private static class VmsTracking {
         public final String identifier;
         public long batch;
@@ -58,9 +63,11 @@ public final class TransactionWorker extends StoppableRunnable {
     private record PendingTransactionInput (long tid, long batch, TransactionInput input, Set<String> pendingVMSs, Map<String, Long> previousTidPerVms){}
 
     /**
-     * Build private VmsTracking objects
+     * Default builder. It reads batch_sleep_ms from app.properties automatically.
+     * This is the existing call signature, so all current callers (e.g.
+     * Coordinator.java) keep working without changes. The throttle is
+     * controlled entirely via the property file.
      */
-    @SuppressWarnings("ToArrayCallWithZeroLengthArrayArgument")
     public static TransactionWorker build(int id, Deque<TransactionInput> inputQueue,
                                           long startingTid, int maxNumberOfTIDsBatch,
                                           int batchWindow, int numWorkers,
@@ -71,6 +78,33 @@ public final class TransactionWorker extends StoppableRunnable {
                                           Map<String, IVmsWorker> vmsWorkerContainerMap,
                                           Queue<Object> coordinatorQueue,
                                           IVmsSerdesProxy serdesProxy){
+        double batchSleepMs;
+        try {
+            batchSleepMs = Double.parseDouble(
+                    ConfigUtils.loadProperties().getProperty("batch_sleep_ms", "0"));
+        } catch (Exception e) {
+            LOGGER.log(WARNING, "Failed to read batch_sleep_ms from properties, " +
+                    "defaulting to 0. Reason: " + e.getMessage());
+            batchSleepMs = 0.0;
+        }
+        return build(id, inputQueue, startingTid, maxNumberOfTIDsBatch, batchWindow, numWorkers,
+                precedenceMapInputQueue, precedenceMapOutputQueue, transactionMap,
+                vmsIdentifiersPerDAG, vmsWorkerContainerMap, coordinatorQueue, serdesProxy,
+                batchSleepMs);
+    }
+
+    @SuppressWarnings("ToArrayCallWithZeroLengthArrayArgument")
+    public static TransactionWorker build(int id, Deque<TransactionInput> inputQueue,
+                                          long startingTid, int maxNumberOfTIDsBatch,
+                                          int batchWindow, int numWorkers,
+                                          Queue<Map<String, PrecedenceInfo>> precedenceMapInputQueue,
+                                          Queue<Map<String, PrecedenceInfo>> precedenceMapOutputQueue,
+                                          Map<String, TransactionDAG> transactionMap,
+                                          Map<String, VmsNode[]> vmsIdentifiersPerDAG,
+                                          Map<String, IVmsWorker> vmsWorkerContainerMap,
+                                          Queue<Object> coordinatorQueue,
+                                          IVmsSerdesProxy serdesProxy,
+                                          double batchSleepMs){
         Map<String, VmsTracking> vmsTrackingMap = new HashMap<>();
         Map<String, VmsTracking[]> vmsPerTransactionMap = new HashMap<>(vmsIdentifiersPerDAG.size());
         for(var txEntry : vmsIdentifiersPerDAG.entrySet()){
@@ -85,7 +119,8 @@ public final class TransactionWorker extends StoppableRunnable {
         }
         return new TransactionWorker(id, inputQueue, startingTid, maxNumberOfTIDsBatch, batchWindow, numWorkers,
                 precedenceMapInputQueue, precedenceMapOutputQueue, transactionMap,
-                vmsPerTransactionMap, vmsTrackingMap, vmsWorkerContainerMap, coordinatorQueue, serdesProxy);
+                vmsPerTransactionMap, vmsTrackingMap, vmsWorkerContainerMap, coordinatorQueue, serdesProxy,
+                batchSleepMs);
     }
 
     private TransactionWorker(int id, Deque<TransactionInput> inputQueue,
@@ -94,7 +129,8 @@ public final class TransactionWorker extends StoppableRunnable {
                               Queue<Map<String, PrecedenceInfo>> precedenceMapOutputQueue,
                               Map<String, TransactionDAG> transactionMap, Map<String, VmsTracking[]> vmsPerTransactionMap,
                               Map<String, VmsTracking> vmsTrackingMap, Map<String, IVmsWorker> vmsWorkerContainerMap,
-                              Queue<Object> coordinatorQueue, IVmsSerdesProxy serdesProxy){
+                              Queue<Object> coordinatorQueue, IVmsSerdesProxy serdesProxy,
+                              double batchSleepMs){
         this.id = id;
         this.inputQueue = inputQueue;
         this.startingTidBatch = startingTidBatch;
@@ -118,11 +154,15 @@ public final class TransactionWorker extends StoppableRunnable {
         this.batchContext = new BatchContext(startingBatchOffset);
 
         this.coordinatorQueue = coordinatorQueue;
+
+        this.batchSleepNanos = (long) (batchSleepMs * 1_000_000.0);
     }
 
     @Override
     public void run() {
-        LOGGER.log(INFO, "Starting transaction worker # " + this.id);
+        LOGGER.log(INFO, "Starting transaction worker # " + this.id +
+                " (batch_sleep_ms=" + (this.batchSleepNanos / 1_000_000.0) +
+                ", batchSleepNanos=" + this.batchSleepNanos + ")");
         TransactionInput data;
         long lastTidBatch;
         long end;
@@ -148,6 +188,10 @@ public final class TransactionWorker extends StoppableRunnable {
 
             this.tid = this.getTidNextBatch();
             this.startingTidBatch = this.tid;
+
+            if (this.batchSleepNanos > 0) {
+                LockSupport.parkNanos(this.batchSleepNanos);
+            }
         }
         LOGGER.log(INFO, "Finishing transaction worker # " + this.id);
     }

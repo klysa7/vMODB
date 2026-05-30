@@ -52,4 +52,15 @@ public final class QuadrupleCompositeKey extends BaseComposite implements IKey {
         return 4;
     }
 
+    @Override
+    public Object getValue(int index) {
+        return switch (index) {
+            case 0 -> value0;
+            case 1 -> value1;
+            case 2 -> value2;
+            case 3 -> value3;
+            default -> throw new IndexOutOfBoundsException("QuadrupleCompositeKey index: " + index);
+        };
+    }
+
 }

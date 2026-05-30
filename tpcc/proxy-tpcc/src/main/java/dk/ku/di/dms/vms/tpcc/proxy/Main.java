@@ -5,6 +5,7 @@ import dk.ku.di.dms.vms.modb.common.data_structure.Tuple;
 import dk.ku.di.dms.vms.modb.common.utils.ConfigUtils;
 import dk.ku.di.dms.vms.tpcc.proxy.dataload.DataLoadUtils;
 import dk.ku.di.dms.vms.tpcc.proxy.experiment.ExperimentUtils;
+import dk.ku.di.dms.vms.tpcc.proxy.hattrick.HATtrickMain;
 import dk.ku.di.dms.vms.tpcc.proxy.infra.MinimalHttpClient;
 import dk.ku.di.dms.vms.tpcc.proxy.workload.WorkloadUtils;
 
@@ -56,7 +57,8 @@ public final class Main {
 
         // data population
         ForkJoinPool pool = ForkJoinPool.commonPool();
-        Future<?>[] futures = new Future[3];
+        // 4 futures: order, warehouse, inventory, replica
+        Future<?>[] futures = new Future[4];
 
         Scanner scanner = new Scanner(System.in);
         boolean running = true;
@@ -66,12 +68,17 @@ public final class Main {
             String choice = scanner.nextLine();
             switch (choice) {
                 case "1": {
+                    boolean useReplica = Boolean.parseBoolean(PROPERTIES.getProperty("use_replica", "false"));
                     futures[0] = pool.submit(() -> submitDataPopulationRequest("order", truncate));
                     futures[1] = pool.submit(() -> submitDataPopulationRequest("warehouse", truncate));
                     futures[2] = pool.submit(() -> submitDataPopulationRequest("inventory", truncate));
+                    if (useReplica) {
+                        futures[3] = pool.submit(() -> submitDataPopulationRequest("replica", truncate));
+                    }
                     try {
-                        for (int i = 2; i >= 0; i--) {
-                            futures[i].get();
+                        int maxFuture = useReplica ? 3 : 2;
+                        for (int i = maxFuture; i >= 0; i--) {
+                            if (futures[i] != null) futures[i].get();
                         }
                     } catch(InterruptedException | ExecutionException e){
                         System.out.println("Error on PUT endpoint of one or more of the endpoints!");
@@ -162,6 +169,9 @@ public final class Main {
                     DataLoadUtils.cleanup(true);
                     System.out.println("VMS states reset.");
                     break;
+                case "7":
+                    HATtrickMain.run(coordinator);
+                    break;
                 case "q":
                     System.out.println("Exiting the application...");
                     running = false;
@@ -202,23 +212,28 @@ public final class Main {
         }
         return false;
     }
-
     public static Map<String, Integer> buildTransactionRatioMap(){
         Map<String, Integer> txRatioMap = new TreeMap<>();
-        boolean seen_100 = false;
+        int total = 0;
         if(!PROPERTIES.get("new_order").toString().equals("0")) {
-            txRatioMap.put("new_order", Integer.valueOf(PROPERTIES.get("new_order").toString()));
-            if(txRatioMap.get("new_order") == 100) seen_100 = true;
+            int v = Integer.parseInt(PROPERTIES.get("new_order").toString());
+            txRatioMap.put("new_order", v);
+            total += v;
         }
         if(!PROPERTIES.get("payment").toString().equals("0")) {
-            txRatioMap.put("payment", Integer.valueOf(PROPERTIES.get("payment").toString()));
-            if(txRatioMap.get("payment") == 100) seen_100 = true;
+            int v = Integer.parseInt(PROPERTIES.get("payment").toString());
+            txRatioMap.put("payment", v);
+            total += v;
         }
         if(!PROPERTIES.get("order_status").toString().equals("0")) {
-            txRatioMap.put("order_status", Integer.valueOf(PROPERTIES.get("order_status").toString()));
-            if(txRatioMap.get("order_status") == 100) seen_100 = true;
+            int v = Integer.parseInt(PROPERTIES.get("order_status").toString());
+            txRatioMap.put("order_status", v);
+            total += v;
         }
-        if(!seen_100) throw new RuntimeException("No transaction defined as 100 in app.properties!");
+        if(total != 100) {
+            throw new RuntimeException(
+                    "Transaction ratios must sum to 100 in app.properties! Current sum: " + total);
+        }
         return txRatioMap;
     }
 
@@ -226,8 +241,10 @@ public final class Main {
     private static Tuple<Integer, String>[] buildTransactionRatio(Map<String, Integer> txRatioMap) {
         Tuple<Integer, String>[] txRatio = new Tuple[txRatioMap.size()];
         int i = 0;
-        for(var entry : txRatioMap.entrySet()) {
-            txRatio[i] = Tuple.of(entry.getValue(), entry.getKey());
+        int cumulative = 0;
+        for (var entry : txRatioMap.entrySet()) {
+            cumulative += entry.getValue();
+            txRatio[i] = Tuple.of(cumulative, entry.getKey());
             i++;
         }
         return txRatio;
@@ -241,6 +258,7 @@ public final class Main {
         System.out.println("4. Submit workload");
         System.out.println("5. Cleanup VMS states");
         System.out.println("6. Reset VMS states");
+        System.out.println("7. HATtrick throughput frontier experiment");
         System.out.println("q. Quit program");
     }
 

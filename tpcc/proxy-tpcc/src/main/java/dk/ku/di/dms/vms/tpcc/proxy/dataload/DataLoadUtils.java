@@ -19,7 +19,8 @@ public final class DataLoadUtils {
      */
     public static final int WAREHOUSE_VMS_PORT = 8001;
     public static final int INVENTORY_VMS_PORT = 8002;
-    public static final int ORDER_VMS_PORT = 8003;
+    public static final int ORDER_VMS_PORT     = 8003;
+    public static final int REPLICA_VMS_PORT   = 8004;
 
     public static final Map<String, Integer> VMS_TO_PORT_MAP;
 
@@ -27,18 +28,23 @@ public final class DataLoadUtils {
 
     static {
         Properties properties = ConfigUtils.loadProperties();
-        VMS_TO_HOST_MAP = new HashMap<>(3);
+
+        VMS_TO_HOST_MAP = new HashMap<>(4);
         VMS_TO_HOST_MAP.put("warehouse", properties.getProperty("warehouse_host"));
         VMS_TO_HOST_MAP.put("inventory", properties.getProperty("inventory_host"));
-        VMS_TO_HOST_MAP.put("order", properties.getProperty("order_host"));
+        VMS_TO_HOST_MAP.put("order",     properties.getProperty("order_host"));
+        VMS_TO_HOST_MAP.put("replica",
+                properties.getProperty("replica_host", "localhost"));
 
-        VMS_TO_PORT_MAP = new HashMap<>(3);
+        VMS_TO_PORT_MAP = new HashMap<>(4);
         VMS_TO_PORT_MAP.put("warehouse", WAREHOUSE_VMS_PORT);
         VMS_TO_PORT_MAP.put("inventory", INVENTORY_VMS_PORT);
-        VMS_TO_PORT_MAP.put("order", ORDER_VMS_PORT);
+        VMS_TO_PORT_MAP.put("order",     ORDER_VMS_PORT);
+        VMS_TO_PORT_MAP.put("replica",   REPLICA_VMS_PORT);
     }
 
-    private static final Map<String, ConcurrentLinkedDeque<MinimalHttpClient>> CONNECTION_POOL = new ConcurrentHashMap<>();
+    private static final Map<String, ConcurrentLinkedDeque<MinimalHttpClient>> CONNECTION_POOL =
+            new ConcurrentHashMap<>();
 
     /**
      * In case the services have been restarted, the cached connections won't work anymore
@@ -74,17 +80,17 @@ public final class DataLoadUtils {
     }
 
     public static void cleanup(boolean reset) {
-        String param;
+        String param = reset ? "reset" : "cleanup";
         Properties properties = ConfigUtils.loadProperties();
-        if(reset) param = "reset"; else param = "cleanup";
-        for(Map.Entry<String, Integer> vms : VMS_TO_PORT_MAP.entrySet()){
+        for (Map.Entry<String, Integer> vms : VMS_TO_PORT_MAP.entrySet()) {
+            if (vms.getKey().equals("replica")) continue;
             String host = properties.getProperty(vms.getKey() + "_host");
-            try(MinimalHttpClient client = new MinimalHttpClient(host, vms.getValue())){
-                if(client.sendRequest("PATCH", "", param) != 200){
-                    System.out.println("Error on resetting "+vms+" state!");
+            try (MinimalHttpClient client = new MinimalHttpClient(host, vms.getValue())) {
+                if (client.sendRequest("PATCH", "", param) != 200) {
+                    System.out.println("Error on resetting " + vms.getKey() + " state!");
                 }
             } catch (IOException e) {
-                System.out.println("Exception on resetting "+vms+" state: \n"+e);
+                System.out.println("Exception on resetting " + vms.getKey() + " state:\n" + e);
             }
         }
     }

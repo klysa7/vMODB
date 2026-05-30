@@ -12,6 +12,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
 
 import static java.lang.System.Logger.Level.ERROR;
@@ -61,6 +63,15 @@ public abstract class ModbHttpServer extends StoppableRunnable {
         private final CloseWriteCH closeWriteCH = new CloseWriteCH();
         private final BigBbWriteCH bigBbWriteCH = new BigBbWriteCH();
         private final SseWriteCH sseWriteCH;
+
+        // Dedicated SSE outbound state. A small per-client buffer plus single-flight
+        // coalescing: overlapping batch-commit notifications never reuse a buffer that
+        // is still mid-write, which is what threw BufferOverflowException on the
+        // coordinator thread. Only the newest committed count matters to subscribers,
+        // so intermediate values are coalesced rather than queued.
+        private final ByteBuffer sseBuffer = ByteBuffer.allocateDirect(64);
+        private final AtomicBoolean sseWriting = new AtomicBoolean(false);
+        private final AtomicLong pendingSse = new AtomicLong(-1L);
 
         // tracking of current client request
         public static final class RequestTracking {
@@ -329,18 +340,42 @@ public abstract class ModbHttpServer extends StoppableRunnable {
             this.writeBuffer.clear();
             this.readBuffer.clear();
             this.connectionMetadata.channel.read(this.readBuffer, null, this);
+
+            SSE_CLIENTS.add(this);
         }
 
         public void sendToSseClient(long numTIDsCommitted){
-            String eventData = "data: " + numTIDsCommitted + "\n\n";
-            this.writeBuffer.put(eventData.getBytes(StandardCharsets.UTF_8));
-            this.writeBuffer.flip();
+            // record the newest value if no write is in flight, start one
+            this.pendingSse.set(numTIDsCommitted);
+            if (this.sseWriting.compareAndSet(false, true)) {
+                this.writeNextSse();
+            }
+        }
+
+        // Runs while holding the single-flight flag with sseWriting == true, called either
+        // from sendToSseClient (coordinator thread) or SseWriteCH.completed (IO thread).
+        // Sends the latest pending value, or releases the flag when nothing is pending.
+        private void writeNextSse(){
+            long value = this.pendingSse.getAndSet(-1L);
+            if (value < 0) {
+                this.sseWriting.set(false);
+                // a value may have arrived between the getAndSet and the release above;
+                // re-acquire so it is not lost
+                if (this.pendingSse.get() >= 0 && this.sseWriting.compareAndSet(false, true)) {
+                    this.writeNextSse();
+                }
+                return;
+            }
             try {
-                this.connectionMetadata.channel.write(this.writeBuffer, null, this.sseWriteCH);
+                byte[] bytes = ("data: " + value + "\n\n").getBytes(StandardCharsets.UTF_8);
+                this.sseBuffer.clear();
+                this.sseBuffer.put(bytes);
+                this.sseBuffer.flip();
+                this.connectionMetadata.channel.write(this.sseBuffer, null, this.sseWriteCH);
             } catch (Exception e) {
-                LOGGER.log(ERROR, "Error caught: "+e.getMessage());
+                LOGGER.log(ERROR, "SSE send failed: " + e.getMessage());
                 SSE_CLIENTS.remove(this);
-                this.writeBuffer.clear();
+                this.sseWriting.set(false);
             }
         }
 
@@ -410,16 +445,17 @@ public abstract class ModbHttpServer extends StoppableRunnable {
             }
             @Override
             public void completed(Integer result, Void ignored) {
-                if(writeBuffer.hasRemaining()) {
-                    connectionMetadata.channel.write(writeBuffer, null, this);
+                if (r.sseBuffer.hasRemaining()) {
+                    r.connectionMetadata.channel.write(r.sseBuffer, null, this);
                     return;
                 }
-                writeBuffer.clear();
+                // message fully written send the next coalesced value or release the flag
+                r.writeNextSse();
             }
             @Override
             public void failed(Throwable exc, Void ignored) {
-                writeBuffer.clear();
                 SSE_CLIENTS.remove(this.r);
+                r.sseWriting.set(false);
             }
         }
 

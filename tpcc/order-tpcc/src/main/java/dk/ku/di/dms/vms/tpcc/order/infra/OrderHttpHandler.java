@@ -104,6 +104,18 @@ public final class OrderHttpHandler extends DefaultHttpHandler {
                 this.transactionManager.beginTransaction(0, 0, 0, true);
                 return this.historyRepository.lookupByKey(id);
             }
+            case "size" -> {
+                long startNano = System.nanoTime();
+                this.transactionManager.beginTransaction(0, 0, 0, true);
+                List<OrderLine> rows = this.orderLineRepository.getAll();
+                long size = rows.size();
+                double latencyMs = (System.nanoTime() - startNano) / 1_000_000.0;
+                LOGGER.log(INFO, String.format(
+                        ">>> [ORDER SIZE] Rows: %d | Latency: %.2f ms", size, latencyMs));
+                return "{\"size\":" + size
+                        + ",\"latency_ms\":" + String.format("%.2f", latencyMs)
+                        + ",\"table\":\"order_line\"}";
+            }
             case null, default -> {
                 LOGGER.log(System.Logger.Level.WARNING, "URI not recognized: "+uri);
                 return "";

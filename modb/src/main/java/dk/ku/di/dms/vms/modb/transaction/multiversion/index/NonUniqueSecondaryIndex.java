@@ -69,7 +69,9 @@ public final class NonUniqueSecondaryIndex implements IMultiVersionIndex {
             if(entry.getValue().t2() != WriteType.INSERT) continue;
             IKey secKey = KeyUtils.buildRecordKey( this.underlyingIndex.columns(), entry.getValue().t1() );
             Set<IKey> set = this.keyMap.get(secKey);
-            set.remove(entry.getKey());
+            if (set != null) {
+                set.remove(entry.getKey());
+            }
         }
         this.clearAndReturnWriteSetToBuffer(txWriteSet);
     }
@@ -118,7 +120,9 @@ public final class NonUniqueSecondaryIndex implements IMultiVersionIndex {
             if(entry.getValue().t2() != WriteType.DELETE) continue;
             IKey secKey = KeyUtils.buildRecordKey( this.underlyingIndex.columns(), entry.getValue().t1() );
             Set<IKey> set = this.keyMap.get(secKey);
-            set.remove(entry.getKey());
+            if (set != null) {
+                set.remove(entry.getKey());
+            }
         }
         this.clearAndReturnWriteSetToBuffer(writeSet);
     }

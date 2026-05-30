@@ -1,0 +1,147 @@
+========================================================
+  SDU CLOUD — EXPERIMENT STARTUP COMMANDS
+========================================================
+
+SETUP:
+- VM-B = VMSes machine (warehouse, inventory, order, replica, calcite)
+- VM-A = proxy/coordinator machine
+- Replace <vm-b-ip> with the actual IP of VM-B (run: hostname -I)
+
+========================================================
+  STEP 1 — GET CODE ON BOTH VMs (run on each VM terminal)
+========================================================
+
+cd /work
+git clone https://github.com/<your-username>/vMODB.git
+
+# If private repo with token:
+# git clone https://<token>@github.com/<your-username>/vMODB.git
+
+cd vMODB
+mvn clean package -DskipTests
+
+========================================================
+  STEP 2 — GET VM-B IP (run on VM-B terminal)
+========================================================
+
+hostname -I
+
+# Write down this IP — you need it for step 3
+
+========================================================
+  STEP 3 — UPDATE app.properties ON VM-A
+========================================================
+
+# Run this on VM-A terminal — replace <vm-b-ip> with actual IP
+
+nano /work/vMODB/tpcc/proxy-tpcc/src/main/resources/app.properties
+
+# Change these lines inside the file:
+# warehouse_host=<vm-b-ip>
+# inventory_host=<vm-b-ip>
+# order_host=<vm-b-ip>
+# replica_host=<vm-b-ip>
+
+========================================================
+  STEP 4 — VM-B TERMINAL 1 — WAREHOUSE
+========================================================
+
+cd /work/vMODB/tpcc/warehouse-tpcc
+java -Xms2G -Xmx4G -XX:MaxDirectMemorySize=8G --enable-preview \
+  --add-exports java.base/jdk.internal.misc=ALL-UNNAMED \
+  --add-opens java.base/jdk.internal.util=ALL-UNNAMED \
+  -jar target/warehouse-tpcc-1.0-SNAPSHOT-jar-with-dependencies.jar
+
+========================================================
+  STEP 5 — VM-B TERMINAL 2 — INVENTORY
+========================================================
+
+cd /work/vMODB/tpcc/inventory-tpcc
+java -Xms2G -Xmx4G -XX:MaxDirectMemorySize=8G --enable-preview \
+  --add-exports java.base/jdk.internal.misc=ALL-UNNAMED \
+  --add-opens java.base/jdk.internal.util=ALL-UNNAMED \
+  -jar target/inventory-tpcc-1.0-SNAPSHOT-jar-with-dependencies.jar
+
+========================================================
+  STEP 6 — VM-B TERMINAL 3 — ORDER
+========================================================
+
+cd /work/vMODB/tpcc/order-tpcc
+java -Xms2G -Xmx4G -XX:MaxDirectMemorySize=8G --enable-preview \
+  --add-exports java.base/jdk.internal.misc=ALL-UNNAMED \
+  --add-opens java.base/jdk.internal.util=ALL-UNNAMED \
+  -jar target/order-tpcc-1.0-SNAPSHOT-jar-with-dependencies.jar
+
+========================================================
+  STEP 7 — VM-B TERMINAL 4 — REPLICA (only if use_replica=true)
+========================================================
+
+cd /work/vMODB/tpcc/replica-tpcc
+java -Xms2G -Xmx4G -XX:MaxDirectMemorySize=8G --enable-preview \
+  --add-exports java.base/jdk.internal.misc=ALL-UNNAMED \
+  --add-opens java.base/jdk.internal.util=ALL-UNNAMED \
+  -jar target/replica-tpcc-1.0-SNAPSHOT-jar-with-dependencies.jar
+
+========================================================
+  STEP 8 — VM-B TERMINAL 5 — CALCITE (gateway)
+========================================================
+
+cd /work/vMODB/calcite
+mvn exec:exec -Dexec.executable="java" \
+  -Dexec.args="--enable-preview \
+  --add-exports java.base/jdk.internal.misc=ALL-UNNAMED \
+  --add-opens java.base/jdk.internal.util=ALL-UNNAMED \
+  -classpath %classpath dk.ku.di.dms.vms.calcite.Main"
+
+========================================================
+  STEP 9 — VM-A TERMINAL 1 — PROXY (start this last)
+========================================================
+
+cd /work/vMODB/tpcc/proxy-tpcc
+java --enable-preview \
+  --add-exports java.base/jdk.internal.misc=ALL-UNNAMED \
+  --add-opens java.base/jdk.internal.util=ALL-UNNAMED \
+  -jar target/proxy-tpcc-1.0-SNAPSHOT.jar
+
+# Then select:
+# 1 - Distributed
+# 1 - Populate VMS states
+# 7 - HATtrick throughput frontier experiment
+
+========================================================
+  STARTUP ORDER (IMPORTANT — follow this sequence)
+========================================================
+
+1. warehouse   (VM-B terminal 1)
+2. inventory   (VM-B terminal 2)
+3. order       (VM-B terminal 3)
+4. replica     (VM-B terminal 4) — skip if use_replica=false
+5. calcite     (VM-B terminal 5)
+6. proxy       (VM-A terminal 1) — always last
+
+========================================================
+  EXPERIMENT I — use_replica=false (live order VMS)
+========================================================
+
+# Skip replica (step 7)
+# In proxy select: use_replica=false
+# Run grid with query: chq6
+
+========================================================
+  EXPERIMENT II — use_replica=true (replica VMS)
+========================================================
+
+# Start replica (step 7)
+# In proxy select: use_replica=true
+# Run grid with query: chq6
+
+========================================================
+  app.properties (proxy) — key settings
+========================================================
+
+num_ware=1
+new_order=50
+payment=50
+batch_window_ms=250
+num_max_transactions_batch=5000
+num_transaction_workers=1

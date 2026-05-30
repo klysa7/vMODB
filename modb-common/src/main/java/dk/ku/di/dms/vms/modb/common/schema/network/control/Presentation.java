@@ -24,6 +24,7 @@ public final class Presentation {
     public static final byte NO = 1;
     public static final byte SERVER_TYPE = 10;
     public static final byte VMS_TYPE = 11;
+    public static final byte GATEWAY_TYPE = 12;
 
     //                                                      0 server 1 vms  if leader already have metadata
     //                                     message type | node type [0,1] | metadata bit | lastOffset | port | size host

@@ -26,6 +26,8 @@ import static java.lang.System.Logger.Level.WARNING;
 
 public final class ExperimentUtils {
 
+    private static final boolean SLEEP_MODE = true;
+
     private static final System.Logger LOGGER = System.getLogger(ExperimentUtils.class.getName());
 
     private static boolean CONSUMER_REGISTERED = false;
@@ -199,6 +201,11 @@ public final class ExperimentUtils {
 
     private static Function<Object, Long> tpccInputBuilder(final Coordinator coordinator) {
         return input -> {
+            if (SLEEP_MODE) {
+                try { Thread.sleep(1000); }
+                catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            }
+
             TransactionInput.Event eventPayload;
             String txIdentifier;
             if(input instanceof NewOrderWareIn newOrderInput){
@@ -218,50 +225,78 @@ public final class ExperimentUtils {
     }
 
     public static Coordinator loadCoordinator(Properties properties) {
-        Map<String, TransactionDAG> transactionMap = new HashMap<>();
-        // new order
-        TransactionDAG newOrderDag = TransactionBootstrap.name("new_order")
-                .input("a", "warehouse", "new-order-ware-in")
-                .internal("b", "inventory", "new-order-ware-out", "a")
-                .terminal("c", "order", "b")
-                .build();
-        transactionMap.put(newOrderDag.name, newOrderDag);
+        boolean useReplica = Boolean.parseBoolean(
+                properties.getProperty("use_replica", "false"));
 
-        // payment
+        System.out.println("ExperimentUtils: use_replica=" + useReplica);
+
+        Map<String, TransactionDAG> transactionMap = new HashMap<>();
+
+        if (useReplica) {
+            TransactionDAG newOrderDag = TransactionBootstrap.name("new_order")
+                    .input("a", "warehouse", "new-order-ware-in")
+                    .internal("b", "inventory", "new-order-ware-out", "a")
+                    .internal("c", "order", "new-order-inv-out", "b")
+                    .terminal("d", "replica", "c")
+                    .build();
+            transactionMap.put(newOrderDag.name, newOrderDag);
+        } else {
+            TransactionDAG newOrderDag = TransactionBootstrap.name("new_order")
+                    .input("a", "warehouse", "new-order-ware-in")
+                    .internal("b", "inventory", "new-order-ware-out", "a")
+                    .terminal("c", "order", "b")
+                    .build();
+            transactionMap.put(newOrderDag.name, newOrderDag);
+        }
+
+        // payment and order_status: unchanged in both configs
         TransactionDAG paymentDag = TransactionBootstrap.name("payment")
                 .input("a", "warehouse", "payment-in")
                 .terminal("b", "order", "a")
                 .build();
         transactionMap.put(paymentDag.name, paymentDag);
 
-        // order status
         TransactionDAG orderStatusDag = TransactionBootstrap.name("order_status")
                 .input("a", "warehouse", "order-status-in")
                 .terminal("b", "order", "a")
                 .build();
         transactionMap.put(orderStatusDag.name, orderStatusDag);
 
-        Map<String, IdentifiableNode> starterVMSs = getVmsMap(properties);
-        Coordinator coordinator = Coordinator.build(properties, starterVMSs, transactionMap, (ignored1) -> IHttpHandler.DEFAULT);
+        Map<String, IdentifiableNode> starterVMSs = getVmsMap(properties, useReplica);
+        Coordinator coordinator = Coordinator.build(
+                properties, starterVMSs, transactionMap,
+                (ignored1) -> IHttpHandler.DEFAULT);
         Thread coordinatorThread = new Thread(coordinator);
         coordinatorThread.start();
         return coordinator;
     }
 
-    private static Map<String, IdentifiableNode> getVmsMap(Properties properties) {
+    private static Map<String, IdentifiableNode> getVmsMap(Properties properties,
+                                                           boolean useReplica) {
         String warehouseHost = properties.getProperty("warehouse_host");
         String inventoryHost = properties.getProperty("inventory_host");
-        String orderHost = properties.getProperty("order_host");
-        if(warehouseHost == null) throw new RuntimeException("Warehouse host is null");
-        if(inventoryHost == null) throw new RuntimeException("Inventory host is null");
-        if(orderHost == null) throw new RuntimeException("Order host is null");
+        String orderHost     = properties.getProperty("order_host");
+
+        if (warehouseHost == null) throw new RuntimeException("Warehouse host is null");
+        if (inventoryHost == null) throw new RuntimeException("Inventory host is null");
+        if (orderHost == null)     throw new RuntimeException("Order host is null");
+
         IdentifiableNode warehouseAddress = new IdentifiableNode("warehouse", warehouseHost, 8001);
         IdentifiableNode inventoryAddress = new IdentifiableNode("inventory", inventoryHost, 8002);
-        IdentifiableNode orderAddress = new IdentifiableNode("order", orderHost, 8003);
+        IdentifiableNode orderAddress     = new IdentifiableNode("order",     orderHost,     8003);
+
         Map<String, IdentifiableNode> starterVMSs = new HashMap<>();
-        starterVMSs.putIfAbsent(warehouseAddress.identifier, warehouseAddress);
-        starterVMSs.putIfAbsent(inventoryAddress.identifier, inventoryAddress);
-        starterVMSs.putIfAbsent(orderAddress.identifier, orderAddress);
+        starterVMSs.put(warehouseAddress.identifier, warehouseAddress);
+        starterVMSs.put(inventoryAddress.identifier, inventoryAddress);
+        starterVMSs.put(orderAddress.identifier,     orderAddress);
+
+        if (useReplica) {
+            String replicaHost = properties.getProperty("replica_host", "localhost");
+            IdentifiableNode replicaAddress =
+                    new IdentifiableNode("replica", replicaHost, 8004);
+            starterVMSs.put(replicaAddress.identifier, replicaAddress);
+        }
+
         return starterVMSs;
     }
 
